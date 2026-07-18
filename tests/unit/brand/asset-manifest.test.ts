@@ -43,6 +43,10 @@ interface BrandManifest {
 const manifestPath = resolve(import.meta.dirname, "../../../public/brand-v2/manifest.json");
 const brandRoot = dirname(manifestPath);
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as BrandManifest;
+const themeTokens = readFileSync(
+  resolve(import.meta.dirname, "../../../src/design-system/tokens/ti-scale.css"),
+  "utf8",
+);
 
 function sha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -86,6 +90,16 @@ describe("Ti-Scale production asset provenance", () => {
       expect(asset.source.path).not.toContain("rejected");
       expect(asset.sourcePrompt.toLocaleLowerCase("en-US")).not.toContain("acid-lime");
     }
+  });
+
+  test("keeps semantic state colors in the titanium and cold-metal palette", () => {
+    expect(themeTokens).toContain("--os-success: #46525e;");
+    expect(themeTokens).toContain("--os-graph-selection: #34495e;");
+    expect(themeTokens).toContain("--os-graph-node-evidence: #626c76;");
+    expect(themeTokens).toContain("--os-graph-node-agent: #46515c;");
+    expect(themeTokens).not.toContain("#315f7d");
+    expect(themeTokens).not.toContain("#506f7d");
+    expect(themeTokens).not.toContain("#4b6673");
   });
 
   test("integrity-binds the Higgsfield titanium hero and all responsive variants", () => {

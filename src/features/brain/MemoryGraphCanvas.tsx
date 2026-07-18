@@ -24,7 +24,7 @@ function canvasTheme(element: HTMLCanvasElement) {
     gridStrong: color("--os-graph-grid-strong", "rgba(74, 80, 86, 0.13)"),
     edge: color("--os-graph-edge", "rgba(52, 58, 64, 0.32)"),
     edgeConnected: color("--os-graph-edge-connected", "rgba(52, 58, 64, 0.70)"),
-    selection: color("--os-graph-selection", "#1d4f6e"),
+    selection: color("--os-graph-selection", "#34495e"),
     label: color("--os-graph-label", "#292d31"),
     nodeBorder: color("--os-graph-node-border", "rgba(255, 254, 250, 0.98)"),
     accent: color("--os-accent", "#343a40"),

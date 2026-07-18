@@ -22,6 +22,8 @@ test.describe(`${TEST_ID} production rendering contract`, () => {
         bodyBackground: getComputedStyle(document.body).backgroundColor,
         colorScheme: applicationStyle.colorScheme,
         canvas: applicationStyle.getPropertyValue("--os-canvas").trim(),
+        info: applicationStyle.getPropertyValue("--os-info").trim(),
+        success: applicationStyle.getPropertyValue("--os-success").trim(),
         surface: getComputedStyle(card).backgroundColor,
         topbar: getComputedStyle(topbar).backgroundColor,
         themeMeta: document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.content,
@@ -36,6 +38,8 @@ test.describe(`${TEST_ID} production rendering contract`, () => {
       bodyBackground: "rgb(244, 242, 238)",
       colorScheme: "light",
       canvas: "#f4f2ee",
+      info: "#214f80",
+      success: "#46525e",
       surface: "rgb(255, 254, 250)",
       topbar: "rgba(255, 254, 250, 0.97)",
       themeMeta: "#fffefa",
@@ -70,7 +74,7 @@ test.describe(`${TEST_ID} production rendering contract`, () => {
     expect(theme).toEqual({
       canvas: "#f8f7f3",
       grid: "rgba(74, 80, 86, 0.07)",
-      selection: "#1d4f6e",
+      selection: "#34495e",
     });
 
     await testInfo.attach(`second-brain-light-${testInfo.project.name}.png`, {
