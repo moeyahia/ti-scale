@@ -12,6 +12,8 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
   const core640Webp = assetUrl("brand-v2/optimized/ti-scale-higgsfield-core-640.webp");
   const core1024Webp = assetUrl("brand-v2/optimized/ti-scale-higgsfield-core-1024.webp");
   const core1344Webp = assetUrl("brand-v2/optimized/ti-scale-higgsfield-core-1344.webp");
+  const metalGradientId = `ti-adaptive-metal-${variant}`;
+  const darkGradientId = `ti-adaptive-graphite-${variant}`;
 
   useEffect(() => () => {
     if (animationFrameRef.current !== null) {
@@ -20,7 +22,10 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
   }, []);
 
   const setPointerDepth = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (typeof window === "undefined" || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (
+      typeof window === "undefined" || document.visibilityState === "hidden" || event.pointerType === "touch" ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) return;
     const root = rootRef.current;
     if (!root) return;
     const bounds = root.getBoundingClientRect();
@@ -34,6 +39,10 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
       root.style.setProperty("--ti-rotate-y", `${(x * 4.2).toFixed(2)}deg`);
       root.style.setProperty("--ti-shift-x", `${(x * 8).toFixed(2)}px`);
       root.style.setProperty("--ti-shift-y", `${(y * 6).toFixed(2)}px`);
+      root.style.setProperty("--ti-depth-x", `${(-x * 13).toFixed(2)}px`);
+      root.style.setProperty("--ti-depth-y", `${(-y * 10).toFixed(2)}px`);
+      root.style.setProperty("--ti-light-x", `${(50 + x * 24).toFixed(2)}%`);
+      root.style.setProperty("--ti-light-y", `${(42 + y * 18).toFixed(2)}%`);
       animationFrameRef.current = null;
     });
   };
@@ -49,6 +58,10 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
       root.style.setProperty("--ti-rotate-y", "0deg");
       root.style.setProperty("--ti-shift-x", "0px");
       root.style.setProperty("--ti-shift-y", "0px");
+      root.style.setProperty("--ti-depth-x", "0px");
+      root.style.setProperty("--ti-depth-y", "0px");
+      root.style.setProperty("--ti-light-x", "50%");
+      root.style.setProperty("--ti-light-y", "42%");
       animationFrameRef.current = null;
     });
   };
@@ -62,11 +75,25 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
       onPointerLeave={resetPointerDepth}
       onPointerCancel={resetPointerDepth}
     >
-      <span className="ti-scale-core__field" />
-      <span className="ti-scale-core__guide ti-scale-core__guide--horizontal" />
-      <span className="ti-scale-core__guide ti-scale-core__guide--vertical" />
-      <span className="ti-scale-core__orbit ti-scale-core__orbit--outer" />
-      <span className="ti-scale-core__orbit ti-scale-core__orbit--inner" />
+      <span className="ti-scale-core__wake" />
+      <svg className="ti-scale-core__architecture" viewBox="0 0 800 620" preserveAspectRatio="xMidYMid meet" focusable="false">
+        <defs>
+          <linearGradient id={metalGradientId} x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="#fffefa" stopOpacity="0.12" />
+            <stop offset="0.4" stopColor="#aeb4b8" stopOpacity="0.42" />
+            <stop offset="0.72" stopColor="#6c737a" stopOpacity="0.2" />
+            <stop offset="1" stopColor="#fffefa" stopOpacity="0.04" />
+          </linearGradient>
+          <linearGradient id={darkGradientId} x1="1" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor="#111315" stopOpacity="0.34" />
+            <stop offset="0.52" stopColor="#596168" stopOpacity="0.13" />
+            <stop offset="1" stopColor="#8d795b" stopOpacity="0.08" />
+          </linearGradient>
+        </defs>
+        <path className="ti-scale-core__plate ti-scale-core__plate--far" fill={`url(#${metalGradientId})`} d="M78 354 292 66l126 75-174 392-196-42Z" />
+        <path className="ti-scale-core__plate ti-scale-core__plate--upper" fill={`url(#${darkGradientId})`} d="m385 72 338 155-91 139-278-206Z" />
+        <path className="ti-scale-core__plate ti-scale-core__plate--lower" fill={`url(#${metalGradientId})`} d="m255 418 347-116 137 195-359 73Z" />
+      </svg>
       <picture className="ti-scale-core__media">
         <source
           type="image/avif"
@@ -88,10 +115,7 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
           draggable="false"
         />
       </picture>
-      <span className="ti-scale-core__node ti-scale-core__node--north" />
-      <span className="ti-scale-core__node ti-scale-core__node--east" />
-      <span className="ti-scale-core__node ti-scale-core__node--south" />
-      <span className="ti-scale-core__node ti-scale-core__node--west" />
+      <span className="ti-scale-core__sheen" />
     </div>
   );
 }

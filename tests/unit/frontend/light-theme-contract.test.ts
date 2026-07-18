@@ -47,6 +47,18 @@ describe("Ti-Scale editorial titanium theme contract", () => {
     }
   });
 
+  test("uses titanium neutrals rather than green as the product identity", () => {
+    expect(token("os-accent")).toBe("#343a40");
+    expect(token("os-accent-bright")).toBe("#a99576");
+    expect(token("os-metal")).toBe("#6c737a");
+    expect(token("os-success")).toBe("#46525e");
+
+    const brandContract = [tokenCss, featureCss].join("\n").toLowerCase();
+    for (const retiredGreen of ["acid-lime", "chartreuse", "neon-green", "#b8f341", "#526f00"]) {
+      expect(brandContract).not.toContain(retiredGreen);
+    }
+  });
+
   test("keeps the standalone V2 style graph isolated from legacy UI and global CSS", () => {
     const standaloneSources = [appComposition, applicationEntry, tokenCss, featureCss].join("\n").toLowerCase();
     for (const forbiddenImport of ["../webapp", "legacy/index.css", 'import "./index.css"']) {
@@ -83,7 +95,13 @@ describe("Ti-Scale editorial titanium theme contract", () => {
     expect(tokenCss).toContain("--os-metal: #6c737a;");
     expect(tokenCss).toContain("--os-metal-warm: #8d795b;");
     expect(tokenCss).toContain("--os-graph-grid:");
-    expect(tokenCss).toContain("background-size: 64px 64px, 64px 64px");
+    const shellBlock = tokenCss.match(/\.ti-scale\s*\{(?<body>[\s\S]*?)\n\}/u)?.groups?.body;
+    expect(shellBlock).toContain("background: var(--os-canvas);");
+    expect(shellBlock).not.toContain("background-size:");
+    expect(shellBlock).not.toContain("linear-gradient(var(--os-graph-grid)");
+    const authBlock = featureCss.match(/\.os-auth-shell\s*\{(?<body>[\s\S]*?)\n\}/u)?.groups?.body;
+    expect(authBlock).toContain("background: var(--os-canvas);");
+    expect(authBlock).not.toContain("background-size:");
     expect(graphCanvas).toContain('color("--os-graph-canvas"');
     expect(graphCanvas).toContain('mission: "--os-graph-node-mission"');
     expect(tokenCss).toContain("@keyframes os-assembly-in");

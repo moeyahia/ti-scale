@@ -38,7 +38,10 @@ function CommandCenterHero({ data }: { data?: OverviewSnapshot }) {
     <section className="ti-command-hero" aria-labelledby="ti-command-center-title">
       <div className="ti-command-hero__copy">
         <p className="os-eyebrow">Ti-Scale / live system</p>
-        <h1 id="ti-command-center-title">Command<br />Center</h1>
+        <h1 id="ti-command-center-title">
+          <span className="ti-command-hero__title-line"><span>Command</span></span>
+          <span className="ti-command-hero__title-line"><span>Center</span></span>
+        </h1>
         <p>Operational truth for authorized missions, specialist coordination, evidence, recovery, and the next decision that matters.</p>
         <div className="ti-command-hero__state" role="status">
           <span className={`ti-command-hero__signal${data ? " is-connected" : ""}`} aria-hidden="true" />
@@ -51,19 +54,19 @@ function CommandCenterHero({ data }: { data?: OverviewSnapshot }) {
       <dl className="ti-command-hero__telemetry" aria-label="Live system telemetry">
         <div>
           <dt>Readiness</dt>
-          <dd><span className="ti-command-hero__value">{readiness}</span><small>{data ? data.readiness.status : "Live data pending"}</small></dd>
+          <dd><span key={readiness} className="ti-command-hero__value">{readiness}</span><small>{data ? data.readiness.status : "Live data pending"}</small></dd>
         </div>
         <div>
           <dt>Active missions</dt>
-          <dd><span className="ti-command-hero__value">{data?.summary.activeMissions ?? "—"}</span><small>{data ? `${data.summary.activeAgents} agents assigned` : "Live data pending"}</small></dd>
+          <dd><span key={data?.summary.activeMissions ?? "pending"} className="ti-command-hero__value">{data?.summary.activeMissions ?? "—"}</span><small>{data ? `${data.summary.activeAgents} agents assigned` : "Live data pending"}</small></dd>
         </div>
         <div>
           <dt>Brain memory</dt>
-          <dd><span className="ti-command-hero__value">{data?.brain.confirmed ?? "—"}</span><small>{data ? `${data.brain.candidates} candidates to review` : "Live data pending"}</small></dd>
+          <dd><span key={data?.brain.confirmed ?? "pending"} className="ti-command-hero__value">{data?.brain.confirmed ?? "—"}</span><small>{data ? `${data.brain.candidates} candidates to review` : "Live data pending"}</small></dd>
         </div>
         <div>
           <dt>Last event</dt>
-          <dd><span className="ti-command-hero__value ti-command-hero__event-time">{data ? formatDate(data.summary.lastEventAt) : "—"}</span><small>{data ? "Canonical event stream" : "Live data pending"}</small></dd>
+          <dd><span key={data?.summary.lastEventAt ?? "pending"} className="ti-command-hero__value ti-command-hero__event-time">{data ? formatDate(data.summary.lastEventAt) : "—"}</span><small>{data ? "Canonical event stream" : "Live data pending"}</small></dd>
         </div>
       </dl>
     </section>
@@ -125,10 +128,10 @@ function Dashboard({ data }: { data: OverviewSnapshot }) {
       <JourneyActions data={data} />
 
       <section className="os-metric-row" aria-label="Current operations summary">
-        <div><span>Active missions</span><strong>{data.summary.activeMissions}</strong></div>
-        <div><span>Active agents</span><strong>{data.summary.activeAgents}</strong></div>
-        <div><span>Pending decisions</span><strong>{data.summary.pendingDecisions}</strong></div>
-        <div><span>Recovering runs</span><strong>{data.summary.recoveringRuns}</strong></div>
+        <div><span>Active missions</span><strong key={data.summary.activeMissions}>{data.summary.activeMissions}</strong></div>
+        <div><span>Active agents</span><strong key={data.summary.activeAgents}>{data.summary.activeAgents}</strong></div>
+        <div><span>Pending decisions</span><strong key={data.summary.pendingDecisions}>{data.summary.pendingDecisions}</strong></div>
+        <div><span>Recovering runs</span><strong key={data.summary.recoveringRuns}>{data.summary.recoveringRuns}</strong></div>
       </section>
 
       <div className="os-dashboard-grid">

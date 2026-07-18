@@ -709,11 +709,7 @@
   padding: var(--os-space-6);
   color: var(--os-text);
   font-family: var(--os-font-sans);
-  background:
-    linear-gradient(rgba(74,80,86,.07) 1px,transparent 1px),
-    linear-gradient(90deg,rgba(74,80,86,.07) 1px,transparent 1px),
-    var(--os-canvas);
-  background-size:64px 64px;
+  background: var(--os-canvas);
 }
 
 .os-auth-panel {

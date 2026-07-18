@@ -16,6 +16,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   const auth = useAuth();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [motionState, setMotionState] = useState<"active" | "paused">(() => (
+    typeof document !== "undefined" && document.visibilityState === "hidden" ? "paused" : "active"
+  ));
   const streamLabel = stream.state === "connected"
     ? "Live updates connected"
     : stream.state === "fallback"
@@ -45,8 +48,16 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      setMotionState(document.visibilityState === "hidden" ? "paused" : "active");
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+
   return (
-    <div className="ti-scale">
+    <div className="ti-scale" data-motion-state={motionState}>
       <a className="os-skip-link" href="#ti-scale-content">Skip to content</a>
       <header className="os-topbar">
         <button className="os-icon-button os-menu-button" type="button" aria-label="Open navigation" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(true)}>
