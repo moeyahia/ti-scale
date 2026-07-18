@@ -1,0 +1,105 @@
+# Release gates
+
+## Current release status
+
+Ti-Scale is not release-eligible yet. The interaction manifest records known coverage gaps, the default server has no attached production execution adapter, full browser and soak evidence is incomplete, and no human release approval has been recorded.
+
+The local release attestation is a digest and provenance receipt. It is intentionally not a production approval and currently reports an ineligible result.
+
+## Gate 1: source and build integrity
+
+- Clean, pinned Git revision
+- Reproducible dependency installation
+- Strict TypeScript passes
+- Production build passes
+- Source and build artifact manifests recorded
+- Identity asset hashes recorded
+- No secrets, databases, logs, private artifacts, or vault notes in the release
+- No focused, skipped, quarantined, or retry-masked release tests
+
+## Gate 2: runtime truth
+
+- Database integrity and foreign keys pass
+- All required migrations pass from an empty database and a supported prior schema
+- Provider, specialist, tool, and policy manifests are fresh and typed
+- Autonomous enforcement and Guided exact-step enforcement are proven
+- Cancellation, child cleanup, leases, heartbeats, checkpoints, restart, and resume pass
+- Every unavailable dependency produces a specific degraded or blocked state
+- No production path displays fixture or simulated operational data
+
+## Gate 3: interaction completeness
+
+- Every interactive element exists in `tests/interaction-manifest.json`
+- Every manifest option is activated in every material state
+- Rendered-element audit has no missing or stale entries
+- Every generated internal URL resolves
+- Back, forward, refresh, copied links, offline, and reconnect states pass
+- All error states explain the cause and corrective action
+- Keyboard and pointer behavior produce the same durable result
+
+The manifest's `knownGaps` list must be empty.
+
+## Gate 4: browser and visual quality
+
+- Chromium, Firefox, WebKit, enterprise Chromium, Android-style Chromium, iPhone-style WebKit, and tablet projects pass
+- Supported viewport and 200% zoom projects pass
+- No uncaught browser errors, unhandled rejections, unexpected console errors, or undeclared network failures
+- Visual baselines approved for every primary route and material state
+- No essential text clipping, overlap, ambiguous truncation, or unintended horizontal overflow
+- Reduced motion remains fully usable
+- No critical or serious accessibility violations
+
+## Gate 5: data, evidence, and memory
+
+- Raw logs remain separate from evidence
+- Finding verification cannot bypass evidence policy silently
+- Evidence routes and artifacts pass direct navigation and refresh
+- Structured failure diagnosis exists for every blocked or failed object
+- Context Packs are recorded at required lifecycle hooks
+- Scope-isolation and cross-engagement leakage tests pass
+- Forgetting removes content and derived retrieval state
+- Vault round trip, atomic writes, import, export, conflict handling, quarantine, repair, reindex, and portable export pass
+- Backup, restore, and reconciliation are rehearsed
+
+## Gate 6: research safety
+
+- Provider exposure is sanitized and receipted
+- Prompt-injection tests pass
+- Candidates cannot modify authorization, policy, evaluator, holdout, or deployment controls
+- Metrics are recomputed locally
+- Integrity receipts bind strategy, benchmark, evaluator, environment, events, evidence, and metrics
+- Promotion stages cannot be skipped
+- Rollback is proven
+- No live mission self-modifies its active strategy
+
+## Gate 7: performance and reliability
+
+- Performance budgets measured on supported desktop and mobile hardware
+- Large event, evidence, log, and graph fixtures remain usable
+- Event replay and reconnect storm tests pass
+- No sustained memory leak in long sessions
+- Cancellation leaves no orphaned active work
+- Minimum 72-hour automated soak passes
+- Preview acceptance period completes without an unresolved release-scope defect
+
+## Gate 8: deployment approval
+
+- Deployment and rollback procedures are documented and rehearsed
+- Static, server, database, artifact, strategy, and vault rollback scopes are understood
+- Monitoring and on-call ownership are assigned
+- Known release-scope defect list is empty
+- Test evidence is archived
+- Explicit human approval is recorded
+
+Only after every gate passes may a build be described as production-ready.
+
+## Suggested evidence commands
+
+```bash
+bun run check
+bun run test:e2e:release-local
+bun run release:attest
+bun run db:verify --db /var/lib/ti-scale/data/ti-scale.sqlite
+```
+
+Archive the command output together with browser reports, visual approvals, accessibility results, performance results, soak receipts, backup checksums, vault reconciliation, and the signed release decision.

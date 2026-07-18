@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ti-scale.local/schemas/ti-scale-interaction-manifest.json",
+  "title": "Ti-Scale V2 interaction manifest",
+  "type": "object",
+  "required": ["schemaVersion", "application", "namespace", "scope", "entries", "knownGaps"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "application": { "const": "TI-SCALE // COMMAND INTELLIGENCE" },
+    "namespace": { "const": "ti-scale" },
+    "scope": { "type": "string", "minLength": 1 },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "route", "surface", "requiredState", "controlId", "accessible", "controlType", "options", "keyboardAction", "pointerAction", "expectedStateTransition", "expectedApiOrEventSideEffect", "states", "classification", "screenshotsRequired", "browsers", "viewports", "testIds"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$" },
+          "route": { "type": "string", "pattern": "^/" },
+          "surface": { "type": "string", "minLength": 1 },
+          "requiredState": { "type": "string", "minLength": 1 },
+          "controlId": { "type": "string", "minLength": 1 },
+          "accessible": {
+            "type": "object",
+            "required": ["name", "match"],
+            "oneOf": [
+              { "required": ["role"] },
+              { "required": ["locator"] }
+            ],
+            "properties": {
+              "role": { "enum": ["application", "button", "link", "checkbox", "radio", "combobox", "listbox", "textbox", "option", "tab", "menuitem", "slider"] },
+              "locator": { "enum": ["native-date-input", "native-summary"] },
+              "name": { "type": "string", "minLength": 1 },
+              "match": { "enum": ["exact", "regex"] }
+            },
+            "additionalProperties": false
+          },
+          "controlType": { "type": "string", "minLength": 1 },
+          "options": { "type": "array", "items": { "type": "string" } },
+          "keyboardAction": { "type": "string", "minLength": 1 },
+          "pointerAction": { "type": "string", "minLength": 1 },
+          "expectedStateTransition": { "type": "string", "minLength": 1 },
+          "expectedApiOrEventSideEffect": { "type": ["string", "null"] },
+          "states": {
+            "type": "object",
+            "required": ["loading", "disabled", "error"],
+            "properties": {
+              "loading": { "type": "string", "minLength": 1 },
+              "disabled": { "type": "string", "minLength": 1 },
+              "error": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          },
+          "classification": { "enum": ["read-only", "reversible", "destructive"] },
+          "screenshotsRequired": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^visual\\.[a-z0-9][a-z0-9.-]+$" }
+          },
+          "browsers": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "viewports": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "testIds": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^e2e\\." } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "knownGaps": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  },
+  "additionalProperties": false
+}

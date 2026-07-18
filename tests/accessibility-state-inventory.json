@@ -1,0 +1,208 @@
+{
+  "schemaVersion": 1,
+  "wcagTags": [
+    "wcag2a",
+    "wcag2aa",
+    "wcag21a",
+    "wcag21aa",
+    "wcag22aa"
+  ],
+  "states": [
+    {
+      "id": "overview",
+      "route": "/",
+      "surface": "Command Center",
+      "kind": "primary-initial",
+      "fixture": "canonical V2 database"
+    },
+    {
+      "id": "missions-primary",
+      "route": "/missions",
+      "surface": "Missions",
+      "kind": "primary-initial",
+      "fixture": "mission portfolio"
+    },
+    {
+      "id": "live-operations-primary",
+      "route": "/live",
+      "surface": "Live Operations",
+      "kind": "primary-initial",
+      "fixture": "mission portfolio"
+    },
+    {
+      "id": "guided-workspace-primary",
+      "route": "/guided",
+      "surface": "Guided Workspace",
+      "kind": "primary-initial",
+      "fixture": "mission portfolio"
+    },
+    {
+      "id": "decisions-primary",
+      "route": "/decisions",
+      "surface": "Decisions",
+      "kind": "primary-initial",
+      "fixture": "decisions and intelligence"
+    },
+    {
+      "id": "intelligence-evidence-primary",
+      "route": "/intelligence/evidence",
+      "surface": "Intelligence",
+      "kind": "primary-initial",
+      "fixture": "decisions and intelligence"
+    },
+    {
+      "id": "agents-primary",
+      "route": "/agents",
+      "surface": "Agents",
+      "kind": "primary-initial",
+      "fixture": "operational lists"
+    },
+    {
+      "id": "second-brain-primary",
+      "route": "/brain",
+      "surface": "Second Brain",
+      "kind": "primary-initial",
+      "fixture": "Brain home and inbox"
+    },
+    {
+      "id": "learning-primary",
+      "route": "/learning",
+      "surface": "Learning Lab",
+      "kind": "primary-initial",
+      "fixture": "canonical V2 database"
+    },
+    {
+      "id": "observability-primary",
+      "route": "/observability",
+      "surface": "Observability",
+      "kind": "primary-initial",
+      "fixture": "operational lists"
+    },
+    {
+      "id": "reports-primary",
+      "route": "/reports",
+      "surface": "Reports",
+      "kind": "primary-initial",
+      "fixture": "operational lists"
+    },
+    {
+      "id": "system-connections-primary",
+      "route": "/system/connections",
+      "surface": "System connections",
+      "kind": "primary-initial",
+      "fixture": "system registries"
+    },
+    {
+      "id": "overview-command-palette-open",
+      "route": "/",
+      "surface": "Command palette",
+      "kind": "material",
+      "fixture": "canonical V2 database"
+    },
+    {
+      "id": "autonomous-intake-scope",
+      "route": "/missions/new/autonomous",
+      "surface": "Autonomous mission intake",
+      "kind": "material",
+      "fixture": "live registries and recommended defaults"
+    },
+    {
+      "id": "guided-intake-scope",
+      "route": "/missions/new/guided",
+      "surface": "Guided mission intake",
+      "kind": "material",
+      "fixture": "live registries and recommended defaults"
+    },
+    {
+      "id": "versioned-plan-workspace",
+      "route": "/missions/:missionId/runs/:runId?tab=plan",
+      "surface": "Versioned plan workspace",
+      "kind": "material",
+      "fixture": "plan change"
+    },
+    {
+      "id": "guided-waiting-decision",
+      "route": "/guided/:missionId",
+      "surface": "Guided waiting decision",
+      "kind": "material",
+      "fixture": "run intervention and recovery"
+    },
+    {
+      "id": "evidence-review",
+      "route": "/intelligence/evidence/:evidenceId",
+      "surface": "Evidence review",
+      "kind": "material",
+      "fixture": "decisions and intelligence"
+    },
+    {
+      "id": "finding-review",
+      "route": "/intelligence/findings/:findingId",
+      "surface": "Finding review",
+      "kind": "material",
+      "fixture": "decisions and intelligence"
+    },
+    {
+      "id": "second-brain-graph-canvas",
+      "route": "/brain/graph",
+      "surface": "Second Brain graph canvas",
+      "kind": "material",
+      "fixture": "Brain graph"
+    },
+    {
+      "id": "second-brain-graph-table",
+      "route": "/brain/graph",
+      "surface": "Second Brain graph accessible table",
+      "kind": "material",
+      "fixture": "Brain graph"
+    },
+    {
+      "id": "connected-obsidian-vault",
+      "route": "/brain/vault",
+      "surface": "Connected Obsidian Vault",
+      "kind": "material",
+      "fixture": "real disposable filesystem round trip"
+    },
+    {
+      "id": "blocked-run-failure-diagnosis",
+      "route": "/live/:runId",
+      "surface": "Structured failure diagnosis",
+      "kind": "material",
+      "fixture": "failure diagnosis"
+    },
+    {
+      "id": "learning-research",
+      "route": "/learning?view=research",
+      "surface": "Research Lab",
+      "kind": "material",
+      "fixture": "canonical research registry"
+    },
+    {
+      "id": "observability-trace-review",
+      "route": "/observability?view=traces&traceId=:traceId",
+      "surface": "Observability trace review",
+      "kind": "material",
+      "fixture": "operational lists"
+    },
+    {
+      "id": "report-review",
+      "route": "/reports/:reportId",
+      "surface": "Report review",
+      "kind": "material",
+      "fixture": "operational lists"
+    },
+    {
+      "id": "system-policies",
+      "route": "/system/policies",
+      "surface": "System policies",
+      "kind": "material",
+      "fixture": "system registries"
+    },
+    {
+      "id": "system-settings",
+      "route": "/system/settings",
+      "surface": "System settings status",
+      "kind": "material",
+      "fixture": "system registries"
+    }
+  ]
+}

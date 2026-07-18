@@ -1,0 +1,138 @@
+{
+  "schemaVersion": "1.0",
+  "generatedAt": "2026-07-18T10:07:19Z",
+  "workspace": "Ti-Scale",
+  "provenance": {
+    "generator": "Higgsfield MCP and repository-native SVG",
+    "generators": [
+      {
+        "tool": "Higgsfield MCP",
+        "assetCount": 1,
+        "generationDates": ["2026-07-18"]
+      },
+      {
+        "tool": "Repository-native SVG",
+        "assetCount": 2,
+        "generationDates": ["2026-07-18"]
+      }
+    ],
+    "licenseNote": "Each asset records its generator and source prompt. Use remains subject to the applicable provider terms on the recorded generation date.",
+    "identityPolicy": "The canonical Ti-Scale mark and wordmark are original repository-native SVG assets.",
+    "safetyReview": "Production assets were visually reviewed. SVG assets were checked for script, foreignObject, event-handler, text, image, and external-reference elements before inclusion. The production palette contains no green, neon, HUD, or cyberpunk treatment."
+  },
+  "assets": [
+    {
+      "id": "ti-scale-higgsfield-titanium-core",
+      "kind": "production-hero",
+      "selected": true,
+      "sourcePrompt": "Create a text-free premium editorial hero artwork for the standalone Ti-Scale command-intelligence platform. The artwork must be an abstract sculptural titanium scale system, not a device, computer, robot, engine, or interface: five to nine distinct angular plates suspended in a precise exploded formation around an empty central void, with visible clean separation between every layer. Use asymmetric architectural geometry, razor-sharp machined edges, brushed titanium facets, matte graphite seams, sparse warm-metal fasteners, and strong black-and-white Ben-Day halftone or screenprint dither that visibly breaks selected facets into dots. Center the sculpture at 38 percent canvas coverage with generous uninterrupted negative space. Perfectly flat warm off-white #F4F2EE background edge to edge, no floor, horizon, gradient, vignette, reflection, or cast shadow. Calm Swiss modernist editorial art direction, sophisticated corporate technology, print-poster precision, high contrast, no visual clutter. Strictly no green or other colors, no glow, no transparent display, no screen, no circle display, no UI, no HUD, no symbols, text, letters, numbers, logos, brand marks, circuitry graphics, humans, faces, anatomy, humanoids, armor suits, weapons, vehicles, cyberpunk, hacker imagery, or recognizable intellectual property.",
+      "model": "recraft_v4_1",
+      "tool": "Higgsfield MCP generate_image",
+      "date": "2026-07-18",
+      "generationReceipt": {
+        "generationId": "5634dadb-d88e-49f1-a47a-1010008d1543",
+        "receiptPath": "source/ti-scale-higgsfield-recraft-core-20260718-095533-5634dadb-d88e-49f1-a47a-1010008d1543.json",
+        "sourceSha256": "4becf93da9ce55dd96d59833870b21ccae128b5e5fd2679443863afc43606107"
+      },
+      "source": {
+        "path": "source/ti-scale-higgsfield-recraft-core-20260718-095533-5634dadb-d88e-49f1-a47a-1010008d1543.png",
+        "width": 1344,
+        "height": 768,
+        "bytes": 788246,
+        "sha256": "4becf93da9ce55dd96d59833870b21ccae128b5e5fd2679443863afc43606107",
+        "alpha": false
+      },
+      "responsiveEncoding": {
+        "tool": "ImageMagick 7.1.2-21",
+        "avifQuality": 54,
+        "webpQuality": 82,
+        "webpMethod": 6
+      },
+      "derivedVariants": [
+        {
+          "path": "optimized/ti-scale-higgsfield-core-1344.avif",
+          "width": 1344,
+          "height": 768,
+          "bytes": 24243,
+          "sha256": "9c5e5a4b189f404676cf83114bd34b91c2e395a142a6f4939a8aa8ee6bd7810b"
+        },
+        {
+          "path": "optimized/ti-scale-higgsfield-core-1344.webp",
+          "width": 1344,
+          "height": 768,
+          "bytes": 44506,
+          "sha256": "4818a2d307566c9191b1236dcc4838e22de652c47fb488e94add88d8a9cfa802"
+        },
+        {
+          "path": "optimized/ti-scale-higgsfield-core-1024.avif",
+          "width": 1024,
+          "height": 585,
+          "bytes": 15328,
+          "sha256": "5a45293a6482c421248d1e019f397ac4bfd3855b240defbfb64613846439c36e"
+        },
+        {
+          "path": "optimized/ti-scale-higgsfield-core-1024.webp",
+          "width": 1024,
+          "height": 585,
+          "bytes": 27168,
+          "sha256": "4dbd4043349fc772788f648787ba84d5792fbb848b20d1a64b427602409156d6"
+        },
+        {
+          "path": "optimized/ti-scale-higgsfield-core-640.avif",
+          "width": 640,
+          "height": 366,
+          "bytes": 7922,
+          "sha256": "5c59fe7ac5cc2603fdf38076dc8e6b4404e4dd434bd3f880a9e97494d39d403a"
+        },
+        {
+          "path": "optimized/ti-scale-higgsfield-core-640.webp",
+          "width": 640,
+          "height": 366,
+          "bytes": 12478,
+          "sha256": "ab278ee27f090921d5a28287f17c5fd5a12c90407c5401ae4929740484c7feb6"
+        }
+      ],
+      "intendedPlacement": "Responsive, lazy Ti-Scale Command Center centerpiece, journey-selection atmosphere, and neutral Brain empty-state illustration.",
+      "alt": "Exploded sculptural system of titanium and graphite plates with warm-metal halftone facets.",
+      "notes": "Accepted Higgsfield production direction. The visible palette is off-white, titanium silver, graphite, black, and restrained warm metal."
+    },
+    {
+      "id": "ti-scale-identity-mark",
+      "kind": "production-identity",
+      "sourcePrompt": "Create an original native SVG Ti-Scale identity mark: a faceted titanium T spine interlocked with a segmented S-shaped armor scale, conveying precision, adaptation, modular strength, and controlled power. Keep it nonfigurative, font-independent, compact, and free of copied intellectual property.",
+      "model": "Not applicable (native SVG)",
+      "tool": "Repository-native SVG",
+      "date": "2026-07-18",
+      "source": {
+        "path": "source/ti-scale-mark.svg",
+        "width": 64,
+        "height": 64,
+        "bytes": 656,
+        "sha256": "2fac133ce565d70d5dc14791934c3dcd76c77ae7d283ca435ad40f8fbd8b6731"
+      },
+      "derivedVariants": [],
+      "intendedPlacement": "Canonical compact identity, authentication surface, favicon, and constrained navigation contexts.",
+      "alt": "Ti-Scale titanium scale mark.",
+      "notes": "Native vector geometry with title and description; no font, script, image, external reference, or event handler."
+    },
+    {
+      "id": "ti-scale-identity-wordmark",
+      "kind": "production-identity",
+      "sourcePrompt": "Create an original horizontal native SVG Ti-Scale wordmark by pairing the canonical titanium scale mark with custom geometric TI-SCALE letterforms. Keep it sharp, Swiss-influenced, font-independent, accessible, and free of copied intellectual property.",
+      "model": "Not applicable (native SVG)",
+      "tool": "Repository-native SVG",
+      "date": "2026-07-18",
+      "source": {
+        "path": "source/ti-scale-wordmark.svg",
+        "width": 420,
+        "height": 80,
+        "bytes": 1250,
+        "sha256": "509eed9f2539fd3f8dba48543dc2b9b0d6bbf9321ba749644dcde213ebf23646"
+      },
+      "derivedVariants": [],
+      "intendedPlacement": "Canonical horizontal identity for the application shell and product attribution.",
+      "alt": "Ti-Scale wordmark with titanium scale symbol.",
+      "notes": "Custom path-based letterforms with title and description; no font, script, image, external reference, or event handler."
+    }
+  ]
+}

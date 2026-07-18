@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="ti-scale-mark-title ti-scale-mark-description">
+  <title id="ti-scale-mark-title">Ti-Scale mark</title>
+  <desc id="ti-scale-mark-description">An abstract titanium T spine interlocked with a segmented S-shaped armor scale.</desc>
+  <path fill="#C8C4BD" d="M7 7h50l-6 12H39v38l-7 4-7-4V19H13Z"/>
+  <path fill="#6C737A" d="M13 7h44l-4 7H17Z"/>
+  <path fill="#111315" d="m15 18 32-8 8 9-25 8 18 6 5 10-32 14-10-9 25-11-18-6-7-8Z"/>
+  <path fill="#0A0A0B" d="m15 18 3 5 27-7 2-6Zm15 9 18 6-3 5-18-6Z"/>
+  <path fill="#6C737A" d="m21 51 28-12 4 4-32 14-10-9 4-2Z"/>
+</svg>
