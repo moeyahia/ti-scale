@@ -2,6 +2,7 @@ import { fetchOverview } from "../../data/api/commandOs";
 import { useQuery } from "../../data/cache/QueryProvider";
 import { CommandCenterAmbient } from "../../design-system/components/BrandMedia";
 import { ButtonLink, Card, EmptyState, ErrorPanel, LoadingPanel, StatusPill } from "../../design-system/components/Primitives";
+import { useMechanicalAssembly } from "../../design-system/hooks/useMechanicalAssembly";
 import type { MissionSummary, OverviewSnapshot, ReadinessCheck } from "../../domain/types/commandOs";
 import { operatorText } from "../../lib/operatorLanguage";
 
@@ -35,7 +36,13 @@ function ReadinessCheckRow({ check }: { check: ReadinessCheck }) {
 function CommandCenterHero({ data }: { data?: OverviewSnapshot }) {
   const readiness = data ? `${Math.round(data.readiness.score)}/100` : "—";
   return (
-    <section className="ti-command-hero" aria-labelledby="ti-command-center-title">
+    <section
+      className="ti-command-hero"
+      aria-labelledby="ti-command-center-title"
+      data-ti-module="hero"
+      data-ti-origin="core"
+      data-ti-phase="disassembled"
+    >
       <div className="ti-command-hero__copy">
         <p className="os-eyebrow">Ti-Scale / live system</p>
         <h1 id="ti-command-center-title">
@@ -73,13 +80,33 @@ function CommandCenterHero({ data }: { data?: OverviewSnapshot }) {
   );
 }
 
+function MechanicalConduit() {
+  return (
+    <div
+      className="ti-mechanical-conduit"
+      data-ti-module="conduit"
+      data-ti-origin="core"
+      data-ti-phase="disassembled"
+      aria-hidden="true"
+    >
+      <svg viewBox="0 0 1200 112" preserveAspectRatio="none" focusable="false">
+        <path className="ti-mechanical-conduit__spine" pathLength="1" d="M600 0v34M600 34H154v48M600 34h446v48M600 34v65" />
+        <path className="ti-mechanical-conduit__signal" pathLength="1" d="M600 0v34M600 34H154v48M600 34h446v48" />
+      </svg>
+      <span className="ti-mechanical-conduit__lock ti-mechanical-conduit__lock--left" />
+      <span className="ti-mechanical-conduit__lock ti-mechanical-conduit__lock--center" />
+      <span className="ti-mechanical-conduit__lock ti-mechanical-conduit__lock--right" />
+    </div>
+  );
+}
+
 function JourneyActions({ data }: { data?: OverviewSnapshot }) {
   const autonomousChecks = data?.readiness.checks.filter((check) => check.journeys.includes("autonomous")) ?? [];
   const guidedChecks = data?.readiness.checks.filter((check) => check.journeys.includes("guided")) ?? [];
   const journeyStatus = (checks: ReadinessCheck[]) => !data ? "unavailable" : checks.some((check) => check.status === "fail") ? "blocked" : checks.some((check) => check.status === "warn") ? "degraded" : "ready";
   return (
     <section className="os-journey-grid" aria-label="Start a mission">
-      <article className="os-journey-card os-journey-card--autonomous">
+      <article className="os-journey-card os-journey-card--autonomous" data-ti-module="journey" data-ti-origin="left" data-ti-phase="disassembled">
         <div className="os-journey-index" aria-hidden="true">01</div>
         <div className="os-journey-content">
           <p className="os-eyebrow">End-to-end execution</p>
@@ -93,7 +120,7 @@ function JourneyActions({ data }: { data?: OverviewSnapshot }) {
         </div>
       </article>
 
-      <article className="os-journey-card os-journey-card--guided">
+      <article className="os-journey-card os-journey-card--guided" data-ti-module="journey" data-ti-origin="right" data-ti-phase="disassembled">
         <div className="os-journey-index" aria-hidden="true">02</div>
         <div className="os-journey-content">
           <p className="os-eyebrow">Collaborative mastery</p>
@@ -113,7 +140,7 @@ function JourneyActions({ data }: { data?: OverviewSnapshot }) {
 function Dashboard({ data }: { data: OverviewSnapshot }) {
   return (
     <>
-      <section className={`os-readiness-band os-readiness-band--${data.readiness.status}`} aria-labelledby="readiness-title">
+      <section className={`os-readiness-band os-readiness-band--${data.readiness.status}`} aria-labelledby="readiness-title" data-ti-module="readiness" data-ti-origin="core" data-ti-phase="disassembled">
         <div className="os-readiness-score" aria-label={`Readiness score ${data.readiness.score} out of 100`}>
           <span>{Math.round(data.readiness.score)}</span><small>/100</small>
         </div>
@@ -125,9 +152,10 @@ function Dashboard({ data }: { data: OverviewSnapshot }) {
         <StatusPill status={data.readiness.status} />
       </section>
 
+      <MechanicalConduit />
       <JourneyActions data={data} />
 
-      <section className="os-metric-row" aria-label="Current operations summary">
+      <section className="os-metric-row" aria-label="Current operations summary" data-ti-module="metrics" data-ti-origin="core" data-ti-phase="disassembled">
         <div><span>Active missions</span><strong key={data.summary.activeMissions}>{data.summary.activeMissions}</strong></div>
         <div><span>Active agents</span><strong key={data.summary.activeAgents}>{data.summary.activeAgents}</strong></div>
         <div><span>Pending decisions</span><strong key={data.summary.pendingDecisions}>{data.summary.pendingDecisions}</strong></div>
@@ -135,7 +163,7 @@ function Dashboard({ data }: { data: OverviewSnapshot }) {
       </section>
 
       <div className="os-dashboard-grid">
-        <Card className="os-dashboard-main">
+        <Card className="os-dashboard-main" data-ti-module="panel" data-ti-origin="left" data-ti-phase="disassembled">
           <div className="os-section-heading"><div><p className="os-eyebrow">Execution</p><h2>Active operations</h2></div><ButtonLink href="/missions" variant="quiet">View portfolio</ButtonLink></div>
           {data.missions.length === 0 ? (
             <EmptyState title="No active missions" description="Create an Autonomous contract or begin a Guided mission when you are ready." />
@@ -162,7 +190,7 @@ function Dashboard({ data }: { data: OverviewSnapshot }) {
           )}
         </Card>
 
-        <Card className="os-attention-card">
+        <Card className="os-attention-card" data-ti-module="panel" data-ti-origin="right" data-ti-phase="disassembled">
           <div className="os-section-heading"><div><p className="os-eyebrow">Priority</p><h2>Needs attention</h2></div><span className="os-count">{data.attention.length}</span></div>
           {data.attention.length === 0 ? (
             <EmptyState title="No intervention required" description="Safe stops, Guided decisions, and degraded dependencies will appear here." />
@@ -180,13 +208,13 @@ function Dashboard({ data }: { data: OverviewSnapshot }) {
       </div>
 
       <div className="os-lower-grid">
-        <Card>
+        <Card data-ti-module="panel" data-ti-origin="left" data-ti-phase="disassembled">
           <div className="os-section-heading"><div><p className="os-eyebrow">Team</p><h2>Agent fleet</h2></div><ButtonLink href="/agents" variant="quiet">Inspect fleet</ButtonLink></div>
           {data.agents.length === 0 ? <p className="os-muted">No agents reported by the runtime.</p> : (
             <ul className="os-compact-list">{data.agents.slice(0, 6).map((agent) => <li key={agent.id}><span><strong>{agent.name}</strong><small>{agent.assignment ?? "Unassigned"}</small></span><StatusPill status={agent.status} /></li>)}</ul>
           )}
         </Card>
-        <Card>
+        <Card data-ti-module="panel" data-ti-origin="core" data-ti-phase="disassembled">
           <div className="os-section-heading"><div><p className="os-eyebrow">Knowledge</p><h2>Second Brain pulse</h2></div><ButtonLink href="/brain" variant="quiet">Open Brain</ButtonLink></div>
           <dl className="os-definition-grid">
             <div><dt>Confirmed</dt><dd>{data.brain.confirmed}</dd></div>
@@ -196,7 +224,7 @@ function Dashboard({ data }: { data: OverviewSnapshot }) {
           </dl>
           <p className="os-system-line"><span>Vault</span><StatusPill status={data.brain.vaultStatus} /></p>
         </Card>
-        <Card>
+        <Card data-ti-module="panel" data-ti-origin="right" data-ti-phase="disassembled">
           <div className="os-section-heading"><div><p className="os-eyebrow">Infrastructure</p><h2>System health</h2></div><ButtonLink href="/system/connections" variant="quiet">Connections</ButtonLink></div>
           <ul className="os-compact-list">
             <li><span>Database</span><StatusPill status={data.system.database} /></li>
@@ -208,7 +236,7 @@ function Dashboard({ data }: { data: OverviewSnapshot }) {
       </div>
 
       {data.readiness.checks.some((check) => check.status !== "pass") && (
-        <Card className="os-readiness-details">
+        <Card className="os-readiness-details" data-ti-module="panel" data-ti-origin="core" data-ti-phase="disassembled">
           <div className="os-section-heading"><div><p className="os-eyebrow">Remediation</p><h2>Readiness checks</h2></div></div>
           <ul>{data.readiness.checks.map((check) => <ReadinessCheckRow key={check.id} check={check} />)}</ul>
         </Card>
@@ -219,12 +247,13 @@ function Dashboard({ data }: { data: OverviewSnapshot }) {
 
 export default function OverviewPage() {
   const overview = useQuery("ti-scale-overview", fetchOverview, { staleTime: 10_000 });
+  const assemblyRef = useMechanicalAssembly();
   return (
-    <div className="os-page os-overview-page">
+    <div className="os-page os-overview-page" ref={assemblyRef} data-ti-assembly-root="command-center">
       <CommandCenterHero data={overview.data} />
       {overview.isLoading && <LoadingPanel />}
       {overview.error && !overview.data && <ErrorPanel error={overview.error} onRetry={overview.refresh} />}
-      {!overview.data && <JourneyActions />}
+      {!overview.data && <><MechanicalConduit /><JourneyActions /></>}
       {overview.data && <Dashboard data={overview.data} />}
       {overview.isRefreshing && <p className="os-refresh-note" role="status">Refreshing operational state…</p>}
     </div>

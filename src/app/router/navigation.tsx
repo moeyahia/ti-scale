@@ -1,17 +1,73 @@
-import { createContext, type MouseEvent, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  type AnchorHTMLAttributes,
+  type MouseEvent,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { flushSync } from "react-dom";
+
+export type RouteTransitionPhase = "idle" | "disassembling" | "committing" | "assembling";
+export type RouteTransitionMode = "native" | "fallback" | "bypass";
+
+export const MECHANICAL_NAVIGATION_REQUEST_EVENT = "ti-scale:mechanical-navigate";
+export const MECHANICAL_ROUTE_TRANSITION_EVENT = "ti-scale:route-transition";
+export const MECHANICAL_ROUTE_TIMING = Object.freeze({
+  disassembleMs: 180,
+  fallbackAssembleMs: 360,
+  maximumMs: 840,
+});
+
+interface NavigationOptions {
+  replace?: boolean;
+}
 
 interface NavigationContextValue {
   pathname: string;
   search: string;
   hash: string;
-  navigate: (path: string, options?: { replace?: boolean }) => void;
+  navigate: (path: string, options?: NavigationOptions) => void;
 }
 
-interface LocationSnapshot {
+export interface LocationSnapshot {
   pathname: string;
   search: string;
   hash: string;
 }
+
+export interface ViewTransitionHandle {
+  readonly finished: Promise<void>;
+  readonly updateCallbackDone: Promise<void>;
+  skipTransition: () => void;
+}
+
+export interface RouteTransitionPresentation {
+  readonly phase: RouteTransitionPhase;
+  readonly mode?: Exclude<RouteTransitionMode, "bypass">;
+  readonly from?: string;
+  readonly to?: string;
+  readonly revision: number;
+}
+
+export interface MechanicalRouteTransitionRuntime {
+  shouldBypass: () => boolean;
+  sleep: (milliseconds: number, signal: AbortSignal) => Promise<boolean>;
+  publish: (presentation: RouteTransitionPresentation) => void;
+  startViewTransition?: (update: () => void | Promise<void>) => ViewTransitionHandle;
+}
+
+export interface MechanicalRouteTransitionRequest {
+  readonly from: string;
+  readonly to: string;
+  readonly commit: (mode: RouteTransitionMode) => void | Promise<void>;
+}
+
+export type MechanicalRouteTransitionOutcome = "completed" | "cancelled" | "bypassed";
 
 const NavigationContext = createContext<NavigationContextValue | null>(null);
 
@@ -31,32 +87,395 @@ function currentLocation(): LocationSnapshot {
   };
 }
 
+function locationTarget(location: LocationSnapshot): string {
+  return `${location.pathname}${location.search}${location.hash}`;
+}
+
+export type NavigationChangeKind = "noop" | "location-only" | "route";
+
+export function classifyLocationChange(previous: LocationSnapshot, next: LocationSnapshot): NavigationChangeKind {
+  if (locationTarget(previous) === locationTarget(next)) return "noop";
+  return previous.pathname === next.pathname ? "location-only" : "route";
+}
+
+export function shouldInterceptAppLinkClick(input: {
+  readonly href: string;
+  readonly button: number;
+  readonly detail: number;
+  readonly defaultPrevented: boolean;
+  readonly metaKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly shiftKey: boolean;
+  readonly altKey: boolean;
+  readonly target?: string;
+  readonly hasDownload: boolean;
+}): boolean {
+  if (input.defaultPrevented) return false;
+  const nonPrimaryPointer = input.detail > 0 && input.button !== 0;
+  const opensSeparateContext = Boolean(input.target && input.target.toLowerCase() !== "_self");
+  const isInternal = input.href.startsWith("/") && !input.href.startsWith("//") && !input.href.includes("\\");
+  return !(
+    nonPrimaryPointer
+    || input.metaKey
+    || input.ctrlKey
+    || input.shiftKey
+    || input.altKey
+    || opensSeparateContext
+    || input.hasDownload
+    || !isInternal
+  );
+}
+
+function abortableSleep(milliseconds: number, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve(false);
+      return;
+    }
+    const timeout = globalThis.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, milliseconds);
+    const onAbort = () => {
+      globalThis.clearTimeout(timeout);
+      resolve(false);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+type DeadlineResult = "resolved" | "rejected" | "timeout" | "cancelled";
+
+function settleBeforeDeadline(promise: Promise<void>, milliseconds: number, signal: AbortSignal): Promise<DeadlineResult> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve("cancelled");
+      return;
+    }
+    let settled = false;
+    const finish = (result: DeadlineResult) => {
+      if (settled) return;
+      settled = true;
+      globalThis.clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const timeout = globalThis.setTimeout(() => finish("timeout"), Math.max(0, milliseconds));
+    const onAbort = () => finish("cancelled");
+    signal.addEventListener("abort", onAbort, { once: true });
+    void promise.then(() => finish("resolved"), () => finish("rejected"));
+  });
+}
+
+/**
+ * One finite, latest-request-wins route mechanism. It deliberately owns no
+ * React or history state, so its ordering and cancellation contract can be
+ * verified without a browser renderer.
+ */
+export class MechanicalRouteTransitionController {
+  private revision = 0;
+  private phase: RouteTransitionPhase = "idle";
+  private abortController?: AbortController;
+  private activeViewTransition?: ViewTransitionHandle;
+
+  constructor(private readonly runtime: MechanicalRouteTransitionRuntime) {}
+
+  cancel(): void {
+    if (this.phase === "idle" && !this.abortController && !this.activeViewTransition) return;
+    this.revision += 1;
+    this.abortController?.abort();
+    this.activeViewTransition?.skipTransition();
+    this.abortController = undefined;
+    this.activeViewTransition = undefined;
+    this.present({ phase: "idle", revision: this.revision });
+  }
+
+  async transition(request: MechanicalRouteTransitionRequest): Promise<MechanicalRouteTransitionOutcome> {
+    this.revision += 1;
+    const revision = this.revision;
+    this.abortController?.abort();
+    this.activeViewTransition?.skipTransition();
+    this.activeViewTransition = undefined;
+
+    const signalController = new AbortController();
+    this.abortController = signalController;
+    const signal = signalController.signal;
+    let committed = false;
+    const startedAt = Date.now();
+    const isCurrent = () => revision === this.revision && !signal.aborted;
+    const commitOnce = async (mode: RouteTransitionMode) => {
+      if (committed || !isCurrent()) return;
+      committed = true;
+      await request.commit(mode);
+    };
+
+    if (this.runtime.shouldBypass()) {
+      if (this.phase !== "idle") this.present({ phase: "idle", revision });
+      await commitOnce("bypass");
+      if (revision === this.revision) this.abortController = undefined;
+      return "bypassed";
+    }
+
+    let mode: Exclude<RouteTransitionMode, "bypass"> = this.runtime.startViewTransition ? "native" : "fallback";
+    this.present({ phase: "disassembling", mode, from: request.from, to: request.to, revision });
+
+    try {
+      const disassembled = await this.runtime.sleep(MECHANICAL_ROUTE_TIMING.disassembleMs, signal);
+      if (!disassembled || !isCurrent()) return "cancelled";
+
+      if (mode === "native" && this.runtime.startViewTransition) {
+        this.present({ phase: "committing", mode, from: request.from, to: request.to, revision });
+        let transition: ViewTransitionHandle;
+        try {
+          transition = this.runtime.startViewTransition(() => commitOnce("native"));
+        } catch {
+          mode = "fallback";
+          return await this.completeFallback(request, revision, signal, commitOnce);
+        }
+        this.activeViewTransition = transition;
+        const updateResult = await settleBeforeDeadline(
+          transition.updateCallbackDone,
+          MECHANICAL_ROUTE_TIMING.maximumMs - (Date.now() - startedAt),
+          signal,
+        );
+        if (!isCurrent() || updateResult === "cancelled") return "cancelled";
+        if (!committed) await commitOnce(updateResult === "resolved" ? "native" : "fallback");
+        if (!isCurrent()) return "cancelled";
+        this.present({ phase: "assembling", mode, from: request.from, to: request.to, revision });
+        const finishResult = await settleBeforeDeadline(
+          transition.finished,
+          MECHANICAL_ROUTE_TIMING.maximumMs - (Date.now() - startedAt),
+          signal,
+        );
+        if (finishResult === "timeout" || finishResult === "rejected") transition.skipTransition();
+        if (!isCurrent()) return "cancelled";
+      } else {
+        return await this.completeFallback(request, revision, signal, commitOnce);
+      }
+
+      this.finish(revision);
+      return "completed";
+    } catch {
+      if (!isCurrent()) return "cancelled";
+      if (!committed) await commitOnce("fallback");
+      this.finish(revision);
+      return "completed";
+    } finally {
+      if (revision === this.revision) {
+        this.abortController = undefined;
+        this.activeViewTransition = undefined;
+      }
+    }
+  }
+
+  private async completeFallback(
+    request: MechanicalRouteTransitionRequest,
+    revision: number,
+    signal: AbortSignal,
+    commitOnce: (mode: RouteTransitionMode) => Promise<void>,
+  ): Promise<MechanicalRouteTransitionOutcome> {
+    if (revision !== this.revision || signal.aborted) return "cancelled";
+    this.present({ phase: "committing", mode: "fallback", from: request.from, to: request.to, revision });
+    await commitOnce("fallback");
+    if (revision !== this.revision || signal.aborted) return "cancelled";
+    this.present({ phase: "assembling", mode: "fallback", from: request.from, to: request.to, revision });
+    const assembled = await this.runtime.sleep(MECHANICAL_ROUTE_TIMING.fallbackAssembleMs, signal);
+    if (!assembled || revision !== this.revision || signal.aborted) return "cancelled";
+    this.finish(revision);
+    return "completed";
+  }
+
+  private finish(revision: number): void {
+    if (revision !== this.revision) return;
+    this.present({ phase: "idle", revision });
+  }
+
+  private present(presentation: RouteTransitionPresentation): void {
+    this.phase = presentation.phase;
+    this.runtime.publish(presentation);
+  }
+}
+
+const phaseClasses = [
+  "is-route-transitioning",
+  "is-route-disassembling",
+  "is-route-committing",
+  "is-route-assembling",
+] as const;
+
+function publishTransitionToDocument(documentValue: Document, presentation: RouteTransitionPresentation): void {
+  const application = documentValue.querySelector<HTMLElement>(".ti-scale");
+  const targets: HTMLElement[] = application
+    ? [documentValue.documentElement, application]
+    : [documentValue.documentElement];
+
+  for (const target of targets) {
+    target.setAttribute("data-route-transition", presentation.phase);
+    target.classList.remove(...phaseClasses);
+    if (presentation.phase === "idle") {
+      target.removeAttribute("data-route-transition-mode");
+      target.removeAttribute("data-route-from");
+      target.removeAttribute("data-route-to");
+      target.removeAttribute("data-route-transition-revision");
+      continue;
+    }
+    target.setAttribute("data-route-transition-mode", presentation.mode ?? "fallback");
+    target.setAttribute("data-route-from", presentation.from ?? "");
+    target.setAttribute("data-route-to", presentation.to ?? "");
+    target.setAttribute("data-route-transition-revision", String(presentation.revision));
+    target.classList.add("is-route-transitioning", `is-route-${presentation.phase}`);
+  }
+
+  const EventConstructor = documentValue.defaultView?.CustomEvent;
+  if (EventConstructor) {
+    documentValue.dispatchEvent(new EventConstructor<RouteTransitionPresentation>(
+      MECHANICAL_ROUTE_TRANSITION_EVENT,
+      { detail: presentation },
+    ));
+  }
+}
+
+function createBrowserTransitionRuntime(documentValue: Document): MechanicalRouteTransitionRuntime {
+  const transitionDocument = documentValue as Document & {
+    startViewTransition?: (update: () => void | Promise<void>) => ViewTransitionHandle;
+  };
+  return {
+    shouldBypass: () => {
+      if (documentValue.visibilityState !== "visible") return true;
+      try {
+        return documentValue.defaultView?.matchMedia("(prefers-reduced-motion: reduce)").matches ?? false;
+      } catch {
+        return false;
+      }
+    },
+    sleep: abortableSleep,
+    publish: (presentation) => publishTransitionToDocument(documentValue, presentation),
+    startViewTransition: typeof transitionDocument.startViewTransition === "function"
+      ? transitionDocument.startViewTransition.bind(transitionDocument)
+      : undefined,
+  };
+}
+
+function focusRouteSurface(): void {
+  window.queueMicrotask(() => {
+    document.getElementById("ti-scale-content")?.focus({ preventScroll: true });
+  });
+}
+
+export function requestMechanicalNavigation(path: string, options?: NavigationOptions): boolean {
+  if (typeof window === "undefined") return false;
+  return window.dispatchEvent(new CustomEvent(MECHANICAL_NAVIGATION_REQUEST_EVENT, {
+    detail: { path, replace: options?.replace === true },
+  }));
+}
+
 export function NavigationProvider({ children }: { children: ReactNode }) {
   const [location, setLocation] = useState(currentLocation);
+  const locationRef = useRef(location);
+  const controller = useMemo(() => (
+    typeof document === "undefined"
+      ? null
+      : new MechanicalRouteTransitionController(createBrowserTransitionRuntime(document))
+  ), []);
+
+  const commitLocation = useCallback((
+    next: LocationSnapshot,
+    historyMethod: "pushState" | "replaceState" | undefined,
+    mode: RouteTransitionMode,
+    resetScroll: boolean,
+  ) => {
+    const update = () => {
+      if (historyMethod) window.history[historyMethod]({}, "", locationTarget(next));
+      locationRef.current = next;
+      setLocation(next);
+    };
+    if (mode === "native" || mode === "fallback") flushSync(update);
+    else update();
+    if (resetScroll) window.scrollTo({ top: 0, behavior: "instant" });
+    focusRouteSurface();
+  }, []);
 
   useEffect(() => {
-    const onPopState = () => setLocation(currentLocation());
+    const onPopState = () => {
+      const next = currentLocation();
+      const previous = locationRef.current;
+      const change = classifyLocationChange(previous, next);
+      if (change === "noop") return;
+      if (change === "location-only") {
+        controller?.cancel();
+        locationRef.current = next;
+        setLocation(next);
+        return;
+      }
+      if (!controller) {
+        locationRef.current = next;
+        setLocation(next);
+        return;
+      }
+      void controller.transition({
+        from: previous.pathname,
+        to: next.pathname,
+        commit: (mode) => commitLocation(next, undefined, mode, false),
+      });
+    };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+  }, [commitLocation, controller]);
 
-  const navigate = useCallback((path: string, options?: { replace?: boolean }) => {
+  useEffect(() => () => controller?.cancel(), [controller]);
+
+  const navigate = useCallback((path: string, options?: NavigationOptions) => {
     const requested = safeInternalPath(path);
     const parsed = new URL(requested, window.location.origin);
-    const target = `${parsed.pathname}${parsed.search}${parsed.hash}`;
-    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-    if (target === current) return;
-    const pathnameChanged = parsed.pathname !== window.location.pathname;
-    window.history[options?.replace ? "replaceState" : "pushState"]({}, "", target);
-    setLocation({ pathname: parsed.pathname, search: parsed.search, hash: parsed.hash });
-    // Query-only state (filters, graph selection, cursors) must not move the
-    // surface underneath an active pointer or keyboard interaction.
-    if (pathnameChanged) window.scrollTo({ top: 0, behavior: "instant" });
-  }, []);
+    const next: LocationSnapshot = {
+      pathname: parsed.pathname,
+      search: parsed.search,
+      hash: parsed.hash,
+    };
+    const previous = locationRef.current;
+    const target = locationTarget(next);
+    const change = classifyLocationChange(previous, next);
+    if (change === "noop") {
+      controller?.cancel();
+      return;
+    }
+    const historyMethod = options?.replace ? "replaceState" : "pushState";
+    if (change === "location-only" || !controller) {
+      controller?.cancel();
+      if (historyMethod) window.history[historyMethod]({}, "", target);
+      locationRef.current = next;
+      setLocation(next);
+      return;
+    }
+    void controller.transition({
+      from: previous.pathname,
+      to: next.pathname,
+      commit: (mode) => commitLocation(next, historyMethod, mode, true),
+    });
+  }, [commitLocation, controller]);
+
+  useEffect(() => {
+    const onMechanicalNavigation = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      if (!detail || typeof detail !== "object") return;
+      const candidate = detail as { path?: unknown; replace?: unknown };
+      if (typeof candidate.path !== "string") return;
+      navigate(candidate.path, { replace: candidate.replace === true });
+    };
+    window.addEventListener(MECHANICAL_NAVIGATION_REQUEST_EVENT, onMechanicalNavigation);
+    return () => window.removeEventListener(MECHANICAL_NAVIGATION_REQUEST_EVENT, onMechanicalNavigation);
+  }, [navigate]);
 
   const value = useMemo<NavigationContextValue>(() => ({ ...location, navigate }), [location, navigate]);
 
-  return <NavigationContext.Provider value={value}>{children}</NavigationContext.Provider>;
+  return (
+    <NavigationContext.Provider value={value}>
+      {children}
+      <div className="ti-route-mechanism" data-route-transition-mechanism="titanium-plate-assembly" aria-hidden="true">
+        {Array.from({ length: 8 }, (_, index) => <span key={index} className="ti-route-mechanism__plate" />)}
+      </div>
+    </NavigationContext.Provider>
+  );
 }
 
 export function useNavigation(): NavigationContextValue {
@@ -65,26 +484,35 @@ export function useNavigation(): NavigationContextValue {
   return value;
 }
 
-export function AppLink({ href, children, className, onClick, ...props }: {
+type AppLinkProps = Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href" | "onClick"> & {
   href: string;
-  children: ReactNode;
-  className?: string;
   onClick?: () => void;
-  "aria-label"?: string;
-}) {
+};
+
+export function AppLink({ href, children, onClick, target, download, ...props }: AppLinkProps) {
   const { navigate } = useNavigation();
   const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
     if (event.defaultPrevented) {
       onClick?.();
       return;
     }
-    const nonPrimaryPointer = event.detail > 0 && event.button !== 0;
-    if (nonPrimaryPointer || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    if (!shouldInterceptAppLinkClick({
+      href,
+      button: event.button,
+      detail: event.detail,
+      defaultPrevented: event.defaultPrevented,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      target,
+      hasDownload: download !== undefined,
+    })) return;
     event.preventDefault();
     navigate(href);
     onClick?.();
   };
-  return <a href={href} className={className} onClick={handleClick} {...props}>{children}</a>;
+  return <a href={href} target={target} download={download} onClick={handleClick} {...props}>{children}</a>;
 }
 
 export function matchPath(pattern: string, pathname: string): Record<string, string> | null {

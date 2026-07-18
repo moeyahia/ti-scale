@@ -1,0 +1,236 @@
+/*
+ * Route motion is isolated from the design tokens on purpose. The router sets
+ * semantic state on both `html` and `.ti-scale`; the fixed mechanism never
+ * participates in layout or input and is removed from rendering while idle.
+ */
+
+.ti-route-surface {
+  min-width: 0;
+  min-height: 100%;
+  transform-origin: 50% 42%;
+}
+
+.ti-route-mechanism {
+  position: fixed;
+  z-index: 70;
+  inset: 64px 0 0 232px;
+  overflow: hidden;
+  contain: strict;
+  pointer-events: none;
+  visibility: hidden;
+  perspective: 1200px;
+}
+
+.ti-route-mechanism__plate {
+  --plate-x: 0;
+  --plate-y: 0;
+  --plate-r: 0deg;
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  width: clamp(9rem, 24vw, 30rem);
+  height: clamp(4rem, 15vh, 10rem);
+  border: 1px solid rgba(108, 115, 122, 0.4);
+  background:
+    linear-gradient(112deg, rgba(255, 255, 255, 0.98) 0 19%, rgba(203, 205, 205, 0.94) 42%, rgba(255, 254, 250, 0.99) 64%, rgba(174, 179, 183, 0.9) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    inset 0 -1px 0 rgba(89, 94, 98, 0.18),
+    0 18px 44px rgba(17, 19, 21, 0.12);
+  clip-path: polygon(5% 0, 100% 0, 94% 84%, 82% 84%, 77% 100%, 0 100%);
+  opacity: 0;
+  will-change: transform, opacity, clip-path;
+}
+
+.ti-route-mechanism__plate::before,
+.ti-route-mechanism__plate::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+
+.ti-route-mechanism__plate::before {
+  inset: 9px;
+  border-top: 1px solid rgba(89, 94, 98, 0.32);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.8);
+  clip-path: polygon(0 0, 92% 0, 100% 50%, 92% 100%, 0 100%, 7% 50%);
+}
+
+.ti-route-mechanism__plate::after {
+  width: 5px;
+  height: 5px;
+  right: 15px;
+  top: 13px;
+  border: 1px solid rgba(89, 94, 98, 0.48);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: -24px 0 0 -1px rgba(108, 115, 122, 0.48);
+}
+
+.ti-route-mechanism__plate:nth-child(1) { --plate-x: -46vw; --plate-y: -35vh; --plate-r: -14deg; }
+.ti-route-mechanism__plate:nth-child(2) { --plate-x: -10vw; --plate-y: -46vh; --plate-r: 7deg; width: clamp(8rem, 20vw, 25rem); }
+.ti-route-mechanism__plate:nth-child(3) { --plate-x: 38vw; --plate-y: -31vh; --plate-r: 15deg; }
+.ti-route-mechanism__plate:nth-child(4) { --plate-x: 48vw; --plate-y: 4vh; --plate-r: -8deg; width: clamp(7rem, 18vw, 22rem); }
+.ti-route-mechanism__plate:nth-child(5) { --plate-x: 35vw; --plate-y: 37vh; --plate-r: 12deg; }
+.ti-route-mechanism__plate:nth-child(6) { --plate-x: -3vw; --plate-y: 47vh; --plate-r: -6deg; width: clamp(8rem, 21vw, 26rem); }
+.ti-route-mechanism__plate:nth-child(7) { --plate-x: -42vw; --plate-y: 34vh; --plate-r: 10deg; }
+.ti-route-mechanism__plate:nth-child(8) { --plate-x: -51vw; --plate-y: 1vh; --plate-r: -11deg; width: clamp(7rem, 18vw, 22rem); }
+
+html[data-route-transition="disassembling"] .ti-route-mechanism,
+html[data-route-transition="assembling"] .ti-route-mechanism {
+  visibility: visible;
+}
+
+html[data-route-transition="disassembling"] .ti-route-surface {
+  animation: ti-route-surface-disassemble 180ms cubic-bezier(0.55, 0.01, 0.72, 0.3) both;
+  pointer-events: none;
+}
+
+html[data-route-transition="disassembling"] .ti-route-mechanism__plate {
+  animation: ti-route-plate-release 158ms cubic-bezier(0.55, 0.01, 0.72, 0.3) both;
+}
+
+html[data-route-transition="disassembling"] .ti-route-mechanism__plate:nth-child(2n) { animation-delay: 12ms; }
+html[data-route-transition="disassembling"] .ti-route-mechanism__plate:nth-child(3n) { animation-delay: 22ms; }
+
+html[data-route-transition-mode="fallback"][data-route-transition="assembling"] .ti-route-surface {
+  animation: ti-route-surface-assemble 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  pointer-events: none;
+}
+
+html[data-route-transition="assembling"] .ti-route-mechanism__plate {
+  animation: ti-route-plate-lock 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+html[data-route-transition="assembling"] .ti-route-mechanism__plate:nth-child(2n) { animation-delay: 20ms; }
+html[data-route-transition="assembling"] .ti-route-mechanism__plate:nth-child(3n) { animation-delay: 38ms; }
+
+@keyframes ti-route-surface-disassemble {
+  0% {
+    opacity: 1;
+    transform: perspective(1200px) translate3d(0, 0, 0) rotateX(0deg) scale(1);
+    clip-path: inset(0 0 0 0);
+    filter: saturate(1) contrast(1);
+  }
+  54% {
+    opacity: 0.84;
+    transform: perspective(1200px) translate3d(0, 2px, -18px) rotateX(0.45deg) scale(0.995);
+    clip-path: polygon(0 0, 49.65% 0, 50.35% 2%, 100% 2%, 100% 98%, 50.25% 98%, 49.55% 100%, 0 100%);
+  }
+  100% {
+    opacity: 0;
+    transform: perspective(1200px) translate3d(0, 12px, -74px) rotateX(2deg) scale(0.982);
+    clip-path: polygon(0 8%, 46% 8%, 48% 24%, 100% 15%, 100% 88%, 54% 88%, 50% 74%, 0 96%);
+    filter: saturate(0.72) contrast(1.06);
+  }
+}
+
+@keyframes ti-route-surface-assemble {
+  0% {
+    opacity: 0;
+    transform: perspective(1200px) translate3d(0, -10px, -86px) rotateX(-1.8deg) scale(0.976);
+    clip-path: polygon(0 12%, 43% 12%, 49% 28%, 100% 4%, 100% 90%, 57% 90%, 51% 72%, 0 100%);
+    filter: saturate(0.74) contrast(1.07);
+  }
+  58% {
+    opacity: 0.92;
+    transform: perspective(1200px) translate3d(0, 0, -8px) rotateX(-0.3deg) scale(0.997);
+    clip-path: polygon(0 0, 49.5% 0, 50.4% 2%, 100% 0, 100% 100%, 50.5% 98%, 49.6% 100%, 0 100%);
+  }
+  100% {
+    opacity: 1;
+    transform: perspective(1200px) translate3d(0, 0, 0) rotateX(0deg) scale(1);
+    clip-path: inset(0 0 0 0);
+    filter: saturate(1) contrast(1);
+  }
+}
+
+@keyframes ti-route-plate-release {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, -50%, 30px) rotate(0deg) scale(0.4, 0.2);
+  }
+  22% { opacity: 0.88; }
+  100% {
+    opacity: 0;
+    transform: translate3d(calc(-50% + var(--plate-x)), calc(-50% + var(--plate-y)), 110px) rotate(var(--plate-r)) scale(0.92);
+  }
+}
+
+@keyframes ti-route-plate-lock {
+  0% {
+    opacity: 0;
+    transform: translate3d(calc(-50% + var(--plate-x)), calc(-50% + var(--plate-y)), 120px) rotate(var(--plate-r)) scale(0.86);
+  }
+  38% { opacity: 0.82; }
+  78% {
+    opacity: 0.55;
+    transform: translate3d(-50%, -50%, 16px) rotate(0deg) scale(0.42, 0.24);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-50%, -50%, 0) rotate(0deg) scale(0.25, 0.08);
+  }
+}
+
+@supports (view-transition-name: none) {
+  html[data-route-transition-mode="native"] .ti-route-surface {
+    view-transition-name: ti-route-surface;
+  }
+
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+    mix-blend-mode: normal;
+  }
+
+  ::view-transition-group(ti-route-surface) {
+    z-index: 2;
+    animation-duration: 520ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  ::view-transition-old(ti-route-surface) {
+    opacity: 0;
+    animation: none;
+  }
+
+  ::view-transition-new(ti-route-surface) {
+    transform-origin: 50% 42%;
+    mix-blend-mode: normal;
+    animation: ti-route-native-assemble 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+}
+
+@keyframes ti-route-native-assemble {
+  0% {
+    opacity: 0;
+    transform: perspective(1200px) translate3d(0, -14px, -92px) rotateX(-2.2deg) scale(0.972);
+    clip-path: polygon(0 16%, 39% 16%, 48% 34%, 100% 5%, 100% 86%, 60% 86%, 51% 68%, 0 100%);
+    filter: saturate(0.7) contrast(1.08);
+  }
+  46% {
+    opacity: 0.78;
+    clip-path: polygon(0 3%, 48% 3%, 50% 12%, 100% 0, 100% 98%, 52% 96%, 50% 88%, 0 100%);
+  }
+  100% {
+    opacity: 1;
+    transform: perspective(1200px) translate3d(0, 0, 0) rotateX(0deg) scale(1);
+    clip-path: inset(0 0 0 0);
+    filter: saturate(1) contrast(1);
+  }
+}
+
+@media (max-width: 1180px) {
+  .ti-route-mechanism { left: 76px; }
+}
+
+@media (max-width: 760px) {
+  .ti-route-mechanism { inset: 64px 0 0; }
+  .ti-route-mechanism__plate { width: clamp(7rem, 40vw, 16rem); height: clamp(3.5rem, 12vh, 7rem); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ti-route-mechanism { display: none !important; }
+  .ti-route-surface { animation: none !important; transform: none !important; clip-path: none !important; filter: none !important; }
+}

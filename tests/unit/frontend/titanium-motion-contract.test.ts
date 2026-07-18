@@ -44,7 +44,8 @@ describe("Ti-Scale materially intelligent motion contract", () => {
     expect(shell).toContain('document.addEventListener("visibilitychange"');
     expect(css).toContain('.ti-scale[data-motion-state="paused"] *');
     const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{(?<body>[\s\S]*?)\n\}/u)?.groups?.body ?? "";
-    expect(reduced).toContain(".ti-scale-core__sheen { display: none !important; }");
+    expect(reduced).toContain(".ti-scale-core__sheen,");
+    expect(reduced).toContain(".ti-scale-core__shards { display: none !important; }");
     expect(reduced).toContain(".ti-command-hero__title-line > span");
     expect(reduced).toContain("animation: none !important;");
     expect(reduced).toContain("--ti-depth-x: 0px !important;");

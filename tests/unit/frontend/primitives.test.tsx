@@ -10,8 +10,10 @@ describe("shared recovery controls", () => {
       </form>,
     );
 
-    expect(markup).toContain('<button class="os-button os-button--secondary " type="button">Try again</button>');
-    expect(markup).not.toContain('type="submit">Try again</button>');
+    expect(markup).toContain('<button class="os-button os-button--secondary " data-ti-actuator="secondary" type="button">');
+    expect(markup).toContain('<span class="os-button__label">Try again</span>');
+    expect(markup).toContain('<span class="os-button__mechanism" aria-hidden="true"><i></i><i></i><i></i></span>');
+    expect(markup).not.toContain('type="submit"');
   });
 
   test("renders measured and indeterminate progress with permitted ARIA progressbar semantics", () => {

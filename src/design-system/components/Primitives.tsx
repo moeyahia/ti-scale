@@ -23,9 +23,14 @@ export function Card({ children, className = "", ...props }: HTMLAttributes<HTML
   return <section className={`os-card ${className}`} {...props}>{children}</section>;
 }
 
-export function Button({ variant = "primary", className = "", ...props }:
+export function Button({ variant = "primary", className = "", children, ...props }:
   ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "danger" | "quiet" }) {
-  return <button className={`os-button os-button--${variant} ${className}`} {...props} />;
+  return (
+    <button className={`os-button os-button--${variant} ${className}`} data-ti-actuator={variant} {...props}>
+      <span className="os-button__label">{children}</span>
+      <span className="os-button__mechanism" aria-hidden="true"><i /><i /><i /></span>
+    </button>
+  );
 }
 
 export function ButtonLink({ href, variant = "primary", children, className = "", "aria-label": ariaLabel }: {
@@ -35,7 +40,16 @@ export function ButtonLink({ href, variant = "primary", children, className = ""
   className?: string;
   "aria-label"?: string;
 }) {
-  return <AppLink href={href} className={`os-button os-button--${variant} ${className}`} aria-label={ariaLabel}>{children}</AppLink>;
+  return (
+    <AppLink
+      href={href}
+      className={`os-button os-button--${variant} ${className}`}
+      aria-label={ariaLabel}
+    >
+      <span className="os-button__label">{children}</span>
+      <span className="os-button__mechanism" aria-hidden="true"><i /><i /><i /></span>
+    </AppLink>
+  );
 }
 
 export function StatusPill({ status, children }: { status: string; children?: ReactNode }) {

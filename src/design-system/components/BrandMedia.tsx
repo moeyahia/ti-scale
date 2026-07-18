@@ -1,4 +1,9 @@
-import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { assetUrl } from "../../lib/assetUrl";
 
 type TitaniumCoreVariant = "command" | "journeys";
@@ -14,6 +19,9 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
   const core1344Webp = assetUrl("brand-v2/optimized/ti-scale-higgsfield-core-1344.webp");
   const metalGradientId = `ti-adaptive-metal-${variant}`;
   const darkGradientId = `ti-adaptive-graphite-${variant}`;
+  const materialStyle = {
+    "--ti-core-image": `url("${core1024Webp}")`,
+  } as CSSProperties;
 
   useEffect(() => () => {
     if (animationFrameRef.current !== null) {
@@ -70,12 +78,18 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
     <div
       ref={rootRef}
       className={`os-brand-media os-brand-media--${variant} ti-scale-core ti-scale-core--${variant}`}
+      data-ti-transformer-core="true"
+      style={materialStyle}
       aria-hidden="true"
       onPointerMove={setPointerDepth}
       onPointerLeave={resetPointerDepth}
       onPointerCancel={resetPointerDepth}
     >
       <span className="ti-scale-core__wake" />
+      <span className="ti-scale-core__hud ti-scale-core__hud--north" />
+      <span className="ti-scale-core__hud ti-scale-core__hud--east" />
+      <span className="ti-scale-core__hud ti-scale-core__hud--south" />
+      <span className="ti-scale-core__hud ti-scale-core__hud--west" />
       <svg className="ti-scale-core__architecture" viewBox="0 0 800 620" preserveAspectRatio="xMidYMid meet" focusable="false">
         <defs>
           <linearGradient id={metalGradientId} x1="0" y1="0" x2="1" y2="1">
@@ -94,6 +108,14 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
         <path className="ti-scale-core__plate ti-scale-core__plate--upper" fill={`url(#${darkGradientId})`} d="m385 72 338 155-91 139-278-206Z" />
         <path className="ti-scale-core__plate ti-scale-core__plate--lower" fill={`url(#${metalGradientId})`} d="m255 418 347-116 137 195-359 73Z" />
       </svg>
+      <span className="ti-scale-core__shards">
+        {Array.from({ length: 8 }, (_, index) => (
+          <span
+            className={`ti-scale-core__shard ti-scale-core__shard--${index + 1}`}
+            key={index}
+          />
+        ))}
+      </span>
       <picture className="ti-scale-core__media">
         <source
           type="image/avif"
