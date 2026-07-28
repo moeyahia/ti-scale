@@ -388,6 +388,23 @@ function localActivationProjection(
   };
 }
 
+function withRuntimeGenerationLabel(
+  input: RuntimeProjectionInput,
+  label: string,
+): RuntimeProjectionInput {
+  const manifests = input.capabilityManifests!;
+  return {
+    ...input,
+    capabilityManifests: {
+      ...manifests,
+      riskClasses: manifests.riskClasses.map((riskClass) => ({
+        ...riskClass,
+        label,
+      })),
+    },
+  };
+}
+
 function localExecutionBinding(
   modelConfigurationHash: string,
 ): LocalAutonomousPlannerBindingReceipt {
@@ -2043,7 +2060,7 @@ describe("disposable Autonomous activation proof", () => {
     ]);
   });
 
-  test("keeps a local receipt through a same-capability observation refresh, then renews immutably for the next step after expiry and restart", () => {
+  test("keeps observation refreshes, rejects live generation drift, and renews an expired receipt against a fresh generation", () => {
     const db = database();
     seed(db);
     const configurationHash = modelConfigurationBindingHash(
@@ -2094,6 +2111,22 @@ describe("disposable Autonomous activation proof", () => {
     expect(service.verifyCurrent({ runId: RUN_ID }).receiptId).toBe(
       first.receiptId,
     );
+    liveProjection = withRuntimeGenerationLabel(
+      liveProjection,
+      "Changed while the first receipt remains live",
+    );
+    expect(() => service.verifyCurrent({ runId: RUN_ID })).toThrow(
+      expect.objectContaining({
+        code: "activation_receipt_runtime_generation_drift",
+      }),
+    );
+    liveProjection = localActivationProjection(
+      configurationHash,
+      localToolAttestation(
+        "2026-07-19T10:30:30.000Z",
+        "2026-07-19T10:31:30.000Z",
+      ),
+    );
     service.verifyAndBind({
       runId: RUN_ID,
       bindingType: "dispatch",
@@ -2137,12 +2170,15 @@ describe("disposable Autonomous activation proof", () => {
       WHERE run_id = ?
     `).get(RUN_ID)).toEqual({ count: 1 });
 
-    liveProjection = localActivationProjection(
-      configurationHash,
-      localToolAttestation(
-        "2026-07-19T10:31:31.000Z",
-        "2026-07-19T10:32:31.000Z",
+    liveProjection = withRuntimeGenerationLabel(
+      localActivationProjection(
+        configurationHash,
+        localToolAttestation(
+          "2026-07-19T10:31:31.000Z",
+          "2026-07-19T10:32:31.000Z",
+        ),
       ),
+      "Changed only after the first receipt expired",
     );
     const restarted = new AutonomousActivationRuntimeService(
       db,
@@ -2177,10 +2213,13 @@ describe("disposable Autonomous activation proof", () => {
       },
       {
         generation: 2,
-        runtime_generation_hash: first.runtimeGenerationHash,
+        runtime_generation_hash: second.runtimeGenerationHash,
         tool_activation_receipt_hash: expect.any(String),
       },
     ]);
+    expect(second.runtimeGenerationHash).not.toBe(
+      first.runtimeGenerationHash,
+    );
     const proofHashes = db.prepare(`
       SELECT item.tool_activation_receipt_hash AS hash
       FROM autonomous_activation_receipts receipt

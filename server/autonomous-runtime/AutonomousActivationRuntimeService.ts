@@ -750,23 +750,13 @@ implements AutonomousActivationRuntimePort {
         const current = this.#repository.findCurrentForRun(input.runId);
         let nextGeneration = 1;
         if (current) {
-          let currentExpired = false;
-          let verified: AutonomousActivationReceipt;
-          try {
-            verified = this.#verify(authority, generation, current.id).receipt;
-          } catch (error) {
-            if (
-              !(error instanceof AutonomousActivationReceiptIntegrityError) ||
-              error.code !== "activation_receipt_expired"
-            ) throw error;
-            currentExpired = true;
-            verified = this.#verify(
-              authority,
-              generation,
-              current.id,
-              true,
-            ).receipt;
-          }
+          const currentState = this.#verifyCurrentOrExpiredLineage(
+            authority,
+            generation,
+            current.id,
+          );
+          const currentExpired = currentState.expired;
+          const verified = currentState.receipt;
           if (
             !currentExpired &&
             verified.brainContextPackId === input.brainContextPackId
@@ -823,20 +813,14 @@ implements AutonomousActivationRuntimePort {
           );
         }
         let rotated = false;
-        let verified: AutonomousActivationReceipt;
-        try {
-          verified = this.#verify(authority, generation, current.id).receipt;
-        } catch (error) {
-          if (
-            !(error instanceof AutonomousActivationReceiptIntegrityError) ||
-            error.code !== "activation_receipt_expired"
-          ) throw error;
-          const expired = this.#verify(
-            authority,
-            generation,
-            current.id,
-            true,
-          ).receipt;
+        const currentState = this.#verifyCurrentOrExpiredLineage(
+          authority,
+          generation,
+          current.id,
+        );
+        let verified = currentState.receipt;
+        if (currentState.expired) {
+          const expired = currentState.receipt;
           verified = this.#issue({
             authority,
             generation,
@@ -1581,6 +1565,7 @@ implements AutonomousActivationRuntimePort {
     generation: RuntimeGeneration,
     receiptId: string,
     allowExpired = false,
+    requireCurrentRuntimeGeneration = true,
   ) {
     const actionPolicy = record(
       JSON.parse(authority.action_policy_json) as unknown,
@@ -1601,7 +1586,9 @@ implements AutonomousActivationRuntimePort {
       contractId: authority.contract_id!,
       contractVersion: authority.contract_version_bound!,
       contractHash: authority.contract_hash_bound!,
-      runtimeGenerationHash: generation.hash,
+      ...(requireCurrentRuntimeGeneration
+        ? { runtimeGenerationHash: generation.hash }
+        : {}),
       evidencePolicyHash:
         autonomousActivationEvidencePolicyHash(
           uniqueSorted(
@@ -1614,5 +1601,39 @@ implements AutonomousActivationRuntimePort {
       selectedActionClassIds: actionClassIds,
       allowExpired,
     });
+  }
+
+  /**
+   * An expired receipt is immutable history, not continuing authority. Verify
+   * its full persisted lineage without requiring it to equal today's runtime
+   * generation, then let the caller issue a new receipt from freshly resolved
+   * routes. A still-live receipt must continue to match the current generation
+   * exactly and therefore fails closed on drift.
+   */
+  #verifyCurrentOrExpiredLineage(
+    authority: RunAuthorityRow,
+    generation: RuntimeGeneration,
+    receiptId: string,
+  ): Readonly<{
+    receipt: AutonomousActivationReceipt;
+    expired: boolean;
+  }> {
+    const lineage = this.#verify(
+      authority,
+      generation,
+      receiptId,
+      true,
+      false,
+    ).receipt;
+    const expired =
+      generation.now.getTime() >= timestamp(
+        lineage.expiresAt,
+        `Activation receipt ${lineage.id} expiry`,
+      );
+    if (expired) return { receipt: lineage, expired: true };
+    return {
+      receipt: this.#verify(authority, generation, receiptId).receipt,
+      expired: false,
+    };
   }
 }
