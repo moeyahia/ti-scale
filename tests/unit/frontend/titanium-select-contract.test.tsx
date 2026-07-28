@@ -97,7 +97,7 @@ describe("Ti-Scale command selector", () => {
       "autonomous-branch-model-fallback-model",
       "autonomous-branch-model-fallback-reasoning",
     ].forEach((controlId) => expect(interactionManifest).toContain(controlId));
-    expect(migratedCount).toBe(72);
+    expect(migratedCount).toBe(76);
   });
 
   test("owns a branded portal disclosure without native picker or compositor top-layer dependencies", () => {
@@ -111,6 +111,8 @@ describe("Ti-Scale command selector", () => {
     expect(shellCss).toContain("z-index: var(--os-z-accessibility);");
     expect(controlsCss).toContain('data-positioning="sheet"');
     expect(controlsCss).not.toContain('data-positioning="anchored"');
+    expect(controlsCss).toContain('inset: max(1rem, env(safe-area-inset-top)) 1rem auto 1rem;');
+    expect(controlsCss).toContain("max-height: calc(100dvh - 2rem);");
     expect(controlsCss).not.toContain("position-try-fallbacks:");
     expect(controlsCss).not.toContain("@keyframes ti-select-deploy");
     expect(selectSource).toContain('import { createPortal } from "react-dom";');

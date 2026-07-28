@@ -22,7 +22,7 @@ function filesUnder(root: string): string[] {
 describe("Ti-Scale interaction manifest", () => {
   test("is schema-valid and unique while reporting the current audited state", () => {
     expect(manifest.namespace).toBe(INTERACTION_MANIFEST_NAMESPACE);
-    expect(manifest.entries).toHaveLength(798);
+    expect(manifest.entries).toHaveLength(824);
     expect(new Set(manifest.entries.map((entry) => entry.id)).size).toBe(manifest.entries.length);
     expect(new Set(manifest.entries.map((entry) => entry.controlId)).size).toBe(manifest.entries.length);
     expect(manifest.scope).toContain("shell navigation");
@@ -391,14 +391,14 @@ describe("Ti-Scale interaction manifest", () => {
       ...runIntelligence, ...operationalTruth, ...failureDiagnosis, ...planChanges, ...directPlanChanges, ...cveApplicability, ...artifactIntelligence,
     ];
 
-    expect(runIntelligence).toHaveLength(16);
+    expect(runIntelligence).toHaveLength(42);
     expect(operationalTruth).toHaveLength(25);
     expect(failureDiagnosis).toHaveLength(9);
     expect(planChanges).toHaveLength(22);
     expect(directPlanChanges).toHaveLength(46);
     expect(cveApplicability).toHaveLength(9);
     expect(artifactIntelligence).toHaveLength(14);
-    expect(dynamicFixtureEntries).toHaveLength(141);
+    expect(dynamicFixtureEntries).toHaveLength(167);
     expect(new Set(dynamicFixtureEntries.map((entry) => entry.route))).toEqual(new Set([
       "/missions/:missionId/runs/:runId",
       "/missions/:missionId/runs/:runId?tab=plan",
@@ -412,13 +412,13 @@ describe("Ti-Scale interaction manifest", () => {
     }
     const dedicated = dynamicFixtureEntries.filter((entry) => !entry.testIds.includes("e2e.manifest.coverage-audit"));
     const unresolved = dynamicFixtureEntries.filter((entry) => entry.testIds.includes("e2e.manifest.coverage-audit"));
-    expect(topologyInteractions).toHaveLength(10);
+    expect(topologyInteractions).toHaveLength(36);
     expect(dedicated.map((entry) => entry.id)).toEqual(dynamicFixtureEntries.map((entry) => entry.id));
-    expect(dedicated).toHaveLength(141);
+    expect(dedicated).toHaveLength(167);
     expect(unresolved).toHaveLength(0);
     expect(unresolved.every((entry) => entry.testIds.length === 1)).toBe(true);
     const fixtureRequiredEntryCount = manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:")).length;
-    expect(fixtureRequiredEntryCount).toBe(576);
+    expect(fixtureRequiredEntryCount).toBe(602);
     expect(manifest.scope).toContain(`All ${fixtureRequiredEntryCount} fixture-required groups`);
     expect(manifest.knownGaps.some((gap) =>
       gap.includes(`All ${fixtureRequiredEntryCount} entries`)
@@ -699,7 +699,7 @@ describe("Ti-Scale interaction manifest", () => {
     expect(findingReviewSubmission?.testIds)
       .toEqual(["e2e.intelligence.findings-list-detail-controls"]);
     expect(new Set(entries.flatMap((entry) => entry.testIds))).toEqual(allowedTestIds);
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(602);
   });
 
   test("inventories Second Brain home, inbox, graph, and graph-return families against only their dedicated fixture sources", () => {
@@ -770,7 +770,7 @@ describe("Ti-Scale interaction manifest", () => {
     expect(graph.find((entry) => entry.id === "brain.graph.canvas")?.accessible.role).toBe("application");
     expect(home.find((entry) => entry.id === "brain.home.node-links")?.accessible.name)
       .toBe("^Open memory .+ \\([A-Za-z0-9._:-]+\\)$");
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(602);
   });
 
   test("inventories the authenticated Operator Preferences route and its populated profile links", () => {
@@ -932,7 +932,7 @@ describe("Ti-Scale interaction manifest", () => {
       expect(entry.testIds.every((testId) => allowedTestIds.has(testId)), entry.id).toBe(true);
     }
     expect(new Set(entries.flatMap((entry) => entry.testIds))).toEqual(allowedTestIds);
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(602);
   });
 
   test("inventories the mounted Vault lifecycle against dedicated isolated fixture sources", () => {
@@ -1081,12 +1081,12 @@ describe("Ti-Scale interaction manifest", () => {
     ]);
     expect(new Set(visualEntries.flatMap((entry) => entry.screenshotsRequired)).size).toBe(6);
     const unmappedVisualEntryCount = manifest.entries.filter((entry) => entry.screenshotsRequired.length === 0).length;
-    expect(unmappedVisualEntryCount).toBe(744);
+    expect(unmappedVisualEntryCount).toBe(770);
     expect(manifest.knownGaps.some((gap) =>
       gap.includes("Nineteen deterministic Chromium 1440")
       && gap.includes(`remaining ${unmappedVisualEntryCount} entries`)
     )).toBe(true);
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(602);
   });
 
   test("inventories System controls against only existing dedicated System fixture sources", () => {
@@ -1162,7 +1162,7 @@ describe("Ti-Scale interaction manifest", () => {
     ]);
     expect(manifest.knownGaps.some((gap) => gap.includes("health-error retry"))).toBe(false);
     expect(manifest.knownGaps.some((gap) => gap.includes("non-MCP query-retry states"))).toBe(false);
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(602);
     expect(manifest.knownGaps.some((gap) => gap.includes("System health-metric activation"))).toBe(false);
   });
 
@@ -1259,7 +1259,7 @@ describe("Ti-Scale interaction manifest", () => {
     expect(new Set(entries.flatMap((entry) => entry.testIds))).toEqual(allowedTestIds);
     expect(new Set(entries.filter((entry) => entry.id.startsWith("overview.")).map((entry) => entry.route))).toEqual(new Set(["/"]));
     expect(new Set(entries.filter((entry) => entry.id.startsWith("mission-portfolio.")).map((entry) => entry.route))).toEqual(new Set(["/missions"]));
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(602);
   });
 
   test("assigns every dynamic journey, agent, trace, and report family to a dedicated canonical browser path", () => {

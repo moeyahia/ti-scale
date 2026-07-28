@@ -442,6 +442,11 @@
 
 @media (max-width: 640px) {
   .ti-scale .os-titanium-select__listbox { width: 100%; max-width: calc(100vw - 2rem); }
+  .ti-scale .os-titanium-select__listbox[data-positioning="sheet"] {
+    inset: max(1rem, env(safe-area-inset-top)) 1rem auto 1rem;
+    max-height: calc(100dvh - 2rem);
+    transform-origin: 50% 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { NavigationProvider } from "../../../src/app/router/navigation";
+import type { Observation } from "../../../server/intelligence-v24";
+import { ReviewedNmapTopologyMaterializer } from "../../../server/local-tools";
 import { AttackAttemptService, ReconDigitalTwinService, RunMetricsService } from "../../../server/run-intelligence";
 import { runIntelligenceApi } from "../../../src/data/api/runIntelligence";
 import {
@@ -18,6 +20,7 @@ import {
   MISSION_ID,
   NOW,
   RUN_ID,
+  STEP_ONE_ID,
   createTestDatabase,
   insertEvidence,
 } from "../run-intelligence/fixtures";
@@ -73,6 +76,94 @@ function createIntelligenceFixture() {
   return { database, twin, asset, attempt };
 }
 
+function materializeReviewedNmapGraph(
+  database: ReturnType<typeof createTestDatabase>,
+) {
+  const target = "192.0.2.44";
+  const targetId = "target-reviewed-nmap-browser";
+  const observationId = "observation-reviewed-nmap-browser";
+  const toolId = "kali:nmap-tcp-connect-service-scan";
+  database.prepare(`
+    INSERT INTO mission_targets (
+      id, mission_id, target, target_type, disposition, normalized_target, created_at
+    ) VALUES (?, ?, ?, 'host', 'allowed', ?, ?)
+  `).run(targetId, MISSION_ID, target, target, NOW);
+  const observation: Observation = {
+    id: observationId,
+    missionId: MISSION_ID,
+    runId: RUN_ID,
+    stepId: STEP_ONE_ID,
+    observationType: "tcp_service_scan",
+    statement: "The reviewed local Nmap result reported two open TCP services.",
+    normalizedValue: {
+      missionId: MISSION_ID,
+      runId: RUN_ID,
+      missionTargetId: targetId,
+      toolId,
+      result: {
+        host: target,
+        scanCompleted: true,
+        hostReportedUp: true,
+        openPorts: [
+          {
+            port: 22,
+            transport: "tcp",
+            state: "open",
+            service: "ssh",
+            version: "OpenSSH 9.6p1 Ubuntu",
+          },
+          {
+            port: 8080,
+            transport: "tcp",
+            state: "open",
+            service: null,
+            version: null,
+          },
+        ],
+      },
+    },
+    confidence: 0.88,
+    verificationState: "unverified",
+    sourceAgentId: AGENT_ONE_ID,
+    sourceTool: toolId,
+    firstSeenAt: NOW,
+    lastSeenAt: NOW,
+    sensitivity: "internal",
+    sources: [],
+    createdAt: NOW,
+  };
+  database.prepare(`
+    INSERT INTO observations (
+      id, mission_id, run_id, step_id, observation_type, statement,
+      normalized_value_json, confidence, verification_state, source_agent_id,
+      source_tool, first_seen_at, last_seen_at, sensitivity, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    observation.id,
+    observation.missionId,
+    observation.runId,
+    observation.stepId,
+    observation.observationType,
+    observation.statement,
+    JSON.stringify(observation.normalizedValue),
+    observation.confidence,
+    observation.verificationState,
+    observation.sourceAgentId,
+    observation.sourceTool,
+    observation.firstSeenAt,
+    observation.lastSeenAt,
+    observation.sensitivity,
+    observation.createdAt,
+  );
+  const materialization = new ReviewedNmapTopologyMaterializer(database)
+    .materialize(observation);
+  expect(materialization).toMatchObject({
+    status: "materialized",
+    reason: "reviewed_nmap_observation",
+  });
+  return new ReconDigitalTwinService(database).getGraph(MISSION_ID, RUN_ID);
+}
+
 describe("strict run-intelligence browser boundary", () => {
   test("accepts canonical metric, attempt, topology, node, and seven-layer OSI responses", () => {
     const fixture = createIntelligenceFixture();
@@ -113,6 +204,82 @@ describe("strict run-intelligence browser boundary", () => {
     } finally { fixture.database.close(); }
   });
 
+  test("accepts real observation-backed Reviewed Nmap topology while keeping evidence-backed states strict", () => {
+    const database = createTestDatabase();
+    try {
+      const graph = materializeReviewedNmapGraph(database);
+      const parsed = parseReconDigitalTwinDetail({
+        schemaVersion: "2.4",
+        digitalTwin: graph,
+      }).digitalTwin;
+      expect(parsed.nodes).toHaveLength(3);
+      expect(parsed.edges).toHaveLength(2);
+      expect([...parsed.nodes, ...parsed.edges].every((item) =>
+        item.verificationState === "unverified"
+        && item.evidence.length === 0
+        && item.provenance.method === "reviewed_local_nmap_observation"
+        && item.provenance.sourceRef === item.provenance.observationIds?.[0]
+        && item.provenance.observationIds?.length === 1
+      )).toBeTrue();
+
+      expect(parseReconDigitalTwinDetail({
+        schemaVersion: "2.4",
+        digitalTwin: {
+          ...graph,
+          nodes: graph.nodes.map((node) => ({ ...node, verificationState: "stale" as const })),
+          edges: graph.edges.map((edge) => ({ ...edge, verificationState: "stale" as const })),
+        },
+      }).digitalTwin.nodes.every(({ verificationState }) => verificationState === "stale")).toBeTrue();
+
+      const [firstNode, ...remainingNodes] = graph.nodes;
+      const [firstEdge, ...remainingEdges] = graph.edges;
+      expect(firstNode).toBeDefined();
+      expect(firstEdge).toBeDefined();
+      expect(() => parseReconDigitalTwinDetail({
+        schemaVersion: "2.4",
+        digitalTwin: {
+          ...graph,
+          nodes: [{
+            ...firstNode!,
+            provenance: { ...firstNode!.provenance, observationIds: [] },
+          }, ...remainingNodes],
+        },
+      })).toThrow("requires non-empty attributable observation provenance");
+      expect(() => parseReconDigitalTwinDetail({
+        schemaVersion: "2.4",
+        digitalTwin: {
+          ...graph,
+          edges: [{
+            ...firstEdge!,
+            provenance: {
+              method: firstEdge!.provenance.method,
+              sourceRef: firstEdge!.provenance.sourceRef,
+              sourceTool: firstEdge!.provenance.sourceTool,
+            },
+          }, ...remainingEdges],
+        },
+      })).toThrow("requires non-empty attributable observation provenance");
+      for (const verificationState of ["verified", "corroborated", "conflicting"] as const) {
+        expect(() => parseReconDigitalTwinDetail({
+          schemaVersion: "2.4",
+          digitalTwin: {
+            ...graph,
+            nodes: [{ ...firstNode!, verificationState }, ...remainingNodes],
+          },
+        })).toThrow(`${verificationState} topology node requires canonical evidence`);
+        expect(() => parseReconDigitalTwinDetail({
+          schemaVersion: "2.4",
+          digitalTwin: {
+            ...graph,
+            edges: [{ ...firstEdge!, verificationState }, ...remainingEdges],
+          },
+        })).toThrow(`${verificationState} topology edge requires canonical evidence`);
+      }
+    } finally {
+      database.close();
+    }
+  });
+
   test("uses only authenticated read paths and validates the returned snapshot", async () => {
     const fixture = createIntelligenceFixture();
     try {
@@ -151,7 +318,7 @@ describe("run-intelligence presentational panels", () => {
     } finally { fixture.database.close(); }
   });
 
-  test("renders the evidence-backed relationship list and says Not observed for unknown OSI layers", () => {
+  test("renders the canonical relationship list and says Not observed for unknown OSI layers", () => {
     const fixture = createIntelligenceFixture();
     try {
       const graph = parseReconDigitalTwinDetail({ schemaVersion: "2.4", digitalTwin: fixture.twin.getGraph(MISSION_ID, RUN_ID) }).digitalTwin;
@@ -161,7 +328,7 @@ describe("run-intelligence presentational panels", () => {
           <ReconDigitalTwinPanel graph={graph} selectedNode={fixture.asset} osiStack={stack} />
         </NavigationProvider>,
       );
-      expect(markup).toContain("Evidence-backed topology list");
+      expect(markup).toContain("Canonical topology record list");
       expect(markup).toContain("evidence-browser-contract");
       expect(markup).toContain("exposes");
       expect(markup.match(/Not observed/g)?.length).toBeGreaterThanOrEqual(6);

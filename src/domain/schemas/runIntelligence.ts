@@ -369,8 +369,27 @@ function parseTopologyEvidence(value: unknown): TopologyEvidenceLink {
   };
 }
 
-function assertTopologyEvidence(subject: string, verificationState: TopologyNode["verificationState"], evidence: readonly TopologyEvidenceLink[]): void {
-  if (evidence.length === 0) throw new Error(`${subject} requires canonical evidence`);
+function assertTopologyEvidence(
+  subject: string,
+  verificationState: TopologyNode["verificationState"],
+  evidence: readonly TopologyEvidenceLink[],
+  provenance: IntelligenceProvenance,
+): void {
+  if (evidence.length === 0) {
+    const observationIds = provenance.observationIds ?? [];
+    const observationBacked = observationIds.length > 0
+      && provenance.method.trim().length > 0
+      && provenance.sourceRef.trim().length > 0
+      && Boolean(provenance.sourceAgentId || provenance.sourceTool);
+    if (
+      (verificationState === "unverified" || verificationState === "stale")
+      && observationBacked
+    ) return;
+    if (verificationState === "unverified" || verificationState === "stale") {
+      throw new Error(`${subject} without canonical evidence requires non-empty attributable observation provenance`);
+    }
+    throw new Error(`${verificationState} ${subject} requires canonical evidence`);
+  }
   const keys = new Set(evidence.map((link) => `${link.evidenceId}\0${link.relationship}`));
   if (keys.size !== evidence.length) throw new Error(`${subject} contains duplicate evidence relationships`);
   if (verificationState === "verified" && !evidence.some(({ verificationState: state }) => state === "verified")) {
@@ -386,7 +405,8 @@ export function parseTopologyNode(value: unknown): TopologyNode {
   const item = exact(value, "topology node", ["id", "missionId", "runId", "nodeType", "primaryLabel", "normalizedIdentity", "scopeStatus", "lifecycleState", "properties", "provenance", "confidence", "verificationState", "sensitivity", "firstSeenAt", "lastSeenAt", "evidence"]);
   const verificationState = enumValue<TopologyNode["verificationState"]>(item.verificationState, TOPOLOGY_VERIFICATION_STATES, "topology node verification state");
   const evidence = list(item.evidence, "topology node evidence").map(parseTopologyEvidence);
-  assertTopologyEvidence("topology node", verificationState, evidence);
+  const provenance = parseProvenance(item.provenance);
+  assertTopologyEvidence("topology node", verificationState, evidence, provenance);
   const firstSeenAt = timestamp(item.firstSeenAt, "topology node first seen time");
   const lastSeenAt = timestamp(item.lastSeenAt, "topology node last seen time");
   if (Date.parse(lastSeenAt) < Date.parse(firstSeenAt)) throw new Error("topology node observation window is invalid");
@@ -396,7 +416,7 @@ export function parseTopologyNode(value: unknown): TopologyNode {
     primaryLabel: text(item.primaryLabel, "topology node label"), normalizedIdentity: text(item.normalizedIdentity, "topology normalized identity"),
     scopeStatus: enumValue(item.scopeStatus, new Set(["allowed", "prohibited", "unknown", "out_of_scope"]), "topology scope status"),
     lifecycleState: enumValue(item.lifecycleState, new Set(["planned", "active", "validated", "blocked", "unreachable", "observed", "stale"]), "topology lifecycle state"),
-    properties: jsonObject(item.properties, "topology node properties"), provenance: parseProvenance(item.provenance),
+    properties: jsonObject(item.properties, "topology node properties"), provenance,
     confidence: confidence(item.confidence, "topology node confidence"), verificationState,
     sensitivity: enumValue(item.sensitivity, TOPOLOGY_SENSITIVITIES, "topology node sensitivity"),
     firstSeenAt, lastSeenAt, evidence,
@@ -407,7 +427,8 @@ function parseTopologyEdge(value: unknown): TopologyEdge {
   const item = exact(value, "topology edge", ["id", "missionId", "sourceNodeId", "targetNodeId", "edgeType", "properties", "provenance", "confidence", "verificationState", "sensitivity", "firstSeenAt", "lastSeenAt", "evidence"]);
   const verificationState = enumValue<TopologyEdge["verificationState"]>(item.verificationState, TOPOLOGY_VERIFICATION_STATES, "topology edge verification state");
   const evidence = list(item.evidence, "topology edge evidence").map(parseTopologyEvidence);
-  assertTopologyEvidence("topology edge", verificationState, evidence);
+  const provenance = parseProvenance(item.provenance);
+  assertTopologyEvidence("topology edge", verificationState, evidence, provenance);
   const firstSeenAt = timestamp(item.firstSeenAt, "topology edge first seen time");
   const lastSeenAt = timestamp(item.lastSeenAt, "topology edge last seen time");
   if (Date.parse(lastSeenAt) < Date.parse(firstSeenAt)) throw new Error("topology edge observation window is invalid");
@@ -417,7 +438,7 @@ function parseTopologyEdge(value: unknown): TopologyEdge {
   return {
     id: text(item.id, "topology edge ID"), missionId: text(item.missionId, "topology edge mission ID"), sourceNodeId, targetNodeId,
     edgeType: text(item.edgeType, "topology edge type"), properties: jsonObject(item.properties, "topology edge properties"),
-    provenance: parseProvenance(item.provenance), confidence: confidence(item.confidence, "topology edge confidence"), verificationState,
+    provenance, confidence: confidence(item.confidence, "topology edge confidence"), verificationState,
     sensitivity: enumValue(item.sensitivity, TOPOLOGY_SENSITIVITIES, "topology edge sensitivity"), firstSeenAt, lastSeenAt, evidence,
   };
 }

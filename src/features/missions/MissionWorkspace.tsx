@@ -164,9 +164,9 @@ function PlanPanel({
   if (plans.isLoading) return <LoadingPanel label="Loading versioned mission plan" />;
   if (plans.error && !plans.data) return <ErrorPanel title="Plan history is unavailable" error={plans.error} onRetry={plans.refresh} />;
   const activePlan = plans.data?.items.find((plan) => plan.id === run.currentPlanId) ?? plans.data?.items[0];
-  if (!activePlan) return <><ReconDigitalTwinSurface missionId={missionId} runId={run.id} currentStepId={run.currentStepId} /><Card><EmptyState title="No plan available" description="The runtime has not persisted a versioned plan for this run." /></Card><Suspense fallback={<LoadingPanel label="Loading script and page-capture intelligence" />}><ArtifactIntelligenceSurface missionId={missionId} runId={run.id} /></Suspense></>;
+  if (!activePlan) return <><ReconDigitalTwinSurface missionId={missionId} runId={run.id} currentStepId={run.currentStepId} surface="plan" /><Card><EmptyState title="No plan available" description="The runtime has not persisted a versioned plan for this run." /></Card><Suspense fallback={<LoadingPanel label="Loading script and page-capture intelligence" />}><ArtifactIntelligenceSurface missionId={missionId} runId={run.id} /></Suspense></>;
   const planningContexts = contexts.data?.items.filter((item) => /\bplan\b/iu.test(item.purpose)) ?? [];
-  return <><ReconDigitalTwinSurface missionId={missionId} runId={run.id} currentStepId={run.currentStepId} />
+  return <><ReconDigitalTwinSurface missionId={missionId} runId={run.id} currentStepId={run.currentStepId} surface="plan" />
     <PlanView
       plan={activePlan}
       currentStepId={run.currentStepId}

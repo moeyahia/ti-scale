@@ -57,6 +57,7 @@ export class AutonomousIpVerifiedOutputRecorder implements LocalToolExecutionOut
     if (result.toolId === AUTONOMOUS_IP_SERVICE_SCAN_TOOL_ID && outcome.observationId) {
       this.#nmapTopology.materialize(
         this.#truth.repository.getObservation(outcome.observationId),
+        { verifiedEvidenceIds: outcome.evidenceIds },
       );
     }
     return Object.freeze({

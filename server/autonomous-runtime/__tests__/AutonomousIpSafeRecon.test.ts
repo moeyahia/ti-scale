@@ -440,7 +440,7 @@ describe("Autonomous Safe IP Recon", () => {
       .toEqual({ count: 0 });
   });
 
-  test("projects the completed reviewed Nmap observation into an unverified run-scoped topology", () => {
+  test("projects the completed reviewed Nmap observation into verified evidence-linked run-scoped topology", () => {
     const db = database();
     const action = seed(db).scan;
     const output = new AutonomousIpVerifiedOutputRecorder(verifier(db), db).record(result(action));
@@ -456,17 +456,23 @@ describe("Autonomous Safe IP Recon", () => {
     }>;
     expect(nodes.map(({ node_type }) => node_type)).toEqual(["asset", "service", "service"]);
     expect(nodes.every(({ verification_state, properties_json }) =>
-      verification_state === "unverified"
+      verification_state === "verified"
       && properties_json.includes('"method":"reviewed_local_nmap_observation"')
       && properties_json.includes(`"sourceRef":"${output.observationIds[0]}"`))).toBe(true);
     expect(db.prepare(`
       SELECT COUNT(*) AS count FROM topology_edges te
       JOIN topology_nodes source ON source.id = te.source_node_id
       WHERE source.run_id = ? AND te.edge_type = 'exposes'
-        AND te.verification_state = 'unverified'
+        AND te.verification_state = 'verified'
     `).get(RUN_ID)).toEqual({ count: 2 });
-    expect(db.prepare("SELECT COUNT(*) AS count FROM topology_evidence_links").get())
-      .toEqual({ count: 0 });
+    expect(output.evidenceIds).toHaveLength(2);
+    expect(db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM topology_evidence_links link
+      JOIN evidence e ON e.id = link.evidence_id
+      WHERE e.run_id = ? AND e.verification_state = 'verified'
+        AND link.relationship = 'supports'
+    `).get(RUN_ID)).toEqual({ count: 10 });
     expect(db.prepare("SELECT COUNT(*) AS count FROM cve_applicability_records").get())
       .toEqual({ count: 0 });
   });
