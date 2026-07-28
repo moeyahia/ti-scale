@@ -8,6 +8,7 @@ import {
   AUTONOMOUS_ROOT_ACCESS_PROOF_SUCCESS_CRITERION,
   AUTONOMOUS_SESSION_CLEANUP_SUCCESS_CRITERION,
   AUTONOMOUS_SESSION_IDENTITY_SUCCESS_CRITERION,
+  AUTONOMOUS_TERMINAL_REPORT_DELIVERABLE_IDS,
   AUTONOMOUS_USER_ACCESS_PROOF_SUCCESS_CRITERION,
 } from "../../../server/domain/autonomous-outcome-registry";
 import { completeRuntimeManifests } from "../domain/fixtures";
@@ -110,6 +111,23 @@ describe("MissionIntakeService", () => {
     expect(resolved.inferredFields).toContain("planningSelection");
     expect(resolved.normalizedTargets[0]?.type).toBe("cidr");
     expect(resolved.limitations.join(" ")).toContain("No target-compatible reviewed outcome producer");
+  });
+
+  test("defaults Custom Autonomous intake to the canonical terminal report pair", () => {
+    const resolved = service.resolve({
+      journey: "autonomous",
+      authorizationAcknowledged: true,
+      targets: [{ value: "10.10.10.10" }],
+      templateId: "custom",
+    });
+    if (resolved.request.journey !== "autonomous") {
+      throw new Error("Expected Autonomous request");
+    }
+
+    expect(resolved.request.contract.deliverables).toEqual([
+      ...AUTONOMOUS_TERMINAL_REPORT_DELIVERABLE_IDS,
+    ]);
+    expect(resolved.inferredFields).toContain("deliverables");
   });
 
   test("reviews and preserves a distinct provider-advisory planning selection", () => {

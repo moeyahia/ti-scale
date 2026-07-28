@@ -21,6 +21,7 @@ import {
   AUTONOMOUS_HOST_LIVENESS_SUCCESS_CRITERION,
   AUTONOMOUS_HTTP_METADATA_SUCCESS_CRITERION,
   AUTONOMOUS_PORT_SERVICE_SCAN_SUCCESS_CRITERION,
+  AUTONOMOUS_TERMINAL_REPORT_DELIVERABLE_IDS,
   AUTONOMOUS_VULNERABILITY_ASSESSMENT_SUCCESS_CRITERION,
   AUTONOMOUS_WEB_FINGERPRINT_SUCCESS_CRITERION,
   type ActionClassId,
@@ -1795,6 +1796,11 @@ export async function runAutonomousAssessmentLiveProof(
       "The assessment proof was incorrectly classified as a Complete Autonomous Engagement",
     );
   }
+  exactSet(
+    array(contract.deliverables, "resolved assessment deliverables"),
+    AUTONOMOUS_TERMINAL_REPORT_DELIVERABLE_IDS,
+    "resolved assessment deliverables",
+  );
   exactSet(
     array(request.successCriteria, "resolved assessment success criteria"),
     AUTONOMOUS_ASSESSMENT_SUCCESS_CRITERIA,

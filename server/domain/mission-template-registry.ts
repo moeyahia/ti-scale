@@ -5,6 +5,7 @@ import type {
   Journey,
 } from "./catalog-ids";
 import type { ActionPolicyPresetId } from "./action-class-registry";
+import { AUTONOMOUS_TERMINAL_REPORT_DELIVERABLE_IDS } from "./autonomous-outcome-registry";
 import type { RuntimeCapabilityProjection } from "./source-manifest-adapters";
 
 export const MISSION_TEMPLATE_IDS = [
@@ -431,7 +432,7 @@ const templates: readonly MissionTemplate[] = [
     successCriteria: ["Every completed claim is traceable to required evidence."],
     recommendedActionClassIds: ["local_report_artifact_generation"],
     recommendedEvidenceTypeIds: ["chain_of_custody"],
-    recommendedDeliverableIds: ["technical_findings"],
+    recommendedDeliverableIds: AUTONOMOUS_TERMINAL_REPORT_DELIVERABLE_IDS,
     recommendedOptionalSafeStops: ["budget_reached", "evidence_insufficient_to_proceed"],
     recommendedAgentCapabilityIds: ["reporting"],
     modelReadinessRequirements: ["structured_output", "scope_enforcement"],
