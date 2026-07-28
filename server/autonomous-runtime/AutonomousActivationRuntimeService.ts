@@ -21,6 +21,7 @@ import {
   ModelConfigurationRepository,
   modelConfigurationBindingHash,
 } from "../model-config";
+import type { StoredModelConfiguration } from "../model-config/types";
 import {
   CommandRuntimeError,
   type AutonomousActivationBoundaryReceipt,
@@ -617,6 +618,91 @@ function providerRouteReady(
     && model?.enforcement === "enforced_executor"
     && model.compatibleActionClassIds.includes(actionClassId)
     && (requiresModel === false || (model.toolCalling && model.structuredOutput));
+}
+
+function stringList(value: unknown): readonly string[] | null {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? value
+    : null;
+}
+
+/**
+ * The provider configuration hash carried by a compiled execution binding is
+ * the stable runtime/request-policy identity. A model assignment is bound to
+ * a separate, immutable catalog-snapshot hash that includes its configuration
+ * ID, catalog observation time, stored version, and timestamps. Comparing
+ * those two different hash domains makes every freshly materialized catalog
+ * row impossible to activate.
+ *
+ * Keep both proofs: validate the compiled hash against the fresh provider
+ * attestation, and independently validate the complete pinned catalog
+ * snapshot here. The activation receipt then seals the latter with
+ * modelConfigurationBindingHash.
+ */
+function configurationBindsExecutionRoute(
+  configuration: StoredModelConfiguration,
+  assignmentAgentId: string,
+  actionClassId: string,
+): boolean {
+  const compatibleAgents = stringList(
+    configuration.capabilities.compatibleAgentIds,
+  );
+  const compatibleActionClasses = stringList(
+    configuration.capabilities.compatibleActionClassIds,
+  );
+  if (
+    configuration.enforcementMode !== "enforced_executor"
+    || configuration.authState !== "authenticated"
+    || configuration.healthState !== "healthy"
+    || !compatibleAgents?.includes(assignmentAgentId)
+    || !compatibleActionClasses?.includes(actionClassId)
+  ) {
+    return false;
+  }
+  if (configuration.executionBoundary !== "local_deterministic_policy") {
+    return true;
+  }
+  const coverage =
+    configuration.capabilities.localDeterministicActionClassIdsByAgent;
+  if (
+    !coverage
+    || typeof coverage !== "object"
+    || Array.isArray(coverage)
+  ) {
+    return false;
+  }
+  return stringList(
+    (coverage as Readonly<Record<string, unknown>>)[assignmentAgentId],
+  )?.includes(actionClassId) === true;
+}
+
+function compiledProviderBindingIsFresh(
+  projection: RuntimeProjectionInput,
+  binding: LocalAutonomousPlannerBindingReceipt,
+  now: Date,
+): boolean {
+  const nowMs = now.getTime();
+  return projection.readiness.providers.some((provider) => {
+    const attestedAt = provider.attestedAt
+      ? Date.parse(provider.attestedAt)
+      : Number.NaN;
+    const expiresAt = provider.expiresAt
+      ? Date.parse(provider.expiresAt)
+      : Number.NaN;
+    return provider.id === binding.providerId
+      && provider.health === "healthy"
+      && provider.authenticated
+      && provider.callable
+      && provider.circuitState === "closed"
+      && provider.enforcesAutonomousBoundary
+      && provider.requestedModel === binding.modelId
+      && provider.returnedModel === binding.modelId
+      && provider.modelConfigurationHash === binding.modelConfigurationHash
+      && Number.isFinite(attestedAt)
+      && Number.isFinite(expiresAt)
+      && attestedAt <= nowMs
+      && expiresAt > nowMs;
+  });
 }
 
 /**
@@ -1260,6 +1346,26 @@ implements AutonomousActivationRuntimePort {
         );
       }
       const selectedBinding = selectedBindings[0]!;
+      if (!compiledProviderBindingIsFresh(
+        generation.projection,
+        selectedBinding,
+        generation.now,
+      )) {
+        throw activationFailure(
+          "activation_execution_model_configuration_mismatch",
+          `Signed action class ${actionClassId} does not match the fresh provider and runtime-policy attestation`,
+          "policy_denied",
+          "Refresh the reviewed provider attestation for the compiled execution binding before starting another run.",
+          {
+            actionClassId,
+            agentId: selectedBinding.agentId,
+            providerId: selectedBinding.providerId,
+            modelId: selectedBinding.modelId,
+            providerConfigurationHash:
+              selectedBinding.modelConfigurationHash,
+          },
+        );
+      }
       const productAgentId = productAgentIdForActionClass(actionClassId);
       const selectedAssignments = assignments.filter(({ agent_id }) =>
         agent_id === selectedBinding.agentId
@@ -1285,29 +1391,34 @@ implements AutonomousActivationRuntimePort {
         );
       }
       const selectedAssignment = selectedAssignments[0]!;
-      const selectedConfigurationHash = modelConfigurationBindingHash(
+      const selectedConfiguration =
         new ModelConfigurationRepository(this.database).getConfiguration(
           selectedAssignment.primary_configuration_id,
-        ),
+        );
+      const selectedConfigurationHash = modelConfigurationBindingHash(
+        selectedConfiguration,
       );
       if (
         selectedAssignment.provider_id !== selectedBinding.providerId ||
         selectedAssignment.model_id !== selectedBinding.modelId ||
-        selectedConfigurationHash !==
-          selectedBinding.modelConfigurationHash
+        !configurationBindsExecutionRoute(
+          selectedConfiguration,
+          selectedAssignment.agent_id,
+          actionClassId,
+        )
       ) {
         throw activationFailure(
           "activation_execution_model_configuration_mismatch",
-          `Signed action class ${actionClassId} does not match the exact pinned provider, model, and model-configuration snapshot`,
+          `Signed action class ${actionClassId} does not match the exact healthy pinned execution-model snapshot`,
           "policy_denied",
-          "Recompile the reviewed execution binding from the canonical run-pinned model configuration before starting another run.",
+          "Select one healthy enforced model snapshot that explicitly supports this specialist and action class before starting another run.",
           {
             actionClassId,
             agentId: selectedBinding.agentId,
             modelAssignmentId: selectedAssignment.id,
-            selectedConfigurationHash:
+            providerConfigurationHash:
               selectedBinding.modelConfigurationHash,
-            pinnedConfigurationHash: selectedConfigurationHash,
+            pinnedConfigurationSnapshotHash: selectedConfigurationHash,
           },
         );
       }

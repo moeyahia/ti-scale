@@ -9,6 +9,7 @@ import {
 } from "../../brain-runtime";
 import {
   AUTONOMOUS_SUCCESS_CRITERION_REFERENCE_SCHEMA_VERSION,
+  AutonomousActivationReceiptRepository,
   AutonomousActivationRuntimeService,
   autonomousSuccessCriterionId,
   LocalAutonomousContractPlanner,
@@ -2355,10 +2356,37 @@ describe("disposable Autonomous activation proof", () => {
     expect(waitingGuidedCount(item.db)).toBe(0);
   });
 
-  test("rejects a planner binding whose model snapshot hash differs from the run pin before planner or specialist contact", async () => {
+  test("accepts separate provider-policy and immutable pinned catalog-snapshot hashes", async () => {
     const item = await fixture({
       bindingModelConfigurationHash: "b".repeat(64),
     });
+
+    await item.runtime.processRunNow(RUN_ID);
+
+    expect(item.adapter.dispatchCount).toBe(1);
+    const receiptCount = item.db.prepare(`
+      SELECT COUNT(*) AS count FROM autonomous_activation_receipts
+      WHERE run_id = ?
+    `).get(RUN_ID) as { readonly count: number };
+    expect(receiptCount.count).toBeGreaterThanOrEqual(1);
+    const receipt = new AutonomousActivationReceiptRepository(item.db)
+      .findCurrentForRun(RUN_ID);
+    expect(receipt?.items[0]?.executionPrimaryConfigurationId)
+      .toBe(MODEL_CONFIGURATION_ID);
+    const pinnedSnapshotHash = modelConfigurationBindingHash(
+      new ModelConfigurationRepository(item.db).getConfiguration(
+        MODEL_CONFIGURATION_ID,
+      ),
+    );
+    expect(pinnedSnapshotHash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(pinnedSnapshotHash).not.toBe("b".repeat(64));
+  });
+
+  test("rejects a compiled provider-policy hash after the fresh provider attestation drifts before contact", async () => {
+    const item = await fixture();
+    (item.liveProjection.readiness.providers[0] as {
+      modelConfigurationHash?: string;
+    }).modelConfigurationHash = "b".repeat(64);
 
     await expect(item.runtime.processRunNow(RUN_ID)).rejects.toMatchObject({
       code: "activation_execution_model_configuration_mismatch",
