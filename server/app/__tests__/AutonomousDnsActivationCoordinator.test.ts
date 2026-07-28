@@ -1071,8 +1071,12 @@ function exploitSandboxAttestation(
       unlistedAddressBlocked: true as const,
       probeReceiptSha256: "7".repeat(64),
     }),
-    observedAt: NOW.toISOString(),
-    expiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
+    // The production confinement broker emits canonical whole-second RFC3339
+    // timestamps. Keep this fixture byte-for-byte representative so the
+    // adapter-composition path cannot accidentally require milliseconds.
+    observedAt: NOW.toISOString().replace(".000Z", "Z"),
+    expiresAt: new Date(NOW.getTime() + 60_000).toISOString()
+      .replace(".000Z", "Z"),
     grantsMissionExecution: false as const,
   });
   return Object.freeze({
@@ -1316,7 +1320,7 @@ function exactExploitActivationOptions(
 }
 
 describe("Autonomous DNS activation coordinator", () => {
-  test("accepts the broker's canonical whole-second RFC3339 attestation timestamps", () => {
+  test("accepts only canonical UTC whole-second and millisecond RFC3339 attestation timestamps", () => {
     expect(parseExactTargetSandboxAttestationTime(
       "2026-07-23T06:30:43Z",
     )).toBe(Date.parse("2026-07-23T06:30:43.000Z"));
@@ -1324,11 +1328,67 @@ describe("Autonomous DNS activation coordinator", () => {
       "2026-07-23T06:30:43.000Z",
     )).toBe(Date.parse("2026-07-23T06:30:43.000Z"));
     expect(parseExactTargetSandboxAttestationTime(
+      "2026-07-23T06:30:43.123Z",
+    )).toBe(Date.parse("2026-07-23T06:30:43.123Z"));
+    for (const timestamp of [
       "2026-07-23T08:30:43+02:00",
-    )).toBeNull();
-    expect(parseExactTargetSandboxAttestationTime(
       "2026-07-23T06:30:43.00Z",
-    )).toBeNull();
+      "2026-07-23T06:30:43.0000Z",
+      "2026-07-23t06:30:43z",
+      "2026-07-23 06:30:43Z",
+      "+010000-01-01T00:00:00Z",
+      "2026-02-29T06:30:43Z",
+      "2026-07-23T24:00:00Z",
+    ]) {
+      expect(parseExactTargetSandboxAttestationTime(timestamp)).toBeNull();
+    }
+  });
+
+  test("composes the broker's whole-second receipt into the exploit runtime adapter", async () => {
+    const fixture = await exactExploitActivationFixture();
+    try {
+      expect(fixture.sandboxAttestation.observedAt).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/,
+      );
+      const catalog = authoritativeCatalog(fixture.configuration.value);
+      const manifests = composeMultiToolManifests({
+        baseline: fixture.toolManifest.toRuntimeSourceManifests(
+          fixture.activation.activationReceipts,
+          NOW,
+        ),
+        manifest: fixture.toolManifest,
+        activationReceipts: fixture.activation.activationReceipts,
+        configuration: fixture.configuration.value as
+          AutonomousDnsRuntimeConfiguration & {
+            readonly ipRecon: NonNullable<
+              AutonomousDnsRuntimeConfiguration["ipRecon"]
+            >;
+          },
+        providerAttestation: fixture.providerAttestation,
+        cveRuntimeComposition: {
+          catalog: catalog.inspectComposition(),
+        },
+        database: fixture.database,
+        scriptSourceStore: fixture.scriptSourceStore,
+        brainContext: fixture.brain.service,
+        exploitCandidateMaterializer: fixture.candidateMaterializer,
+        exploitOutcomeObserver: fixture.outcomeObserver,
+        exploitSandboxAttestation: fixture.sandboxAttestation,
+        now: NOW,
+      });
+      const tool = manifests.tools.find(
+        ({ id }) => id === AUTONOMOUS_EXPLOIT_VALIDATION_ACTION_TYPE,
+      );
+      expect(tool).toMatchObject({
+        id: AUTONOMOUS_EXPLOIT_VALIDATION_ACTION_TYPE,
+        available: true,
+      });
+      expect(tool?.runtimeAdapterAttestation?.observedAt).toBe(
+        NOW.toISOString(),
+      );
+    } finally {
+      await fixture.dispose();
+    }
   });
 
   test.each([

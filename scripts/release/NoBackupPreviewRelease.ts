@@ -312,7 +312,7 @@ export interface NoBackupPreviewPhaseOperations {
   readonly startAndFinalize: () => void | Promise<void>;
 }
 
-interface ServiceProperties {
+export interface NoBackupServiceProperties {
   readonly activeState: string;
   readonly mainPid: number;
   readonly invocationId: string;
@@ -382,7 +382,7 @@ function command(
   }).stdout;
 }
 
-function parseSystemdProperties(output: string): ServiceProperties {
+function parseSystemdProperties(output: string): NoBackupServiceProperties {
   const values = Object.fromEntries(output.split("\n").filter(Boolean).map((line) => {
     const index = line.indexOf("=");
     return index < 0 ? [line, ""] : [line.slice(0, index), line.slice(index + 1)];
@@ -395,7 +395,7 @@ function parseSystemdProperties(output: string): ServiceProperties {
   };
 }
 
-function serviceProperties(service: string): ServiceProperties {
+function serviceProperties(service: string): NoBackupServiceProperties {
   return parseSystemdProperties(command([
     "/usr/bin/systemctl",
     "show",
@@ -536,15 +536,38 @@ function port3132Listening(): boolean {
   ]).trim().length > 0;
 }
 
-function stopSnapshot(): ServiceStopSnapshot {
-  const properties = serviceProperties(SERVICE);
+export function noBackupStopSnapshotFromServiceProperties(
+  properties: NoBackupServiceProperties,
+  inspection: {
+    readonly controlGroupProcessIds: (
+      controlGroup: string,
+    ) => readonly number[];
+    readonly portListening: () => boolean;
+  },
+): ServiceStopSnapshot {
+  const controlGroup =
+    properties.activeState === "inactive" &&
+      properties.mainPid === 0 &&
+      properties.controlGroup === ""
+      ? "/system.slice/ti-scale.service"
+      : properties.controlGroup;
   return {
     activeState: properties.activeState,
     mainPid: properties.mainPid,
-    controlGroup: properties.controlGroup,
-    controlGroupProcessIds: cgroupProcessIds(properties.controlGroup),
-    portListening: port3132Listening(),
+    controlGroup,
+    controlGroupProcessIds: inspection.controlGroupProcessIds(controlGroup),
+    portListening: inspection.portListening(),
   };
+}
+
+function stopSnapshot(): ServiceStopSnapshot {
+  return noBackupStopSnapshotFromServiceProperties(
+    serviceProperties(SERVICE),
+    {
+      controlGroupProcessIds: cgroupProcessIds,
+      portListening: port3132Listening,
+    },
+  );
 }
 
 function assertNoCanonicalDatabaseUsers(): void {
@@ -2338,6 +2361,41 @@ async function waitForTargetRuntime(
   throw new Error(`Ti-Scale target runtime did not become healthy: ${last}`);
 }
 
+export interface NoBackupTargetApplicationCommitIdentity {
+  readonly releaseId: string;
+  readonly applicationTarget: string;
+  readonly serverReleasePath: string;
+  readonly manifestSha256: string;
+  readonly manifestTreeSha256: string;
+}
+
+export async function verifyNoBackupTargetApplicationForCommit(
+  identity: NoBackupTargetApplicationCommitIdentity,
+): Promise<string> {
+  const applicationTarget = resolve(identity.applicationTarget);
+  const serverReleasePath = resolve(identity.serverReleasePath);
+  if (applicationTarget !== serverReleasePath) {
+    throw new Error(
+      "Target application path differs from its recorded server release",
+    );
+  }
+  const verified = await verifyServerRelease(
+    applicationTarget,
+    identity.releaseId,
+    identity.manifestSha256,
+  );
+  if (
+    verified.releaseDirectory !== serverReleasePath ||
+    verified.manifestSha256 !== identity.manifestSha256 ||
+    verified.manifest.treeSha256 !== identity.manifestTreeSha256
+  ) {
+    throw new Error(
+      "Target application release differs from its immutable receipt",
+    );
+  }
+  return canonicalApplicationTreeFingerprint(applicationTarget);
+}
+
 async function commitTargetWhileStopped(
   prepared: PreparedNoBackupPreview,
 ): Promise<void> {
@@ -2375,12 +2433,14 @@ async function commitTargetWhileStopped(
   }));
   let journal = readFunctionalReleaseTransactionJournal(prepared.journalDirectory);
   if (!functionalReleaseTargetCommitRecord(journal)) {
-    const applicationTreeSha256 = await canonicalApplicationTreeFingerprint(
-      prepared.receipt.target.applicationTarget,
-    );
-    if (applicationTreeSha256 !== prepared.receipt.serverRelease.treeSha256) {
-      throw new Error("Target application content changed before commitment");
-    }
+    const applicationTreeSha256 =
+      await verifyNoBackupTargetApplicationForCommit({
+        releaseId: prepared.receipt.releaseId,
+        applicationTarget: prepared.receipt.target.applicationTarget,
+        serverReleasePath: server.releaseDirectory,
+        manifestSha256: prepared.receipt.serverRelease.manifestSha256,
+        manifestTreeSha256: prepared.receipt.serverRelease.treeSha256,
+      });
     journal = commitFunctionalReleaseTransactionTarget(prepared.journalDirectory, {
       pointers: prepared.receipt.target,
       databaseSchema: TARGET_SCHEMA,

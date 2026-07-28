@@ -978,9 +978,18 @@ export function createConfiguredAutonomousPlanningPolicy(
     : exploitPolicy;
 }
 
+const CANONICAL_UTC_ATTESTATION_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
+
 function validTime(value: string): number | null {
+  if (!CANONICAL_UTC_ATTESTATION_TIMESTAMP.test(value)) return null;
   const parsed = Date.parse(value);
-  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value ? parsed : null;
+  if (!Number.isFinite(parsed)) return null;
+  const canonical = new Date(parsed).toISOString();
+  const wholeSecond = canonical.endsWith(".000Z")
+    ? canonical.replace(".000Z", "Z")
+    : canonical;
+  return value === canonical || value === wholeSecond ? parsed : null;
 }
 
 function trustedReceiptValid(loaded: LoadedTrustedJson<AutonomousDnsRuntimeConfiguration>): boolean {
@@ -2970,13 +2979,7 @@ function specialistHeartbeatState(
 export function parseExactTargetSandboxAttestationTime(
   value: string,
 ): number | null {
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return null;
-  const canonical = new Date(parsed).toISOString();
-  const wholeSecond = canonical.endsWith(".000Z")
-    ? canonical.replace(".000Z", "Z")
-    : canonical;
-  return value === canonical || value === wholeSecond ? parsed : null;
+  return validTime(value);
 }
 
 function exactTargetSandboxAttestationCurrent(

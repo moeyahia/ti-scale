@@ -19,11 +19,14 @@ import {
   executeNoBackupPreviewPhaseSequence,
   NO_BACKUP_PAYLOAD_ROOTS,
   noBackupTargetStartMode,
+  noBackupStopSnapshotFromServiceProperties,
   noBackupRecoveryDirection,
   NO_BACKUP_TARGET_SCHEMA,
   parseNoBackupPreviewArguments,
+  verifyNoBackupTargetApplicationForCommit,
 } from "../../../scripts/release/NoBackupPreviewRelease";
 import {
+  canonicalApplicationTreeFingerprint,
   stageServerRelease,
 } from "../../../scripts/release/FunctionalReleasePrimitives";
 import {
@@ -162,6 +165,107 @@ afterEach(() => {
 });
 
 describe("metadata-journaled no-backup preview release", () => {
+  test("re-verifies the manifest-bound target and records its complete application-tree fingerprint", async () => {
+    const root = temporaryDirectory(
+      "ti-scale-no-backup-target-commit-identity-",
+    );
+    const source = join(root, "source");
+    mkdirSync(join(source, "server"), { recursive: true });
+    writeFileSync(join(source, "package.json"), "{\"name\":\"target\"}\n");
+    writeFileSync(
+      join(source, "server", "index.ts"),
+      "export const target = true;\n",
+    );
+    const release = await stageServerRelease({
+      sourceRoot: source,
+      releaseRoot: join(root, "releases"),
+      releaseId: "target-release",
+    });
+
+    const completeTreeSha256 = await canonicalApplicationTreeFingerprint(
+      release.releaseDirectory,
+    );
+    expect(completeTreeSha256).not.toBe(release.manifest.treeSha256);
+    await expect(verifyNoBackupTargetApplicationForCommit({
+      releaseId: release.releaseId,
+      applicationTarget: release.releaseDirectory,
+      serverReleasePath: release.releaseDirectory,
+      manifestSha256: release.manifestSha256,
+      manifestTreeSha256: release.manifest.treeSha256,
+    })).resolves.toBe(completeTreeSha256);
+
+    writeFileSync(
+      join(release.releaseDirectory, "server", "index.ts"),
+      "export const target = false;\n",
+    );
+    await expect(verifyNoBackupTargetApplicationForCommit({
+      releaseId: release.releaseId,
+      applicationTarget: release.releaseDirectory,
+      serverReleasePath: release.releaseDirectory,
+      manifestSha256: release.manifestSha256,
+      manifestTreeSha256: release.manifest.treeSha256,
+    })).rejects.toThrow(
+      "Server release tree does not match its immutable manifest",
+    );
+  });
+
+  test("normalizes only the cleaned inactive Ti-Scale unit and still inspects its cgroup and listener", () => {
+    const inspectedControlGroups: string[] = [];
+    let listenerChecks = 0;
+    const inactive = noBackupStopSnapshotFromServiceProperties({
+      activeState: "inactive",
+      mainPid: 0,
+      invocationId: "",
+      controlGroup: "",
+    }, {
+      controlGroupProcessIds: (controlGroup) => {
+        inspectedControlGroups.push(controlGroup);
+        return [];
+      },
+      portListening: () => {
+        listenerChecks += 1;
+        return false;
+      },
+    });
+    expect(inactive).toEqual({
+      activeState: "inactive",
+      mainPid: 0,
+      controlGroup: "/system.slice/ti-scale.service",
+      controlGroupProcessIds: [],
+      portListening: false,
+    });
+    expect(inspectedControlGroups).toEqual([
+      "/system.slice/ti-scale.service",
+    ]);
+    expect(listenerChecks).toBe(1);
+
+    for (const properties of [
+      {
+        activeState: "failed",
+        mainPid: 0,
+        invocationId: "",
+        controlGroup: "",
+      },
+      {
+        activeState: "inactive",
+        mainPid: 3132,
+        invocationId: "",
+        controlGroup: "",
+      },
+      {
+        activeState: "inactive",
+        mainPid: 0,
+        invocationId: "",
+        controlGroup: "/unexpected.slice/ti-scale.service",
+      },
+    ] as const) {
+      expect(noBackupStopSnapshotFromServiceProperties(properties, {
+        controlGroupProcessIds: () => [],
+        portListening: () => false,
+      }).controlGroup).toBe(properties.controlGroup);
+    }
+  });
+
   test("requires execution, exact release confirmation, and explicit no-backup acknowledgement", () => {
     expect(parseNoBackupPreviewArguments([
       "deploy",

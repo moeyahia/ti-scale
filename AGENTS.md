@@ -1,5 +1,9 @@
 # Ti-Scale Working Instructions
 
+The root operating and Kali tooling instructions in [`/root/AGENTS.md`](/root/AGENTS.md)
+also apply to every Ti-Scale agent and sub-agent. They are durable workspace
+instructions, not conversation-only context.
+
 Read and follow [`docs/project-goal.md`](docs/project-goal.md) before planning,
 editing, testing, or deploying Ti-Scale.
 
