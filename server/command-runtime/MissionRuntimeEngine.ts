@@ -33,6 +33,7 @@ import { RunRepository } from "../orchestration";
 import { canonicalJson } from "../orchestration/serialization";
 import { RunLearningService, canonicalLessonMemoryNodeId } from "../learning";
 import type { CanonicalReportArtifactCommitment } from "../reports";
+import { FailureDiagnosisRepository } from "../intelligence-v24/FailureDiagnosisRepository";
 import { FailureDiagnosisService } from "../intelligence-v24/FailureDiagnosisService";
 import {
   AgentToolMemoryDecisionRepository,
@@ -1299,6 +1300,125 @@ export class MissionRuntimeEngine implements ExecutionResultSink {
         this.timestamp(),
       );
     }
+  }
+
+  /**
+   * A successful bounded retry is the canonical recovery outcome for every
+   * retryable failure in its immutable parent-action chain. Resolve only the
+   * runtime-created active diagnoses whose declared recovery was that exact
+   * bounded retry. The action lineage, status, run, and step are read from the
+   * database so a caller cannot close an unrelated operator diagnosis.
+   *
+   * This runs inside the same transaction that advances the successful step.
+   * A replay therefore either observes the diagnoses already resolved or
+   * performs the resolution and audit exactly once.
+   */
+  private resolveSuccessfulRetryFailureLineage(input: Readonly<{
+    missionId: string;
+    runId: string;
+    stepId: string;
+    successfulActionId: string;
+    resolvedAt: string;
+  }>): readonly string[] {
+    const rows = this.database.prepare(`
+      WITH RECURSIVE retry_lineage (
+        action_id, parent_action_id, depth, visited
+      ) AS (
+        SELECT id, parent_action_id, 0, '|' || id || '|'
+        FROM actions
+        WHERE id = ? AND mission_id = ? AND run_id = ? AND step_id = ?
+          AND status = 'succeeded'
+        UNION ALL
+        SELECT parent.id, parent.parent_action_id, lineage.depth + 1,
+          lineage.visited || parent.id || '|'
+        FROM retry_lineage lineage
+        JOIN actions parent ON parent.id = lineage.parent_action_id
+        WHERE parent.mission_id = ? AND parent.run_id = ?
+          AND parent.step_id = ?
+          AND parent.status IN ('failed', 'timed_out')
+          AND lineage.depth < 64
+          AND instr(lineage.visited, '|' || parent.id || '|') = 0
+      )
+      SELECT diagnosis.id, diagnosis.action_id, diagnosis.category,
+        diagnosis.code, retry_lineage.depth
+      FROM retry_lineage
+      JOIN failure_diagnoses diagnosis
+        ON diagnosis.action_id = retry_lineage.action_id
+      WHERE retry_lineage.depth > 0
+        AND diagnosis.mission_id = ?
+        AND diagnosis.run_id = ?
+        AND diagnosis.step_id = ?
+        AND diagnosis.subject_type = 'action'
+        AND diagnosis.subject_id = diagnosis.action_id
+        AND diagnosis.originating_component =
+          'command-runtime.reviewed-action-execution'
+        AND diagnosis.state = 'active'
+        AND diagnosis.retryable = 1
+        AND json_extract(
+          diagnosis.automatic_recovery_json,
+          '$.directive'
+        ) = 'retry'
+        AND EXISTS (
+          SELECT 1 FROM json_each(diagnosis.operator_actions_json) action
+          WHERE json_extract(action.value, '$.kind') = 'retry_bounded'
+        )
+      ORDER BY retry_lineage.depth DESC, diagnosis.created_at, diagnosis.id
+    `).all(
+      input.successfulActionId,
+      input.missionId,
+      input.runId,
+      input.stepId,
+      input.missionId,
+      input.runId,
+      input.stepId,
+      input.missionId,
+      input.runId,
+      input.stepId,
+    ) as Array<{
+      readonly id: string;
+      readonly action_id: string;
+      readonly category: OperationalFailureCategory;
+      readonly code: string;
+      readonly depth: number;
+    }>;
+    if (rows.length === 0) return [];
+
+    const repository = new FailureDiagnosisRepository(
+      this.database,
+      { clock: this.now },
+    );
+    const resolvedIds: string[] = [];
+    for (const row of rows) {
+      const current = repository.get(row.id);
+      if (current.state !== "active") continue;
+      const resolved = repository.resolve(row.id, input.resolvedAt);
+      repository.audit.append({
+        missionId: input.missionId,
+        runId: input.runId,
+        actor: { id: this.workerId, type: "worker" },
+        action: "failure_diagnosis.resolved",
+        resourceType: "failure_diagnosis",
+        resourceId: row.id,
+        reason:
+          `Automatic bounded retry ${input.successfulActionId} succeeded and durably advanced the same represented step.`,
+        details: {
+          from: current.state,
+          to: resolved.state,
+          category: row.category,
+          code: row.code,
+          resolutionMode: "automatic_bounded_retry",
+          actionKind: "retry_bounded",
+          predecessorActionId: row.action_id,
+          successfulActionId: input.successfulActionId,
+          retryDepth: row.depth,
+          sameRunAndStepVerified: true,
+          successfulActionStatusVerified: true,
+        },
+        occurredAt: input.resolvedAt,
+      });
+      resolvedIds.push(row.id);
+    }
+    return resolvedIds;
   }
 
   /**
@@ -4392,10 +4512,37 @@ export class MissionRuntimeEngine implements ExecutionResultSink {
     const now = this.timestamp();
     let evaluationQueued = false;
     let expandedPlanId: string | null = null;
+    let resolvedFailureDiagnosisIds: readonly string[] = [];
     inImmediateTransaction(this.database, () => {
       const runs = new RunRepository(this.database);
       const current = runs.get(continuation.runId);
       runs.assertLease(current, lease, now);
+      resolvedFailureDiagnosisIds =
+        this.resolveSuccessfulRetryFailureLineage({
+          missionId: action.mission_id,
+          runId: continuation.runId,
+          stepId: action.step_id,
+          successfulActionId: actionId,
+          resolvedAt: now,
+        });
+      if (resolvedFailureDiagnosisIds.length > 0) {
+        this.repository.events.append({
+          missionId: action.mission_id,
+          runId: continuation.runId,
+          journey: action.journey,
+          eventType: "failure_diagnosis.automatic_retry_resolved",
+          actorType: "worker",
+          actorId: this.workerId,
+          summary:
+            `Successful bounded retry resolved ${resolvedFailureDiagnosisIds.length} predecessor failure ${resolvedFailureDiagnosisIds.length === 1 ? "diagnosis" : "diagnoses"}.`,
+          payload: {
+            successfulActionId: actionId,
+            stepId: action.step_id,
+            resolvedFailureDiagnosisIds: [...resolvedFailureDiagnosisIds],
+            resolutionMode: "automatic_bounded_retry",
+          },
+        });
+      }
       if (action.journey === "guided" && action.action_kind !== "manual") {
         const evidenceIds = (this.database.prepare(`
           SELECT id FROM evidence WHERE action_id = ? ORDER BY created_at, id
@@ -4611,6 +4758,7 @@ export class MissionRuntimeEngine implements ExecutionResultSink {
           nextStepId: advanced.nextStepId,
           nextGuidedDecisionId: advanced.guidedDecisionId,
           expandedPlanId,
+          resolvedFailureDiagnosisIds: [...resolvedFailureDiagnosisIds],
         },
       });
     });

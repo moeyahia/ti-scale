@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createDatabaseConnection, migrateDatabase, type SqliteDatabase } from "../../db";
+import { FailureDiagnosisService } from "../../intelligence-v24/FailureDiagnosisService";
 import type { DurableAction } from "../../orchestration";
 import {
   createMissionRuntime,
@@ -161,6 +162,54 @@ describe("MissionRuntimeEngine continuation reentrancy", () => {
         SET parent_action_id = 'action-continuation-retry-parent'
         WHERE id = ?
       `).run(retryChild.id);
+      const diagnosis = new FailureDiagnosisService(database, {
+        clock: () => new Date(NOW),
+      }).create({
+        missionId: fixture.missionId,
+        runId: fixture.runId,
+        stepId: retryChild.stepId,
+        actionId: "action-continuation-retry-parent",
+        subjectType: "action",
+        subjectId: "action-continuation-retry-parent",
+        humanReason:
+          "The first represented service check failed because the target connection ended transiently.",
+        category: "target_unreachable",
+        code: "fixture_transient_network",
+        originatingComponent: "command-runtime.reviewed-action-execution",
+        failedComponentRef: "service_probe",
+        targetSummary:
+          "The failed predecessor and its bounded retry used the same represented lab target.",
+        policyOrDependency:
+          "The persisted retry continuation kept the original target, parameters, action class, and step.",
+        retryHistory: [{
+          attempt: 1,
+          actionId: "action-continuation-retry-parent",
+          directive: "retry",
+        }],
+        progressBeforeFailure: { uncertainty: 1 },
+        preservedReferences: [],
+        retryable: true,
+        automaticRecovery: {
+          directive: "retry",
+          retryPersisted: true,
+        },
+        remediation:
+          "Use only the persisted bounded retry after its configured backoff.",
+        operatorActions: [{
+          kind: "retry_bounded",
+          label: "Use the bounded retry",
+          consequence:
+            "Consumes only the persisted retry continuation without changing scope or parameters.",
+          requiresConfirmation: false,
+        }],
+        objectiveImpact:
+          "The predecessor did not advance the objective while its exact retry remained pending.",
+        terminal: false,
+        actor: {
+          id: "continuation-reentrancy-worker",
+          type: "worker",
+        },
+      });
 
       // Model the direct result callback that occurs while the same run's
       // autonomous_retry_to_dispatch parent continuation is still active.
@@ -193,6 +242,12 @@ describe("MissionRuntimeEngine continuation reentrancy", () => {
       expect(database.prepare(`
         SELECT status FROM plan_steps WHERE id = ?
       `).get(retryChild.stepId)).toEqual({ status: "running" });
+      expect(database.prepare(`
+        SELECT state, resolved_at FROM failure_diagnoses WHERE id = ?
+      `).get(diagnosis.id)).toEqual({
+        state: "active",
+        resolved_at: null,
+      });
 
       continuationProcessing.delete(fixture.runId);
       expect(await runtime.replayContinuations(
@@ -207,6 +262,41 @@ describe("MissionRuntimeEngine continuation reentrancy", () => {
         WHERE run_id = ? AND kind = 'action_result_to_advance'
           AND source_id = ?
       `).get(fixture.runId, retryChild.id)).toEqual({ status: "completed" });
+      expect(database.prepare(`
+        SELECT state, resolved_at FROM failure_diagnoses WHERE id = ?
+      `).get(diagnosis.id)).toEqual({
+        state: "resolved",
+        resolved_at: NOW,
+      });
+      expect(database.prepare(`
+        SELECT actor_type, actor_id,
+          json_extract(details_json, '$.resolutionMode') AS resolution_mode,
+          json_extract(details_json, '$.predecessorActionId') AS predecessor_id,
+          json_extract(details_json, '$.successfulActionId') AS successor_id
+        FROM audit_records
+        WHERE action = 'failure_diagnosis.resolved' AND resource_id = ?
+      `).get(diagnosis.id)).toEqual({
+        actor_type: "worker",
+        actor_id: "continuation-reentrancy-worker",
+        resolution_mode: "automatic_bounded_retry",
+        predecessor_id: "action-continuation-retry-parent",
+        successor_id: retryChild.id,
+      });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM events
+        WHERE run_id = ?
+          AND event_type = 'failure_diagnosis.automatic_retry_resolved'
+          AND json_extract(payload_json, '$.successfulActionId') = ?
+      `).get(fixture.runId, retryChild.id)).toEqual({ count: 1 });
+
+      expect(await runtime.replayContinuations(
+        fixture.runId,
+        ["action_result_to_advance"],
+      )).toBe(0);
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM audit_records
+        WHERE action = 'failure_diagnosis.resolved' AND resource_id = ?
+      `).get(diagnosis.id)).toEqual({ count: 1 });
     } finally {
       continuationProcessing.delete(fixture.runId);
       await runtime.stop();

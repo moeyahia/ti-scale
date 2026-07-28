@@ -3856,6 +3856,56 @@ describe("Autonomous DNS activation coordinator", () => {
       });
       expect(target.failureReceipt().recoveredCurlHeadCount)
         .toBeGreaterThanOrEqual(1);
+      const recoveredDiagnoses = database.prepare(`
+        SELECT diagnosis.id, diagnosis.state, diagnosis.retryable,
+          diagnosis.resolved_at,
+          predecessor.status AS predecessor_status,
+          successor.id AS successful_action_id,
+          successor.status AS successor_status
+        FROM failure_diagnoses diagnosis
+        JOIN actions predecessor ON predecessor.id = diagnosis.action_id
+        JOIN actions successor
+          ON successor.parent_action_id = predecessor.id
+          AND successor.run_id = predecessor.run_id
+          AND successor.step_id = predecessor.step_id
+        WHERE diagnosis.run_id = ?
+          AND diagnosis.originating_component =
+            'command-runtime.reviewed-action-execution'
+          AND json_extract(
+            diagnosis.automatic_recovery_json,
+            '$.directive'
+          ) = 'retry'
+        ORDER BY diagnosis.created_at, diagnosis.id
+      `).all(created.run.id) as Array<{
+        id: string;
+        state: string;
+        retryable: number;
+        resolved_at: string | null;
+        predecessor_status: string;
+        successful_action_id: string;
+        successor_status: string;
+      }>;
+      expect(recoveredDiagnoses).toHaveLength(1);
+      expect(recoveredDiagnoses[0]).toMatchObject({
+        state: "resolved",
+        retryable: 1,
+        resolved_at: expect.any(String),
+        predecessor_status: "failed",
+        successful_action_id: expect.any(String),
+        successor_status: "succeeded",
+      });
+      expect(database.prepare(`
+        SELECT actor_type,
+          json_extract(details_json, '$.resolutionMode') AS resolution_mode,
+          json_extract(details_json, '$.successfulActionId') AS successor_id
+        FROM audit_records
+        WHERE action = 'failure_diagnosis.resolved'
+          AND resource_id = ?
+      `).get(recoveredDiagnoses[0]!.id)).toEqual({
+        actor_type: "worker",
+        resolution_mode: "automatic_bounded_retry",
+        successor_id: recoveredDiagnoses[0]!.successful_action_id,
+      });
       const audit = readAutonomousAssessmentAuditSnapshot(
         created.run.id,
         created.mission.id,
