@@ -507,13 +507,15 @@ export async function startReadyAutonomousIntakeBackend(
       );
     }
     application.modelConfigurations.putPreference({
-      scopeType: "global",
-      scopeId: "global",
-      agentId: null,
+      scopeType: profile === "full" ? "global" : "agent",
+      scopeId: profile === "full" ? "global" : "ReconScout",
+      agentId: profile === "full" ? null : "ReconScout",
       primaryConfigurationId: enforcingConfiguration.configurationId,
       fallbackConfigurationId: null,
       expectedVersion: 0,
-      reason: "Isolated Autonomous intake fixture global model default",
+      reason: profile === "full"
+        ? "Isolated Autonomous intake fixture global model default"
+        : "Isolated Autonomous intake fixture ReconScout model assignment",
     }, actorId);
     const branchResolved = new MissionIntakeService({
       readRuntimeManifests: () => projection.capabilityManifests!,

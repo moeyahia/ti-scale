@@ -24,7 +24,7 @@ Record<WindowsIdentityOperation, WindowsIdentityOperationPresentation>
   smb_identity_summary: {
     title: "Read the approved host’s SMB identity summary",
     objective: (target) => `Confirm the SMB host, domain, signing, and protocol details reported by ${target}.`,
-    description: "Ti-Scale uses one operator-selected opaque credential reference for a bounded SMB metadata and share check. The credential files stay private to the sandbox. It does not spray passwords, test local-admin access, write to shares, or execute commands.",
+    description: "Ti-Scale makes one bounded SMB metadata and share check against the exact approved host. It can try an anonymous read with no credential, or use one operator-selected opaque credential reference whose files stay private to the sandbox. It does not spray passwords, test local-admin access, write to shares, or execute commands.",
     expectedResult: "Attributable host and domain metadata with SMB security settings, or a precise authentication, connection, policy, dependency, or timeout failure.",
   },
   ldap_root_dse: {

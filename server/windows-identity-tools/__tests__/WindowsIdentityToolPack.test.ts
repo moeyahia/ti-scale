@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { fingerprintAction, type ActionIntent, type GuidedDecision } from "../../supervisor";
+import { REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION } from "../../orchestration";
 import {
   WINDOWS_IDENTITY_ACTION_SCHEMA_VERSION,
   WindowsIdentityBoundaryError,
@@ -96,7 +97,7 @@ function compile(
 }
 
 describe("reviewed Windows identity tool pack", () => {
-  test("declares four read-only, direct-argv, Guided-only tool bindings", () => {
+  test("keeps four read-only direct-argv runtime bindings advertised as Guided-only", () => {
     const pack = new WindowsIdentityToolPack();
     expect(pack.definitions.map(({ toolId }) => toolId)).toEqual([
       "kali:smbclient-share-list",
@@ -110,6 +111,91 @@ describe("reviewed Windows identity tool pack", () => {
       && definition.execution.shell === false
       && definition.execution.readOnlyTargetOperation
       && definition.probe.targetContact === false)).toBeTrue();
+  });
+
+  test("compiles the exact anonymous NetExec baseline under a matching signed Autonomous contract", () => {
+    const pack = new WindowsIdentityToolPack();
+    const value = request({
+      journey: "autonomous",
+      operation: "smb_identity_summary",
+      authenticationMode: "anonymous",
+      credentialReference: null,
+    });
+    const persistedAction: ActionIntent = {
+      missionId: value.missionId,
+      runId: value.runId,
+      stepId: value.stepId,
+      planVersion: value.planVersion,
+      actionType: "kali:nxc-smb-summary",
+      actionClass: "active_directory_identity_operations",
+      target: value.target,
+      arguments: {
+        schemaVersion: REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION,
+        executionBinding: "reviewed_local_process",
+        toolId: "kali:nxc-smb-summary",
+        parameters: {
+          authenticationMode: "anonymous",
+          operation: "smb_identity_summary",
+          target: value.target,
+          workspace: value.logicalWorkspace,
+        },
+      },
+    };
+    const invocation = pack.compile({
+      request: value,
+      persistedAction,
+      missionBoundary: {
+        authorizationVerified: true,
+        allowedTargets: [value.target],
+        prohibitedTargets: [],
+        allowedActionClassIds: ["active_directory_identity_operations"],
+        prohibitedActionClassIds: [],
+        guidedDecision: null,
+        autonomousContract: {
+          runId: value.runId,
+          version: 1,
+          status: "signed",
+          allowedActionTypes: ["active_directory_identity_operations"],
+          prohibitedActionTypes: [],
+          allowedTargets: [value.target],
+        },
+      },
+      credentialBindingReceipt: null,
+      now: NOW,
+    });
+    expect(invocation).toMatchObject({
+      journey: "autonomous",
+      toolId: "kali:nxc-smb-summary",
+      credentialReference: null,
+      targetReadOnly: true,
+      evidencePromotion: "none",
+    });
+    expect(invocation.arguments).toContain("--no-write-check");
+    expect(invocation.arguments).toContain("--no-bruteforce");
+    expect(invocation.arguments).not.toContain("/run/ti-scale/credential/username");
+    expect(pack.executionShapeMatches(invocation)).toBeTrue();
+
+    expect(() => pack.compile({
+      request: value,
+      persistedAction,
+      missionBoundary: {
+        authorizationVerified: true,
+        allowedTargets: [value.target],
+        prohibitedTargets: [],
+        allowedActionClassIds: ["active_directory_identity_operations"],
+        prohibitedActionClassIds: [],
+        guidedDecision: null,
+        autonomousContract: {
+          runId: value.runId,
+          version: 1,
+          status: "signed",
+          allowedActionTypes: ["port_service_enumeration"],
+          allowedTargets: [value.target],
+        },
+      },
+      credentialBindingReceipt: null,
+      now: NOW,
+    })).toThrow("Autonomous");
   });
 
   test("compiles one exact anonymous SMB read without shell or evidence promotion", () => {

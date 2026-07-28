@@ -62,13 +62,15 @@ export function modelConfigurationConflict(
 
 export function modelConfigurationScopeConflict(
   message: string,
+  remediation =
+    "Use an agent, mission, run, and step that belong to the same canonical scope.",
 ): ModelConfigurationError {
   return new ModelConfigurationError(
     "model_configuration_scope_conflict",
     message,
     409,
     "scope_conflict",
-    "Use an agent, mission, run, and step that belong to the same canonical scope.",
+    remediation,
   );
 }
 

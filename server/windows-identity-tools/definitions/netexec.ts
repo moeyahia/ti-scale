@@ -16,6 +16,9 @@ export const NXC_SMB_SUMMARY_DEFINITION: WindowsIdentityToolDefinition = Object.
   actionClassId: "active_directory_identity_operations",
   evidenceTypeId: "identity_ad_graph",
   journeyPolicy: "guided_only",
-  authenticationModes: Object.freeze(["credential_reference"] as const),
+  authenticationModes: Object.freeze([
+    "anonymous",
+    "credential_reference",
+  ] as const),
   execution: identityExecution(20_000, 768 * 1_024),
 });

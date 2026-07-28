@@ -211,6 +211,7 @@ describe("Windows identity runtime composition", () => {
     expect(activation.status).toBe("ready");
     expect(activation.readyToolIds).toEqual([
       "kali:ldapsearch-root-dse",
+      "kali:nxc-smb-summary",
       "kali:rpcclient-domain-info",
       "kali:smbclient-share-list",
     ]);
@@ -219,9 +220,9 @@ describe("Windows identity runtime composition", () => {
       targetContact === false && grantsMissionExecution === false)).toBeTrue();
     expect(activation.receipts.find(({ toolId }) => toolId === "kali:nxc-smb-summary"))
       .toMatchObject({
-        status: "unavailable",
-        code: "windows_identity_adapter_not_bounded",
-        credentialIsolationReady: false,
+        status: "ready",
+        code: "ready",
+        credentialIsolationReady: true,
       });
 
     const projection = projectWindowsIdentityRuntime({
@@ -234,7 +235,7 @@ describe("Windows identity runtime composition", () => {
       status: "available",
       toolPolicy: {
         allowedTools: activation.readyToolIds,
-        deniedTools: ["kali:nxc-smb-summary"],
+        deniedTools: [],
         exactGuidedDecisionRequired: true,
       },
       configuration: {
@@ -247,9 +248,9 @@ describe("Windows identity runtime composition", () => {
     });
     const composed = applyWindowsIdentityRuntimeProjection(baseline(), projection);
     expect(composed.readiness.specialistsConfigured).toBe(1);
-    expect(composed.capabilityManifests?.tools.filter(({ available }) => available)).toHaveLength(3);
+    expect(composed.capabilityManifests?.tools.filter(({ available }) => available)).toHaveLength(4);
     expect(processAdapter.readiness("kali:smbclient-share-list")?.status).toBe("ready");
-    expect(processAdapter.readiness("kali:nxc-smb-summary")).toBeNull();
+    expect(processAdapter.readiness("kali:nxc-smb-summary")?.status).toBe("ready");
 
     const localHealth = {
       checkedAt: NOW.toISOString(),
@@ -301,8 +302,8 @@ describe("Windows identity runtime composition", () => {
     }
     expect(selfTests.results.find(({ component }) =>
       component.id === "kali:nxc-smb-summary")).toMatchObject({
-      status: "fail",
-      availability: "unavailable",
+      status: "pass",
+      availability: "available",
     });
   });
 

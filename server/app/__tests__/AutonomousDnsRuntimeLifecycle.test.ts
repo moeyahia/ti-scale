@@ -1,5 +1,12 @@
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDatabaseConnection, migrateDatabase, type SqliteDatabase } from "../../db";
@@ -20,6 +27,11 @@ import {
 import { digestCanonicalJson } from "../../mcp";
 import {
   CapabilitySelfTestService,
+  EngagementWorkspaceResolver,
+  ToolBindingReadinessRunner,
+  ToolExecutionPreflightService,
+  type ToolExecutableIdentity,
+  type ToolExecutionPreflightEnvironment,
   type ToolExecutionPreflightResult,
 } from "../../system-capabilities";
 import type { TrustedLocalFileReceipt } from "../../trusted-runtime-config";
@@ -33,10 +45,21 @@ import {
   AUTONOMOUS_LOCAL_SAFE_RECON_ADAPTER_ID,
 } from "../../autonomous-runtime";
 import {
+  AUTONOMOUS_NXC_SMB_SUMMARY_ACTION_CLASS,
+  DirectWindowsIdentityProcessAdapter,
+  WindowsIdentityCapabilityRegistry,
+} from "../../windows-identity-tools";
+import {
   AUTONOMOUS_DNS_RUNTIME_CONFIGURATION_SCHEMA_VERSION,
   parseAutonomousDnsRuntimeConfiguration,
 } from "../AutonomousDnsActivationCoordinator";
 import { AutonomousDnsRuntimeLifecycle } from "../AutonomousDnsRuntimeLifecycle";
+import {
+  activateWindowsIdentityRuntime,
+  applyWindowsIdentityRuntimeProjection,
+  projectWindowsIdentityRuntime,
+  type WindowsIdentityActivationSnapshot,
+} from "../WindowsIdentityRuntimeComposition";
 import type { LoadedLocalGuidedToolConfiguration } from "../LocalGuidedToolConfiguration";
 import {
   applyLocalGuidedToolRuntimeProjection,
@@ -175,6 +198,94 @@ function readyPreflight(
       outputSha256: "c".repeat(64),
     },
   };
+}
+
+function executableIdentity(path: string): ToolExecutableIdentity {
+  const metadata = lstatSync(path, { bigint: true });
+  return {
+    sha256: createHash("sha256").update(readFileSync(path)).digest("hex"),
+    device: metadata.dev.toString(),
+    inode: metadata.ino.toString(),
+    sizeBytes: Number(metadata.size),
+    mode: Number(metadata.mode & 0o7777n),
+    uid: Number(metadata.uid),
+    gid: Number(metadata.gid),
+  };
+}
+
+async function readyWindowsIdentityFixture(
+  now: Date,
+): Promise<Readonly<{
+  registry: WindowsIdentityCapabilityRegistry;
+  adapter: DirectWindowsIdentityProcessAdapter;
+  activation: WindowsIdentityActivationSnapshot;
+}>> {
+  const registry = new WindowsIdentityCapabilityRegistry();
+  const identities = new Map<string, ToolExecutableIdentity>();
+  for (const definition of registry.pack.definitions) {
+    identities.set(
+      definition.executable.path,
+      executableIdentity(definition.executable.path),
+    );
+  }
+  const environment: ToolExecutionPreflightEnvironment = {
+    isolation: {
+      networkEnforced: true,
+      filesystemWritesEnforced: true,
+      immutableSnapshotEnforced: true,
+    },
+    async inspectExecutable(path) {
+      const identity = identities.get(path);
+      return identity ? { state: "ready", identity } : { state: "missing" };
+    },
+    async inspectWorkingDirectory() {
+      return true;
+    },
+    async readNoNewPrivileges() {
+      return true;
+    },
+    async execute(input) {
+      return {
+        exitCode: input.executablePath === "/usr/bin/nxc" ? 1 : 0,
+        signal: null,
+        stdout: "target-free readiness fixture\n",
+        stderr: "",
+        timedOut: false,
+        outputLimitExceeded: false,
+        executableIdentity: input.expectedExecutableIdentity,
+      };
+    },
+  };
+  const adapter = new DirectWindowsIdentityProcessAdapter({
+    workspaceResolver: new EngagementWorkspaceResolver([{
+      logicalRoot: "/engagements",
+      runtimeRoot: "/tmp",
+    }]),
+    sandboxExecutable: {
+      path: "/usr/bin/bwrap",
+      expectedSha256: executableIdentity("/usr/bin/bwrap").sha256,
+    },
+    now: () => now,
+  });
+  const activation = await activateWindowsIdentityRuntime({
+    registry,
+    runner: new ToolBindingReadinessRunner(
+      registry.createToolBindingRegistry(),
+      new ToolExecutionPreflightService({
+        environment,
+        clock: () => now,
+      }),
+      () => now,
+    ),
+    adapter,
+    now,
+  });
+  if (activation.status !== "ready") {
+    throw new Error(
+      `Windows identity fixture did not activate: ${activation.reason}`,
+    );
+  }
+  return { registry, adapter, activation };
 }
 
 describe("AutonomousDnsRuntimeLifecycle projection freshness", () => {
@@ -445,9 +556,28 @@ describe("AutonomousDnsRuntimeLifecycle projection freshness", () => {
       set: () => Symbol("suppressed-lifecycle-timer"),
       clear: () => undefined,
     };
+    const windowsIdentity = await readyWindowsIdentityFixture(now);
+    let windowsIdentityActivation:
+      WindowsIdentityActivationSnapshot | undefined;
+    const readBaselineProjection = (): RuntimeProjectionInput => {
+      const baseline = emptyBaseline();
+      return windowsIdentityActivation
+        ? applyWindowsIdentityRuntimeProjection(
+            baseline,
+            projectWindowsIdentityRuntime({
+              baselineManifests:
+                baseline.capabilityManifests
+                ?? emptyRuntimeSourceManifests(),
+              registry: windowsIdentity.registry,
+              activation: windowsIdentityActivation,
+              now,
+            }),
+          )
+        : baseline;
+    };
     const materializedProjection = new RuntimeProjectionService({
       database,
-      read: emptyBaseline,
+      read: readBaselineProjection,
       clock: () => now,
     });
     materializedProjection.projectNow();
@@ -456,7 +586,7 @@ describe("AutonomousDnsRuntimeLifecycle projection freshness", () => {
     let lifecycle!: AutonomousDnsRuntimeLifecycle;
     lifecycle = new AutonomousDnsRuntimeLifecycle({
       database,
-      readBaselineProjection: emptyBaseline,
+      readBaselineProjection,
       publishProjection: (projection) => {
         // The newly ready generation must reach the canonical specialist read
         // model while public lifecycle/runtime access is still fail-closed.
@@ -483,6 +613,16 @@ describe("AutonomousDnsRuntimeLifecycle projection freshness", () => {
         },
       },
       localToolConfiguration,
+      // An optional Windows/identity route without a current activation wave
+      // must not withdraw unrelated Safe Recon. Contracts that request its
+      // action class still fail readiness because no live binding is
+      // projected into this generation.
+      windowsIdentityAutonomous: {
+        registry: windowsIdentity.registry,
+        adapter: windowsIdentity.adapter,
+        logicalWorkspace: "/engagements",
+        readActivation: () => windowsIdentityActivation,
+      },
       now: () => now,
       timers,
     });
@@ -534,6 +674,22 @@ describe("AutonomousDnsRuntimeLifecycle projection freshness", () => {
       ]) {
         expect(mounted.composition.readyActionClassIds).toContain(actionClassId);
       }
+      expect(mounted.composition.readyActionClassIds).not.toContain(
+        AUTONOMOUS_NXC_SMB_SUMMARY_ACTION_CLASS,
+      );
+      const initiallyMountedRuntime = lifecycle.runtime();
+      windowsIdentityActivation = windowsIdentity.activation;
+      const afterIdentityBecameReady = await lifecycle.refresh();
+      expect(afterIdentityBecameReady.status).toBe("ready");
+      expect(lifecycle.runtime()).toBe(initiallyMountedRuntime);
+      expect(afterIdentityBecameReady.composition.readyActionClassIds)
+        .not.toContain(AUTONOMOUS_NXC_SMB_SUMMARY_ACTION_CLASS);
+      expect(afterIdentityBecameReady.projection.capabilityManifests?.tools.find(
+        ({ id }) => id === "kali:nxc-smb-summary",
+      )).toMatchObject({
+        available: true,
+        executionJourneys: ["guided"],
+      });
       for (const toolId of [
         AUTONOMOUS_DNS_SAFE_RECON_TOOL_ID,
         AUTONOMOUS_IP_LIVENESS_TOOL_ID,
@@ -586,7 +742,7 @@ describe("AutonomousDnsRuntimeLifecycle projection freshness", () => {
         reason: "Current capability memory did not reach the connected Vault",
       });
       expect(lifecycle.runtime()).toBeUndefined();
-      expect(publicationCount).toBe(1);
+      expect(publicationCount).toBe(2);
     } finally {
       await lifecycle.stop();
       database.close();

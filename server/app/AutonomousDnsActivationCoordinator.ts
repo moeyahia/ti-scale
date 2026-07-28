@@ -159,6 +159,11 @@ import {
 } from "../trusted-runtime-config";
 import type { LocalGuidedToolActivationSnapshot } from "./LocalGuidedToolActivationCoordinator";
 import {
+  composeAutonomousWindowsIdentityProjection,
+  inspectAutonomousWindowsIdentityComposition,
+  type AutonomousWindowsIdentityRuntimeBinding,
+} from "./AutonomousWindowsIdentityRuntimeComposition";
+import {
   inspectAutonomousRuntimeComposition,
   type AutonomousRuntimeCompositionReadiness,
   type ProductionAutonomousRuntimeAdapters,
@@ -167,6 +172,13 @@ import type {
   FleetAgentProjection,
   RuntimeProjectionInput,
 } from "./RuntimeProjectionService";
+import {
+  AUTONOMOUS_NXC_SMB_SUMMARY_ACTION_CLASS,
+  AUTONOMOUS_NXC_SMB_SUMMARY_BINDING_ID,
+  AUTONOMOUS_NXC_SMB_SUMMARY_TOOL_ID,
+  AutonomousWindowsIdentityExecutionFactory,
+  withAutonomousNxcSmbSummaryPlanning,
+} from "../windows-identity-tools";
 
 export const AUTONOMOUS_DNS_RUNTIME_CONFIGURATION_SCHEMA_VERSION =
   "ti-scale.autonomous-dns-runtime-configuration.v1" as const;
@@ -318,6 +330,7 @@ export type AutonomousDnsActivationBlockerCode =
   | "specialist_heartbeat_missing"
   | "specialist_heartbeat_invalid"
   | "specialist_heartbeat_stale"
+  | "autonomous_windows_identity_unavailable"
   | "runtime_projection_collision"
   | "autonomous_composition_blocked";
 
@@ -894,6 +907,9 @@ export function createConfiguredAutonomousPlanningPolicy(
   configuration: AutonomousDnsRuntimeConfiguration,
   manifest: LocalToolCapabilityManifest,
   candidateLinuxTransportReady = false,
+  autonomousWindowsIdentity?: Readonly<{
+    logicalWorkspace: string;
+  }>,
 ): LocalAutonomousPlanningPolicy {
   const base = configuration.fullTcpBaseline && configuration.ipRecon
     ? createAutonomousGeneralSafeReconPlanningPolicy(
@@ -916,66 +932,77 @@ export function createConfiguredAutonomousPlanningPolicy(
           manifest,
         );
   const exploit = configuration.exploitValidation;
+  let complete: LocalAutonomousPlanningPolicy;
   if (!exploit) {
     if (candidateLinuxTransportReady) {
       throw new TypeError(
         "Candidate Linux post-exploit planning requires exploit validation",
       );
     }
-    return base;
+    complete = base;
+  } else {
+    if (!configuration.cveApplicability || !configuration.fullTcpBaseline) {
+      throw new TypeError(
+        "Exploit validation cannot be planned without the verified version/CVE sequence",
+      );
+    }
+    const exploitPolicy = validateLocalAutonomousPlanningPolicy({
+      ...base,
+      maximumSteps: base.maximumSteps + 1,
+      bindings: Object.freeze([
+        ...base.bindings,
+        Object.freeze({
+          bindingId: exploit.bindingId,
+          actionClassId: AUTONOMOUS_EXPLOIT_VALIDATION_ACTION_CLASS,
+          targetKinds: Object.freeze(["ip"] as const),
+          phase: "exact_target_exploit_validation",
+          title: "Validate one evidence-matched weakness in the disposable lab",
+          objective:
+            "Run one approved, tested Python ScriptArtifact against the exact disposable target named in the signed contract.",
+          explanation:
+            "Ti-Scale selects only a current-run script whose product version and confirmed CVE match the target, whose reusable procedure is synchronized to the active Vault, and whose tests all passed.",
+          rationale:
+            "The script runs without credentials or a public model inside an independently attested cgroup and Bubblewrap boundary that permits egress only to the exact authorized IP.",
+          successCriteria: Object.freeze([exploit.successCriterion]),
+          reversibility:
+            "The runtime creates no persistence, transports no credentials, writes only to its confined job workspace, bounds time/output, and preserves a cancellation receipt. Target-side effects remain those documented by the approved ScriptArtifact.",
+          riskClass: "high" as const,
+          idempotent: false,
+          destructive: false,
+          agentId: exploit.agentId,
+          providerId: exploit.providerId,
+          modelId: exploit.modelId,
+          modelConfigurationHash: exploit.modelConfigurationHash,
+          executionBinding: "reviewed_local_process" as const,
+          toolId: AUTONOMOUS_EXPLOIT_VALIDATION_ACTION_TYPE,
+          targetParameter: "target",
+          staticParameters: Object.freeze({}),
+          capabilityIds: Object.freeze([
+            `capability:${AUTONOMOUS_EXPLOIT_VALIDATION_ACTION_TYPE}`,
+          ]),
+          requiredEvidenceTypeIds:
+            AUTONOMOUS_EXPLOIT_VALIDATION_EVIDENCE_TYPES,
+        }),
+      ]),
+    });
+    complete = candidateLinuxTransportReady
+      ? withCandidateLinuxPostExploitPlanning(exploitPolicy, {
+          agentId: exploit.agentId,
+          providerId: exploit.providerId,
+          modelId: exploit.modelId,
+          modelConfigurationHash: exploit.modelConfigurationHash,
+        })
+      : exploitPolicy;
   }
-  if (!configuration.cveApplicability || !configuration.fullTcpBaseline) {
-    throw new TypeError(
-      "Exploit validation cannot be planned without the verified version/CVE sequence",
-    );
-  }
-  const exploitPolicy = validateLocalAutonomousPlanningPolicy({
-    ...base,
-    maximumSteps: base.maximumSteps + 1,
-    bindings: Object.freeze([
-      ...base.bindings,
-      Object.freeze({
-        bindingId: exploit.bindingId,
-        actionClassId: AUTONOMOUS_EXPLOIT_VALIDATION_ACTION_CLASS,
-        targetKinds: Object.freeze(["ip"] as const),
-        phase: "exact_target_exploit_validation",
-        title: "Validate one evidence-matched weakness in the disposable lab",
-        objective:
-          "Run one approved, tested Python ScriptArtifact against the exact disposable target named in the signed contract.",
-        explanation:
-          "Ti-Scale selects only a current-run script whose product version and confirmed CVE match the target, whose reusable procedure is synchronized to the active Vault, and whose tests all passed.",
-        rationale:
-          "The script runs without credentials or a public model inside an independently attested cgroup and Bubblewrap boundary that permits egress only to the exact authorized IP.",
-        successCriteria: Object.freeze([exploit.successCriterion]),
-        reversibility:
-          "The runtime creates no persistence, transports no credentials, writes only to its confined job workspace, bounds time/output, and preserves a cancellation receipt. Target-side effects remain those documented by the approved ScriptArtifact.",
-        riskClass: "high" as const,
-        idempotent: false,
-        destructive: false,
-        agentId: exploit.agentId,
-        providerId: exploit.providerId,
-        modelId: exploit.modelId,
-        modelConfigurationHash: exploit.modelConfigurationHash,
-        executionBinding: "reviewed_local_process" as const,
-        toolId: AUTONOMOUS_EXPLOIT_VALIDATION_ACTION_TYPE,
-        targetParameter: "target",
-        staticParameters: Object.freeze({}),
-        capabilityIds: Object.freeze([
-          `capability:${AUTONOMOUS_EXPLOIT_VALIDATION_ACTION_TYPE}`,
-        ]),
-        requiredEvidenceTypeIds:
-          AUTONOMOUS_EXPLOIT_VALIDATION_EVIDENCE_TYPES,
-      }),
-    ]),
-  });
-  return candidateLinuxTransportReady
-    ? withCandidateLinuxPostExploitPlanning(exploitPolicy, {
-        agentId: exploit.agentId,
-        providerId: exploit.providerId,
-        modelId: exploit.modelId,
-        modelConfigurationHash: exploit.modelConfigurationHash,
+  return autonomousWindowsIdentity
+    ? withAutonomousNxcSmbSummaryPlanning(complete, {
+        logicalWorkspace: autonomousWindowsIdentity.logicalWorkspace,
+        providerId: configuration.provider.id,
+        modelId: configuration.provider.modelId,
+        modelConfigurationHash:
+          configuration.provider.modelConfigurationHash,
       })
-    : exploitPolicy;
+    : complete;
 }
 
 const CANONICAL_UTC_ATTESTATION_TIMESTAMP =
@@ -1019,6 +1046,7 @@ export function attestLocalDeterministicAutonomousDnsProvider(input: Readonly<{
   planner: LocalAutonomousContractPlanner;
   evaluator: LocalVerifiedEvidenceOutcomeEvaluator;
   candidateLinuxTransportReady?: boolean;
+  autonomousWindowsIdentity?: Readonly<{ logicalWorkspace: string }>;
   now?: Date;
 }>): LocalDeterministicProviderAttestation {
   if (!trustedReceiptValid(input.configuration)) {
@@ -1030,6 +1058,7 @@ export function attestLocalDeterministicAutonomousDnsProvider(input: Readonly<{
   const expectedBindings = expectedPlannerBindings(
     config,
     input.candidateLinuxTransportReady === true,
+    input.autonomousWindowsIdentity !== undefined,
   );
   const exactBindingsMatch = bindings.length === expectedBindings.length
     && expectedBindings.every((expected) => bindings.filter((binding) =>
@@ -1087,6 +1116,7 @@ export function attestLocalDeterministicAutonomousDnsProvider(input: Readonly<{
 function expectedPlannerBindings(
   configuration: AutonomousDnsRuntimeConfiguration,
   candidateLinuxTransportReady = false,
+  autonomousWindowsIdentityReady = false,
 ): readonly Readonly<{ readonly bindingId: string; readonly toolId: string }>[] {
   return Object.freeze([
     Object.freeze({
@@ -1149,6 +1179,10 @@ function expectedPlannerBindings(
         toolId: AUTONOMOUS_LINUX_POST_EXPLOIT_TOOL_IDS[4],
       }),
     ] : []),
+    ...(autonomousWindowsIdentityReady ? [Object.freeze({
+      bindingId: AUTONOMOUS_NXC_SMB_SUMMARY_BINDING_ID,
+      toolId: AUTONOMOUS_NXC_SMB_SUMMARY_TOOL_ID,
+    })] : []),
   ]);
 }
 
@@ -3062,6 +3096,12 @@ export interface ComposeAutonomousDnsActivationOptions {
   readonly mcpAttestation?: McpCapabilityAttestation;
   readonly localProcessTransport: ReviewedLocalProcessInvocationAdapter;
   readonly workspaceResolver: EngagementWorkspaceResolver;
+  /**
+   * Optional exact anonymous NetExec route. Supplying it makes its complete
+   * current receipt/adapter/planner/result-sink join mandatory for this
+   * activation generation.
+   */
+  readonly autonomousWindowsIdentity?: AutonomousWindowsIdentityRuntimeBinding;
   /** Required when the evidence-derived web continuation is configured. */
   readonly brainContext?: BrainContextService;
   /** Required when the local CVE applicability continuation is configured. */
@@ -3117,6 +3157,23 @@ export function composeAutonomousDnsActivation(
     )]);
   }
   const config = input.configuration.value;
+  const autonomousWindowsIdentityReadiness =
+    input.autonomousWindowsIdentity
+      ? inspectAutonomousWindowsIdentityComposition(
+          input.autonomousWindowsIdentity,
+          now,
+        )
+      : undefined;
+  if (
+    autonomousWindowsIdentityReadiness
+    && autonomousWindowsIdentityReadiness.status !== "ready"
+  ) {
+    return blocked(input.baselineProjection, [blocker(
+      "autonomous_windows_identity_unavailable",
+      autonomousWindowsIdentityReadiness.reason,
+      autonomousWindowsIdentityReadiness.remediation,
+    )]);
+  }
   const candidateLinuxTransportReadiness =
     input.candidateLinuxTransport?.readiness();
   const candidateLinuxTransportAttested =
@@ -3309,6 +3366,12 @@ export function composeAutonomousDnsActivation(
       config,
       input.manifest,
       candidateLinuxTransportReady,
+      input.autonomousWindowsIdentity
+        ? {
+            logicalWorkspace:
+              input.autonomousWindowsIdentity.logicalWorkspace,
+          }
+        : undefined,
     );
     const exploitPlanning = config.exploitValidation
       && exploitPathReadiness.ready
@@ -3503,7 +3566,7 @@ export function composeAutonomousDnsActivation(
           workspaceResolver: input.workspaceResolver,
           now: input.runtimeClock ?? (() => now),
         });
-  const execution = config.exploitValidation && exploitPathReadiness.ready
+  const exploitExecution = config.exploitValidation && exploitPathReadiness.ready
     ? new AutonomousExploitValidationExecutionFactory({
         baseFactory: baseExecution,
         activationManifest: input.exploitSandboxManifest!,
@@ -3558,6 +3621,16 @@ export function composeAutonomousDnsActivation(
         now: input.runtimeClock ?? (() => now),
       })
     : baseExecution;
+  const execution = input.autonomousWindowsIdentity
+    ? new AutonomousWindowsIdentityExecutionFactory(
+        exploitExecution,
+        {
+          pack: input.autonomousWindowsIdentity.registry.pack,
+          adapter: input.autonomousWindowsIdentity.adapter,
+          now: input.runtimeClock ?? (() => now),
+        },
+      )
+    : exploitExecution;
   const adapters: ProductionAutonomousRuntimeAdapters = Object.freeze({
     planner,
     outcomeEvaluator: evaluator,
@@ -3595,7 +3668,7 @@ export function composeAutonomousDnsActivation(
         : {}),
       now,
     });
-    projection = Object.freeze({
+    const baseProjection: RuntimeProjectionInput = Object.freeze({
       ...input.baselineProjection,
       readiness: Object.freeze({
         ...input.baselineProjection.readiness,
@@ -3645,6 +3718,18 @@ export function composeAutonomousDnsActivation(
       mcpServers: input.baselineProjection.mcpServers,
       capabilityManifests: manifests,
     });
+    projection = input.autonomousWindowsIdentity
+      ? composeAutonomousWindowsIdentityProjection(baseProjection, {
+          binding: input.autonomousWindowsIdentity,
+          providerId: config.provider.id,
+          modelId: config.provider.modelId,
+          modelConfigurationHash:
+            config.provider.modelConfigurationHash,
+          executionAdapterId:
+            execution.localProcessContract.adapterId,
+          now,
+        })
+      : baseProjection;
     // The planner was instantiated before the projection could be composed so
     // its contract could be attested. Switch its read-only closure only after
     // every exact manifest and live-readiness object has been built.
@@ -3665,10 +3750,15 @@ export function composeAutonomousDnsActivation(
     now,
     specialistHeartbeatMaximumAgeMs: config.specialist.heartbeatTtlMs,
   });
-  const requiredActionClasses = requiredAutonomousSafeReconActionClassIds(
-    config,
-    candidateLinuxTransportReady,
-  );
+  const requiredActionClasses = Object.freeze([
+    ...requiredAutonomousSafeReconActionClassIds(
+      config,
+      candidateLinuxTransportReady,
+    ),
+    ...(input.autonomousWindowsIdentity
+      ? [AUTONOMOUS_NXC_SMB_SUMMARY_ACTION_CLASS]
+      : []),
+  ]);
   const missingActionClasses = requiredActionClasses.filter(
     (actionClassId) => !composition.readyActionClassIds.includes(actionClassId),
   );

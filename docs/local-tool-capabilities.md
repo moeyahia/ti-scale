@@ -53,7 +53,7 @@ cancellation, and durable exact-step route have current receipts.
 | Guided operation | What Ti-Scale does | Authentication |
 | --- | --- | --- |
 | SMB share list | Requests the share names and types advertised by one approved host; it does not open, write, or execute anything in a share | Anonymous or an opaque private credential reference when that mode is ready |
-| SMB identity summary | Reads bounded SMB host, domain, signing, protocol, and share metadata from one approved host | Opaque private credential reference |
+| SMB identity summary | Reads bounded SMB host, domain, signing, protocol, and share metadata from one approved host | Anonymous or an opaque private credential reference when that mode is ready |
 | LDAP root metadata | Reads the fixed public root-directory metadata fields from one approved LDAP endpoint; it does not enumerate users, groups, or computers | Anonymous |
 | RPC domain summary | Reads a bounded domain-role and object-count summary from one approved Windows RPC endpoint | Anonymous or an opaque private credential reference when that mode is ready |
 
@@ -62,6 +62,17 @@ The browser and mission records never contain a password, hash, ticket, cookie,
 key, or reusable credential value. Selecting one of these operations creates
 exactly one represented Guided action and Ti-Scale still waits for the
 operator's decision before dispatch.
+
+The NetExec binding can also compile one exact anonymous SMB identity-summary
+action against a signed Autonomous contract. That prepared seam uses the
+generic reviewed-local persisted-action envelope and the same direct-argv,
+scope, output, cancellation, and no-evidence-promotion checks. The production
+Autonomous lifecycle now mounts its dispatcher, durable result sink, resume and
+cancellation path, and `ADAttackMapper` assignment. The runtime advertises this
+one binding as Autonomous and mission-selectable only while the exact current
+NetExec activation receipt, same adapter instance, signed contract, planning
+binding, and local deterministic provider attestation all join successfully.
+Every other Windows/identity binding remains Guided-only.
 
 ## Pinned local ExploitDB intelligence
 

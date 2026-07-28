@@ -304,6 +304,15 @@ function configurationCompatibleWithAgent(
     && compatibleAgentIds.includes(agentId);
 }
 
+function missingWorkspaceSpecialistAgentIds(
+  value: Pick<ModelCatalogItem, "compatibleAgentIds">,
+): string[] {
+  return PRODUCT_AGENT_REGISTRY
+    .map(({ id }) => id)
+    .filter((agentId) => !value.compatibleAgentIds.includes(agentId))
+    .sort((left, right) => left.localeCompare(right));
+}
+
 function orderedSelections(
   values: readonly AgentModelAssignmentSelection[],
 ): AgentModelAssignmentSelection[] {
@@ -905,6 +914,24 @@ export class ModelConfigurationService {
       throw modelConfigurationUnavailable(
         `Fallback configuration is unavailable: ${fallback.unavailableReasons.join(" ")}`,
       );
+    }
+    if (input.scopeType === "global") {
+      const primaryMissingAgents = missingWorkspaceSpecialistAgentIds(primary);
+      if (primaryMissingAgents.length > 0) {
+        throw modelConfigurationScopeConflict(
+          `Workspace primary configuration is not declared for every canonical specialist. Missing: ${primaryMissingAgents.join(", ")}`,
+          "Choose a live primary route that covers every canonical specialist, or configure specialists individually.",
+        );
+      }
+      const fallbackMissingAgents = fallback
+        ? missingWorkspaceSpecialistAgentIds(fallback)
+        : [];
+      if (fallbackMissingAgents.length > 0) {
+        throw modelConfigurationScopeConflict(
+          `Workspace fallback configuration is not declared for every canonical specialist. Missing: ${fallbackMissingAgents.join(", ")}`,
+          "Choose a live fallback route that covers every canonical specialist, remove the fallback, or configure specialists individually.",
+        );
+      }
     }
     if (input.agentId && !primary.compatibleAgentIds.includes(input.agentId)) {
       throw modelConfigurationScopeConflict(

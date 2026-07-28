@@ -1,11 +1,13 @@
 import { isIP } from "node:net";
 import { enforceJourneyActionBoundary, fingerprintAction, type ActionIntent } from "../supervisor";
+import { REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION } from "../orchestration";
 import { LDAPSEARCH_ROOT_DSE_DEFINITION } from "./definitions/ldap";
 import { NXC_SMB_SUMMARY_DEFINITION } from "./definitions/netexec";
 import { RPCCLIENT_DOMAIN_INFO_DEFINITION } from "./definitions/rpc";
 import { SMBCLIENT_SHARE_LIST_DEFINITION } from "./definitions/samba";
 import { windowsIdentityFailure } from "./failureTaxonomy";
 import {
+  WINDOWS_IDENTITY_ACTION_SCHEMA_VERSION,
   WINDOWS_IDENTITY_TOOL_PACK_SCHEMA_VERSION,
   WindowsIdentityBoundaryError,
   type CompiledWindowsIdentityInvocation,
@@ -113,8 +115,8 @@ function argv(
         "--gfail-limit", "1",
         "--ufail-limit", "1",
         "--fail-limit", "1",
-        "-u", FIXED_CREDENTIAL_PATHS.username,
-        "-p", FIXED_CREDENTIAL_PATHS.password,
+        "-u", authenticated ? FIXED_CREDENTIAL_PATHS.username : "",
+        "-p", authenticated ? FIXED_CREDENTIAL_PATHS.password : "",
       ]);
     case "ldap_root_dse":
       return Object.freeze([
@@ -201,7 +203,7 @@ export class WindowsIdentityToolPack {
    * process adapter calls this immediately before spawn so a deserialized or
    * otherwise modified "compiled" object cannot change its target, argv,
    * credential reference, environment, or execution budgets after the exact
-   * Guided decision was checked.
+   * Guided decision or signed Autonomous contract was checked.
    */
   executionShapeMatches(invocation: CompiledWindowsIdentityInvocation): boolean {
     const definition = this.resolveTool(invocation.toolId);
@@ -216,31 +218,66 @@ export class WindowsIdentityToolPack {
       "runId",
       "stepId",
       "target",
-    ]) || !exactRecordKeys(action.arguments, [
-      "authenticationMode",
-      "credentialReference",
-      "executionBinding",
-      "logicalWorkspace",
-      "operation",
-      "schemaVersion",
-      "toolId",
     ])) return false;
 
     let request: WindowsIdentityActionRequest;
     try {
-      request = parseWindowsIdentityActionRequest({
-        schemaVersion: action.arguments.schemaVersion,
-        missionId: action.missionId,
-        runId: action.runId,
-        stepId: action.stepId,
-        planVersion: action.planVersion,
-        journey: "guided",
-        operation: action.arguments.operation,
-        target: action.target,
-        logicalWorkspace: action.arguments.logicalWorkspace,
-        authenticationMode: action.arguments.authenticationMode,
-        credentialReference: action.arguments.credentialReference,
-      });
+      if (invocation.journey === "autonomous") {
+        if (!exactRecordKeys(action.arguments, [
+          "executionBinding",
+          "parameters",
+          "schemaVersion",
+          "toolId",
+        ])) return false;
+        const parameters = action.arguments.parameters;
+        if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)
+          || !exactRecordKeys(parameters as Readonly<Record<string, unknown>>, [
+            "authenticationMode",
+            "operation",
+            "target",
+            "workspace",
+          ])) return false;
+        const values = parameters as Readonly<Record<string, unknown>>;
+        request = parseWindowsIdentityActionRequest({
+          schemaVersion: WINDOWS_IDENTITY_ACTION_SCHEMA_VERSION,
+          missionId: action.missionId,
+          runId: action.runId,
+          stepId: action.stepId,
+          planVersion: action.planVersion,
+          journey: "autonomous",
+          operation: values.operation,
+          target: values.target,
+          logicalWorkspace: values.workspace,
+          authenticationMode: values.authenticationMode,
+          credentialReference: null,
+        });
+        if (action.arguments.schemaVersion !== REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION
+          || action.arguments.executionBinding !== "reviewed_local_process"
+          || values.target !== action.target) return false;
+      } else {
+        if (!exactRecordKeys(action.arguments, [
+          "authenticationMode",
+          "credentialReference",
+          "executionBinding",
+          "logicalWorkspace",
+          "operation",
+          "schemaVersion",
+          "toolId",
+        ])) return false;
+        request = parseWindowsIdentityActionRequest({
+          schemaVersion: action.arguments.schemaVersion,
+          missionId: action.missionId,
+          runId: action.runId,
+          stepId: action.stepId,
+          planVersion: action.planVersion,
+          journey: "guided",
+          operation: action.arguments.operation,
+          target: action.target,
+          logicalWorkspace: action.arguments.logicalWorkspace,
+          authenticationMode: action.arguments.authenticationMode,
+          credentialReference: action.arguments.credentialReference,
+        });
+      }
     } catch {
       return false;
     }
@@ -279,12 +316,24 @@ export class WindowsIdentityToolPack {
     request: unknown;
     missionBoundary: WindowsIdentityMissionBoundary;
     credentialBindingReceipt: WindowsIdentityCredentialBindingReceipt | null;
+    persistedAction?: Readonly<ActionIntent>;
     now?: Date;
   }>): CompiledWindowsIdentityInvocation {
     const request = parseWindowsIdentityActionRequest(input.request);
     const definition = this.resolveOperation(request.operation);
     if (!definition) boundary("windows_identity_request_invalid");
-    if (request.journey !== "guided" || definition.journeyPolicy !== "guided_only") {
+    const preparedAutonomousNxc = request.journey === "autonomous"
+      && definition.toolId === "kali:nxc-smb-summary"
+      && request.operation === "smb_identity_summary"
+      && request.authenticationMode === "anonymous"
+      && request.credentialReference === null;
+    if (request.journey !== "guided" && !preparedAutonomousNxc) {
+      boundary("windows_identity_autonomous_not_approved");
+    }
+    if (request.journey === "autonomous"
+      && (request.operation !== "smb_identity_summary"
+        || request.authenticationMode !== "anonymous"
+        || request.credentialReference !== null)) {
       boundary("windows_identity_autonomous_not_approved");
     }
     if (!definition.authenticationModes.includes(request.authenticationMode)) {
@@ -303,7 +352,7 @@ export class WindowsIdentityToolPack {
       || input.missionBoundary.prohibitedActionClassIds.includes(definition.actionClassId)) {
       boundary("windows_identity_action_class_denied");
     }
-    const action: ActionIntent = Object.freeze({
+    const reviewedAction: ActionIntent = Object.freeze({
       missionId: request.missionId,
       runId: request.runId,
       stepId: request.stepId,
@@ -321,17 +370,63 @@ export class WindowsIdentityToolPack {
         logicalWorkspace: request.logicalWorkspace,
       }),
     });
+    const action: ActionIntent = input.persistedAction
+      ? Object.freeze(structuredClone(input.persistedAction))
+      : reviewedAction;
+    if (input.persistedAction) {
+      const parameters = action.arguments.parameters;
+      if (request.journey !== "autonomous"
+        || !exactRecordKeys(action.arguments, [
+          "executionBinding",
+          "parameters",
+          "schemaVersion",
+          "toolId",
+        ])
+        || action.arguments.schemaVersion !== REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION
+        || action.arguments.executionBinding !== "reviewed_local_process"
+        || action.arguments.toolId !== definition.toolId
+        || !parameters || typeof parameters !== "object" || Array.isArray(parameters)
+        || !exactRecordKeys(parameters as Readonly<Record<string, unknown>>, [
+          "authenticationMode",
+          "operation",
+          "target",
+          "workspace",
+        ])
+        || (parameters as Readonly<Record<string, unknown>>).authenticationMode
+          !== request.authenticationMode
+        || (parameters as Readonly<Record<string, unknown>>).operation
+          !== request.operation
+        || (parameters as Readonly<Record<string, unknown>>).target !== target
+        || (parameters as Readonly<Record<string, unknown>>).workspace
+          !== request.logicalWorkspace
+        || action.missionId !== request.missionId
+        || action.runId !== request.runId
+        || action.stepId !== request.stepId
+        || action.planVersion !== request.planVersion
+        || action.actionType !== definition.toolId
+        || action.actionClass !== definition.actionClassId
+        || action.target !== target) {
+        boundary("windows_identity_request_invalid");
+      }
+    }
     const actionFingerprint = fingerprintAction(action).hash;
     const decision = enforceJourneyActionBoundary({
-      journey: "guided",
+      journey: request.journey,
       action,
       now: (input.now ?? new Date()).toISOString(),
-      guidedDecision: input.missionBoundary.guidedDecision ?? undefined,
+      ...(request.journey === "guided"
+        ? { guidedDecision: input.missionBoundary.guidedDecision ?? undefined }
+        : {
+            autonomousContract:
+              input.missionBoundary.autonomousContract ?? undefined,
+          }),
     });
     if (!decision.allowed) {
-      boundary(decision.reason === "guided_action_changed"
-        ? "windows_identity_guided_action_changed"
-        : "windows_identity_guided_decision_required");
+      boundary(request.journey === "guided"
+        ? decision.reason === "guided_action_changed"
+          ? "windows_identity_guided_action_changed"
+          : "windows_identity_guided_decision_required"
+        : "windows_identity_autonomous_not_approved");
     }
     const binding = credentialReceipt(
       request,
@@ -345,6 +440,7 @@ export class WindowsIdentityToolPack {
     }
     return Object.freeze({
       schemaVersion: "ti-scale.windows-identity-invocation.v1",
+      journey: request.journey,
       toolId: definition.toolId,
       operation: definition.operation,
       action,

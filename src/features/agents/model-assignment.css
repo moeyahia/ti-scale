@@ -62,9 +62,21 @@
   color: var(--os-text);
 }
 
+.model-assignment__configured-receipt {
+  overflow-wrap: anywhere;
+}
+
 .model-assignment__source > .os-button {
   grid-column: 2;
   width: fit-content;
+}
+
+.model-assignment__catalog-refresh {
+  margin: 0;
+  padding: var(--os-space-3) var(--os-space-4);
+  border-inline-start: 2px solid var(--os-info);
+  background: color-mix(in srgb, var(--os-info) 9%, var(--os-surface-1));
+  color: var(--os-text);
 }
 
 .model-assignment__semantics {

@@ -67,8 +67,8 @@ export async function drainWindowsIdentityReadinessResources(
 /**
  * Runs the target-free executable wave and joins it to the real bounded
  * process adapter. This never contacts a mission target and no receipt grants
- * mission authority; the compiler still requires scope plus one exact Guided
- * decision for every dispatch.
+ * mission authority; the active runtime projection remains Guided-only and
+ * requires scope plus one exact Guided decision for every dispatch.
  */
 export async function activateWindowsIdentityRuntime(input: Readonly<{
   registry: WindowsIdentityCapabilityRegistry;

@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION } from "../../orchestration";
 import { fingerprintAction, type ActionIntent, type GuidedDecision } from "../../supervisor";
 import { EngagementWorkspaceResolver } from "../../system-capabilities";
 import { DirectWindowsIdentityProcessAdapter } from "../DirectWindowsIdentityProcessAdapter";
@@ -130,6 +131,57 @@ function compile(
     request: value,
     missionBoundary: missionBoundary(pack, value),
     credentialBindingReceipt: binding,
+    now: NOW,
+  });
+}
+
+function compileAutonomousNxc(
+  pack: WindowsIdentityToolPack,
+  runId: string,
+): CompiledWindowsIdentityInvocation {
+  const value = request("smb_identity_summary", runId, {
+    journey: "autonomous",
+  });
+  const persistedAction: ActionIntent = {
+    missionId: value.missionId,
+    runId: value.runId,
+    stepId: value.stepId,
+    planVersion: value.planVersion,
+    actionType: "kali:nxc-smb-summary",
+    actionClass: "active_directory_identity_operations",
+    target: value.target,
+    arguments: {
+      schemaVersion: REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION,
+      executionBinding: "reviewed_local_process",
+      toolId: "kali:nxc-smb-summary",
+      parameters: {
+        authenticationMode: "anonymous",
+        operation: "smb_identity_summary",
+        target: value.target,
+        workspace: value.logicalWorkspace,
+      },
+    },
+  };
+  return pack.compile({
+    request: value,
+    persistedAction,
+    missionBoundary: {
+      authorizationVerified: true,
+      allowedTargets: [value.target],
+      prohibitedTargets: [],
+      allowedActionClassIds: ["active_directory_identity_operations"],
+      prohibitedActionClassIds: [],
+      guidedDecision: null,
+      autonomousContract: {
+        runId: value.runId,
+        version: 1,
+        status: "signed",
+        allowedActionTypes: ["active_directory_identity_operations"],
+        prohibitedActionTypes: [],
+        allowedTargets: [value.target],
+      },
+    },
+    credentialBindingReceipt: null,
     now: NOW,
   });
 }
@@ -308,6 +360,40 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 }
 
 describe("DirectWindowsIdentityProcessAdapter", () => {
+  test("accepts only the prepared anonymous Autonomous NetExec envelope at the final adapter boundary", async () => {
+    const active = await fixture({ runtimeTimeoutCapMs: 1_000 });
+    try {
+      const invocation = compileAutonomousNxc(active.pack, "run-autonomous-nxc");
+      active.adapter.acceptReadinessReceipts([readiness(active.pack, invocation.toolId)]);
+      expect(invocation).toMatchObject({
+        journey: "autonomous",
+        toolId: "kali:nxc-smb-summary",
+        credentialReference: null,
+        directArgv: true,
+        shell: false,
+        targetReadOnly: true,
+        evidencePromotion: "none",
+      });
+      expect(invocation.arguments).toContain("--no-write-check");
+      expect(invocation.arguments).toContain("--no-bruteforce");
+      const result = await active.adapter.execute(invocation, new AbortController().signal);
+      expect(result.receipt).toMatchObject({
+        toolId: "kali:nxc-smb-summary",
+        runId: "run-autonomous-nxc",
+        credentialReferenceId: null,
+        directArgv: true,
+        shell: false,
+        targetReadOnly: true,
+        workspaceConfined: true,
+        credentialsMountedReadOnly: true,
+        outputRedacted: true,
+        grantsAuthorization: false,
+      });
+    } finally {
+      await active.dispose();
+    }
+  });
+
   test("rechecks the exact target, fingerprint, direct argv, no-shell shape, and scope-derived invocation before spawn", async () => {
     const active = await fixture();
     try {

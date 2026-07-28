@@ -88,7 +88,7 @@ function mergeRiskClasses(
   return deepFreeze([...merged.values()]);
 }
 
-function readinessCurrent(
+export function windowsIdentityReadinessCurrent(
   definition: WindowsIdentityToolDefinition,
   receipt: WindowsIdentityToolReadinessReceipt | undefined,
   now: Date,
@@ -120,7 +120,8 @@ function readinessCurrent(
 /**
  * Joins the generic target-free executable receipt to this pack's exact hash
  * and its separately attested execution adapter. Neither input grants mission
- * authority; scope and the exact Guided decision are rechecked at compile time.
+ * authority. The active capability projection remains Guided-only; its scope
+ * and exact represented decision are rechecked at compile time.
  */
 export function windowsIdentityReadinessReceipt(input: Readonly<{
   definition: WindowsIdentityToolDefinition;
@@ -240,7 +241,11 @@ export class WindowsIdentityCapabilityRegistry {
     }));
     const available = new Map(this.pack.definitions.map((definition) => [
       definition.toolId,
-      readinessCurrent(definition, byTool.get(definition.toolId), now),
+      windowsIdentityReadinessCurrent(
+        definition,
+        byTool.get(definition.toolId),
+        now,
+      ),
     ]));
     const manifests: RuntimeSourceManifests = deepFreeze({
       riskClasses: [{

@@ -29,8 +29,12 @@ import {
   AgentRuntimeBindingError,
   AgentRuntimeBindingService,
 } from "../../agent-runtime";
+import { PRODUCT_AGENT_REGISTRY } from "../../agents";
 
 const NOW = "2026-07-23T15:00:00.000Z";
+const CANONICAL_SPECIALIST_AGENT_IDS = PRODUCT_AGENT_REGISTRY
+  .map(({ id }) => id)
+  .sort((left, right) => left.localeCompare(right));
 const servers: Server[] = [];
 const databases: SqliteDatabase[] = [];
 const temporaryDirectories: string[] = [];
@@ -51,18 +55,20 @@ function manifests(): RuntimeSourceManifests {
     capabilities: [],
     tools: [],
     mcpServers: [],
-    agents: [{
-      id: "runtime:recon-adapter",
-      label: "Internal reconnaissance adapter",
+    agents: PRODUCT_AGENT_REGISTRY.map(({ id }) => ({
+      id,
+      label: `${id} model route`,
       available: true,
       capabilityIds: [],
-      actionClassIds: ["active_host_discovery"],
+      actionClassIds: id === "ReconScout"
+        ? ["active_host_discovery"]
+        : [],
       toolIds: [],
       modelRefs: [{
         providerId: "provider-open",
         modelId: "model-frontier",
       }],
-    }],
+    })),
     providers: [{
       id: "provider-open",
       authenticated: true,
@@ -581,7 +587,7 @@ describe("model configuration control plane", () => {
       providerId: "provider-open",
       modelId: "model-frontier",
       displayName: "Frontier Model",
-      compatibleAgentIds: ["ReconScout"],
+      compatibleAgentIds: CANONICAL_SPECIALIST_AGENT_IDS,
       enforcementMode: "enforced_executor",
       authState: "authenticated",
       healthState: "healthy",
@@ -711,6 +717,47 @@ describe("model configuration control plane", () => {
     );
     expect(configurations.status).toBe(200);
     expect((await json(configurations)).items).toHaveLength(2);
+  });
+
+  test("rejects a workspace default that cannot resolve for every canonical specialist", () => {
+    const db = database();
+    const partialManifests = {
+      ...manifests(),
+      agents: manifests().agents.filter(({ id }) => id === "ReconScout"),
+    };
+    const service = new ModelConfigurationService(
+      new ModelConfigurationRepository(db, () => new Date(NOW)),
+      {
+        readRuntimeManifests: () => partialManifests,
+        clock: () => new Date(NOW),
+      },
+    );
+    const selected = service.catalog().items[0]!;
+
+    expect(() => service.putPreference({
+      scopeType: "global",
+      scopeId: "global",
+      agentId: null,
+      primaryConfigurationId: selected.configurationId,
+      fallbackConfigurationId: null,
+      expectedVersion: 0,
+      reason: "A partial route must not become the workspace default",
+    }, "operator-test")).toThrow(
+      "Workspace primary configuration is not declared for every canonical specialist",
+    );
+
+    expect(service.putPreference({
+      scopeType: "agent",
+      scopeId: "ReconScout",
+      agentId: "ReconScout",
+      primaryConfigurationId: selected.configurationId,
+      fallbackConfigurationId: null,
+      expectedVersion: 0,
+      reason: "The same route remains valid for its declared specialist",
+    }, "operator-test")).toMatchObject({
+      agentId: "ReconScout",
+      primaryConfigurationId: selected.configurationId,
+    });
   });
 
   test("resolves step over run, mission, agent, and global then pins immutably", async () => {

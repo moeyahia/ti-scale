@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   fetchModelCatalog,
+  fetchModelConfigurations,
   fetchModelPreferences,
   fetchModelResolution,
   MODEL_CATALOG_SNAPSHOT_MAXIMUM_AGE_MS,
   updateModelPreference,
 } from "../../data/api/modelConfiguration";
+import { operationsApi } from "../../data/api/operations";
 import { useNavigation } from "../../app/router/navigation";
 import { useQuery, useQueryCache } from "../../data/cache/QueryProvider";
 import { useQuerySnapshotExpired } from "../../data/cache/querySnapshotFreshness";
@@ -17,6 +19,12 @@ import type {
   ModelResolutionResult,
 } from "../../domain/types/modelConfiguration";
 import { formatTime, KeyValueGrid } from "../runs/OperationalSurface";
+import {
+  catalogItemSelectableForAgent,
+  configurationReceiptLabel,
+  fallbackSelectionIsValid,
+  reconcileSavedCatalogReceipt,
+} from "./modelAssignmentCatalogRefresh";
 import "./model-assignment.css";
 
 type ModelAssignmentScope =
@@ -85,18 +93,25 @@ function executionBoundaryLabel(
 function selectableForScope(
   item: ModelCatalogItem,
   scope: ModelAssignmentScope,
+  workspaceAgentIds: readonly string[],
 ): boolean {
-  return item.selectable && (
-    scope.agentId === null || item.compatibleAgentIds.includes(scope.agentId)
+  return catalogItemSelectableForAgent(
+    item,
+    scope.agentId,
+    workspaceAgentIds,
   );
 }
 
 function assignmentReadiness(
   item: ModelCatalogItem | undefined,
   scope: ModelAssignmentScope,
+  workspaceAgentIds: readonly string[],
 ): { readonly label: string; readonly status: string } {
   if (!item) return { label: "Not configured", status: "unconfigured" };
-  if (!selectableForScope(item, scope) || item.enforcementMode === "unavailable") {
+  if (
+    !selectableForScope(item, scope, workspaceAgentIds)
+    || item.enforcementMode === "unavailable"
+  ) {
     return { label: "Unavailable", status: "unavailable" };
   }
   if (item.enforcementMode === "enforced_executor") {
@@ -111,8 +126,10 @@ function assignmentReadiness(
 function firstSelectable(
   items: readonly ModelCatalogItem[],
   scope: ModelAssignmentScope,
+  workspaceAgentIds: readonly string[],
 ): ModelCatalogItem | undefined {
-  return items.find((item) => selectableForScope(item, scope));
+  return items.find((item) =>
+    selectableForScope(item, scope, workspaceAgentIds));
 }
 
 function findConfiguration(
@@ -140,6 +157,30 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
   const location = useNavigation();
   const cache = useQueryCache();
   const catalog = useQuery("model-catalog", fetchModelCatalog, { staleTime: 5_000 });
+  const workspaceRoster = useQuery(
+    "agents:canonical-product-roster",
+    (signal) => operationsApi.agents({ limit: 100 }, signal),
+    { staleTime: 5_000 },
+  );
+  const workspaceAgentIds = useMemo(
+    () => (workspaceRoster.data?.items ?? [])
+      .filter(({ id }) => id !== "Commander")
+      .map(({ id }) => id)
+      .sort((left, right) => left.localeCompare(right)),
+    [workspaceRoster.data],
+  );
+  const workspaceRosterBlockingError = scope.type !== "global"
+    ? undefined
+    : workspaceRoster.error
+      ?? (workspaceRoster.data?.nextCursor
+        ? new Error(
+            "The canonical specialist roster did not fit in one verified page. Ti-Scale cannot prove that a workspace default covers every inheriting specialist.",
+          )
+        : workspaceRoster.data && workspaceAgentIds.length === 0
+          ? new Error(
+              "No canonical specialist roster is available. Configure specialists before assigning a workspace default.",
+            )
+          : undefined);
   const preferenceKey = `model-preference:${scope.type}:${scope.id}:${scope.agentId ?? "all"}`;
   const preferences = useQuery(
     preferenceKey,
@@ -171,14 +212,73 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
   const exactPreference = preferences.data?.items[0];
   const inheritedResolution = resolution.data?.resolution;
   const assignmentSemantics = resolution.data?.assignmentSemantics;
+  const savedConfigurationIds = scope.type === "global" && exactPreference
+    ? [
+        exactPreference.primaryConfigurationId,
+        ...(exactPreference.fallbackConfigurationId
+          ? [exactPreference.fallbackConfigurationId]
+          : []),
+      ]
+    : [];
+  const savedConfigurationsKey = [
+    "model-configurations",
+    scope.type,
+    scope.id,
+    ...savedConfigurationIds,
+  ].join(":");
+  const savedConfigurations = useQuery(
+    savedConfigurationsKey,
+    (signal) => savedConfigurationIds.length
+      ? fetchModelConfigurations(savedConfigurationIds, signal)
+      : Promise.resolve({ schemaVersion: "2.4" as const, items: [] }),
+    { staleTime: 5_000 },
+  );
+  const needsSavedConfigurations = savedConfigurationIds.length > 0;
+  const items = trustedCatalog?.items ?? [];
+  const catalogObservedAt = trustedCatalog?.observedAt ?? null;
   const baselinePrimaryId = exactPreference?.primaryConfigurationId
     ?? inheritedResolution?.primaryConfiguration.id
     ?? "";
   const baselineFallbackId = exactPreference?.fallbackConfigurationId
     ?? inheritedResolution?.fallbackConfiguration?.id
     ?? "";
+  const savedPrimaryConfiguration = inheritedResolution?.primaryConfiguration
+    ?? savedConfigurations.data?.items.find((item) =>
+      item.id === baselinePrimaryId);
+  const savedFallbackConfiguration = inheritedResolution?.fallbackConfiguration
+    ?? savedConfigurations.data?.items.find((item) =>
+      item.id === baselineFallbackId);
+  const primaryReceipt = reconcileSavedCatalogReceipt(
+    items,
+    baselinePrimaryId,
+    savedPrimaryConfiguration,
+    scope.agentId,
+    workspaceAgentIds,
+  );
+  const fallbackReceipt = reconcileSavedCatalogReceipt(
+    items,
+    baselineFallbackId,
+    savedFallbackConfiguration,
+    scope.agentId,
+    workspaceAgentIds,
+  );
+  const currentPrimary = primaryReceipt.item;
+  const currentFallback = fallbackReceipt.item;
+  const editablePrimaryId = currentPrimary?.configurationId
+    ?? baselinePrimaryId;
+  const editableFallbackId = currentFallback?.configurationId
+    ?? baselineFallbackId;
   const sourceVersion = exactPreference?.version ?? 0;
-  const hydrationKey = `${scope.type}:${scope.id}:${sourceVersion}:${baselinePrimaryId}:${baselineFallbackId}`;
+  const hydrationKey = [
+    scope.type,
+    scope.id,
+    sourceVersion,
+    baselinePrimaryId,
+    baselineFallbackId,
+    editablePrimaryId,
+    editableFallbackId,
+    catalogObservedAt ?? "no-catalog",
+  ].join(":");
 
   const [hydratedFrom, setHydratedFrom] = useState("");
   const [primaryId, setPrimaryId] = useState("");
@@ -189,29 +289,38 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
   const [savedMessage, setSavedMessage] = useState("");
 
   useEffect(() => {
-    if (!trustedCatalog || !preferences.data || (scope.agentId && resolution.isLoading)) return;
+    if (
+      !trustedCatalog
+      || !preferences.data
+      || (scope.agentId && resolution.isLoading)
+      || (needsSavedConfigurations && savedConfigurations.isLoading)
+    ) return;
     if (hydratedFrom === hydrationKey) return;
-    setPrimaryId(baselinePrimaryId);
-    setFallbackId(baselineFallbackId);
+    setPrimaryId(editablePrimaryId);
+    setFallbackId(editableFallbackId);
     setReason("");
     setSaveError(undefined);
     setHydratedFrom(hydrationKey);
   }, [
-    baselineFallbackId,
-    baselinePrimaryId,
+    editableFallbackId,
+    editablePrimaryId,
     hydratedFrom,
     hydrationKey,
     preferences.data,
     resolution.isLoading,
+    savedConfigurations.isLoading,
     scope.agentId,
+    needsSavedConfigurations,
     trustedCatalog,
   ]);
 
-  const items = trustedCatalog?.items ?? [];
-  const catalogObservedAt = trustedCatalog?.observedAt ?? null;
   const selectedPrimary = findConfiguration(items, primaryId);
   const selectedFallback = findConfiguration(items, fallbackId);
-  const readiness = assignmentReadiness(selectedPrimary, scope);
+  const readiness = assignmentReadiness(
+    selectedPrimary,
+    scope,
+    workspaceAgentIds,
+  );
   const providers = useMemo(() => unique(items.map((item) => item.providerId)).sort(), [items]);
   const selectedProvider = selectedPrimary?.providerId ?? "";
   const providerItems = items.filter((item) => item.providerId === selectedProvider);
@@ -219,8 +328,29 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
   const selectedModel = selectedPrimary?.modelId ?? "";
   const effortItems = providerItems.filter((item) => item.modelId === selectedModel);
   const changed = primaryId !== baselinePrimaryId || fallbackId !== baselineFallbackId;
+  const catalogRefreshStaged = primaryReceipt.state === "staged"
+    || fallbackReceipt.state === "staged";
+  const stagedEquivalentStillSelected = hydratedFrom !== hydrationKey || (
+    (
+      primaryReceipt.state !== "staged"
+      || primaryId === primaryReceipt.item?.configurationId
+    )
+    && (
+      fallbackReceipt.state !== "staged"
+      || fallbackId === fallbackReceipt.item?.configurationId
+    )
+  );
+  const catalogRefreshUnresolved = primaryReceipt.state === "unresolved"
+    || fallbackReceipt.state === "unresolved";
   const canSave = Boolean(
-    selectedPrimary && selectableForScope(selectedPrimary, scope)
+    selectedPrimary
+    && selectableForScope(selectedPrimary, scope, workspaceAgentIds)
+    && fallbackSelectionIsValid(
+      items,
+      fallbackId,
+      scope.agentId,
+      workspaceAgentIds,
+    )
     && changed
     && reason.trim().length >= 3
     && fallbackId !== primaryId
@@ -229,6 +359,10 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
   );
   const loading = catalog.isLoading || preferences.isLoading || Boolean(
     scope.agentId && resolution.isLoading,
+  ) || Boolean(
+    needsSavedConfigurations && savedConfigurations.isLoading,
+  ) || Boolean(
+    scope.type === "global" && workspaceRoster.isLoading,
   );
 
   const editorId = scope.type === "agent"
@@ -274,7 +408,11 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
   const selectProvider = (providerId: string) => {
     setSavedMessage("");
     setSaveError(undefined);
-    const next = firstSelectable(items.filter((item) => item.providerId === providerId), scope);
+    const next = firstSelectable(
+      items.filter((item) => item.providerId === providerId),
+      scope,
+      workspaceAgentIds,
+    );
     setPrimaryId(next?.configurationId ?? "");
     if (fallbackId === next?.configurationId) setFallbackId("");
   };
@@ -286,10 +424,11 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
       item.providerId === selectedProvider && item.modelId === modelId
     ));
     const matchingEffort = candidates.find((item) => (
-      selectableForScope(item, scope)
+      selectableForScope(item, scope, workspaceAgentIds)
       && item.reasoningEffort === selectedPrimary?.reasoningEffort
     ));
-    const next = matchingEffort ?? firstSelectable(candidates, scope);
+    const next = matchingEffort
+      ?? firstSelectable(candidates, scope, workspaceAgentIds);
     setPrimaryId(next?.configurationId ?? "");
     if (fallbackId === next?.configurationId) setFallbackId("");
   };
@@ -315,6 +454,7 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
       setHydratedFrom("");
       cache.invalidate(preferenceKey);
       if (scope.agentId) cache.invalidate(`model-resolution:${scope.agentId}`);
+      else cache.invalidatePrefix("model-resolution:");
       setSavedMessage(
         `Model assignment version ${result.preference.version} saved. New runs will pin this exact configuration.`,
       );
@@ -327,7 +467,11 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
     }
   };
 
-  const loadError = catalogBlockingError ?? preferences.error ?? resolution.error;
+  const loadError = catalogBlockingError
+    ?? preferences.error
+    ?? resolution.error
+    ?? workspaceRosterBlockingError
+    ?? (needsSavedConfigurations ? savedConfigurations.error : undefined);
 
   return (
     <Card
@@ -369,6 +513,8 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
             catalog.refresh();
             preferences.refresh();
             resolution.refresh();
+            if (scope.type === "global") workspaceRoster.refresh();
+            if (needsSavedConfigurations) savedConfigurations.refresh();
           }}
         />
       )}
@@ -382,6 +528,22 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
             {exactPreference && (
               <small className="model-assignment__saved-reason">
                 <strong>Saved rationale:</strong> {exactPreference.resolutionReason}
+              </small>
+            )}
+            {savedPrimaryConfiguration && (
+              <small className="model-assignment__configured-receipt">
+                <strong>Saved primary receipt:</strong>{" "}
+                {configurationReceiptLabel(
+                  savedPrimaryConfiguration,
+                )}
+              </small>
+            )}
+            {savedFallbackConfiguration && (
+              <small className="model-assignment__configured-receipt">
+                <strong>Saved fallback receipt:</strong>{" "}
+                {configurationReceiptLabel(
+                  savedFallbackConfiguration,
+                )}
               </small>
             )}
             {!exactPreference && inheritedResolution && (
@@ -402,6 +564,44 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
               </ButtonLink>
             )}
           </div>
+
+          {catalogRefreshStaged && (
+            <p
+              className="model-assignment__catalog-refresh"
+              data-model-catalog-refresh={stagedEquivalentStillSelected
+                ? "staged"
+                : "staged-alternative"}
+              role="status"
+            >
+              {stagedEquivalentStillSelected
+                ? <>
+                    The saved assignment uses an older provider-attestation
+                    receipt. Ti-Scale staged the single matching live provider,
+                    model, reasoning effort, and execution boundary below.
+                    Review it, add a reason, and save to update future runs.
+                    Existing run pins stay unchanged.
+                  </>
+                : <>
+                    A matching current receipt exists, but this draft now
+                    selects a different route. Saving applies the provider,
+                    model, reasoning effort, and fallback currently shown;
+                    it does not merely refresh the older receipt. Existing run
+                    pins stay unchanged.
+                  </>}
+            </p>
+          )}
+          {catalogRefreshUnresolved && (
+            <p
+              className="os-state-remediation"
+              data-model-catalog-refresh="unresolved"
+              role="status"
+            >
+              The saved assignment is not in the current live catalog, and no
+              single equivalent route could be proven. Choose a current
+              provider, exact model, reasoning effort, and fallback before
+              saving. Existing run pins stay unchanged.
+            </p>
+          )}
 
           {assignmentSemantics && (
             <section
@@ -442,7 +642,8 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                     <option value="" disabled>Choose an authenticated provider</option>
                     {providers.map((provider) => {
                       const available = items.some((item) => (
-                        item.providerId === provider && selectableForScope(item, scope)
+                        item.providerId === provider
+                        && selectableForScope(item, scope, workspaceAgentIds)
                       ));
                       return <option key={provider} value={provider} disabled={!available}>{provider}{available ? "" : " — unavailable"}</option>;
                     })}
@@ -462,7 +663,8 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                     {models.map((modelId) => {
                       const modelItems = providerItems.filter((item) => item.modelId === modelId);
                       const representative = modelItems[0]!;
-                      const available = modelItems.some((item) => selectableForScope(item, scope));
+                      const available = modelItems.some((item) =>
+                        selectableForScope(item, scope, workspaceAgentIds));
                       return <option key={modelId} value={modelId} disabled={!available}>{modelOptionLabel(representative)}{available ? "" : " — unavailable"}</option>;
                     })}
                   </TitaniumSelect>
@@ -487,10 +689,14 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                       <option
                         key={item.configurationId}
                         value={item.configurationId}
-                        disabled={!selectableForScope(item, scope)}
+                        disabled={!selectableForScope(
+                          item,
+                          scope,
+                          workspaceAgentIds,
+                        )}
                       >
                         {item.reasoningEffort ? readable(item.reasoningEffort) : "Provider default"}
-                        {selectableForScope(item, scope)
+                        {selectableForScope(item, scope, workspaceAgentIds)
                           ? ""
                           : scope.agentId
                             ? " — unavailable for this agent"
@@ -517,10 +723,13 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                       <option
                         key={item.configurationId}
                         value={item.configurationId}
-                        disabled={!selectableForScope(item, scope) || item.configurationId === primaryId}
+                        disabled={
+                          !selectableForScope(item, scope, workspaceAgentIds)
+                          || item.configurationId === primaryId
+                        }
                       >
                         {exactConfigurationLabel(item)}
-                        {selectableForScope(item, scope)
+                        {selectableForScope(item, scope, workspaceAgentIds)
                           ? ""
                           : ` — ${item.unavailableReasons.join("; ") || (scope.agentId ? "not declared for this agent" : "unavailable")}`}
                       </option>
@@ -562,11 +771,17 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                     <strong>{readable(selectedPrimary.enforcementMode)}.</strong>{" "}
                     {enforcementExplanation(selectedPrimary.enforcementMode)}
                   </p>
-                  {!selectableForScope(selectedPrimary, scope) && (
+                  {!selectableForScope(
+                    selectedPrimary,
+                    scope,
+                    workspaceAgentIds,
+                  ) && (
                     <p className="os-state-remediation">
                       {selectedPrimary.unavailableReasons.join(" ")
                         || (scope.agentId && !selectedPrimary.compatibleAgentIds.includes(scope.agentId)
                           ? `This configuration is not declared for ${scope.label}.`
+                          : scope.type === "global"
+                            ? `This configuration does not cover every canonical specialist. Missing: ${workspaceAgentIds.filter((id) => !selectedPrimary.compatibleAgentIds.includes(id)).join(", ")}.`
                           : "This configuration is not callable in the current runtime.")}
                     </p>
                   )}
@@ -581,16 +796,27 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                 <div className="os-table-wrap"><table className="os-data-table">
                   <thead><tr><th>Provider and model</th><th>Reasoning</th><th>Execution boundary</th><th>Enforcement</th><th>Availability for this scope</th></tr></thead>
                   <tbody>{items.map((item) => {
-                    const available = selectableForScope(item, scope);
+                    const available = selectableForScope(
+                      item,
+                      scope,
+                      workspaceAgentIds,
+                    );
+                    const missingWorkspaceAgents = scope.type === "global"
+                      ? workspaceAgentIds.filter((id) =>
+                          !item.compatibleAgentIds.includes(id))
+                      : [];
                     const incompatible = scope.agentId !== null
-                      && !item.compatibleAgentIds.includes(scope.agentId);
+                      ? !item.compatibleAgentIds.includes(scope.agentId)
+                      : missingWorkspaceAgents.length > 0;
                     return <tr key={item.configurationId}>
                       <th scope="row">{item.providerId} · {item.displayName}<small>{item.modelId}</small></th>
                       <td>{item.reasoningEffort ? readable(item.reasoningEffort) : "Provider default"}</td>
                       <td>{executionBoundaryLabel(item.executionBoundary)}</td>
                       <td><StatusPill status={item.enforcementMode}>{readable(item.enforcementMode)}</StatusPill><small>{enforcementExplanation(item.enforcementMode)}</small></td>
                       <td><StatusPill status={available ? "selectable" : "unavailable"}>{available ? "Selectable" : "Unavailable"}</StatusPill><small>{incompatible
-                        ? `Not declared for ${scope.label}.`
+                        ? scope.type === "global"
+                          ? `Missing specialist coverage: ${missingWorkspaceAgents.join(", ")}.`
+                          : `Not declared for ${scope.label}.`
                         : item.unavailableReasons.join(" ") || `Catalog observed ${formatTime(item.catalogRetrievedAt ?? catalogObservedAt)}.`}</small></td>
                     </tr>;
                   })}</tbody>

@@ -82,6 +82,13 @@ export {
   type WindowsIdentityRuntimeProjection,
 } from "./WindowsIdentityRuntimeComposition";
 export {
+  AUTONOMOUS_WINDOWS_IDENTITY_COMPOSITION_SCHEMA_VERSION,
+  composeAutonomousWindowsIdentityProjection,
+  inspectAutonomousWindowsIdentityComposition,
+  type AutonomousWindowsIdentityCompositionReadiness,
+  type AutonomousWindowsIdentityRuntimeBinding,
+} from "./AutonomousWindowsIdentityRuntimeComposition";
+export {
   LOCAL_EXPLOIT_INTELLIGENCE_ACTIVATION_SNAPSHOT_SCHEMA_VERSION,
   activateLocalExploitIntelligenceRuntime,
   applyLocalExploitIntelligenceRuntimeProjection,

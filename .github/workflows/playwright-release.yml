@@ -94,6 +94,25 @@ jobs:
           test "$(git rev-parse HEAD)" = "$TI_SCALE_E2E_CANDIDATE_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
+      - name: Upload sanitized browser release evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ti-scale-playwright-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            test-results/html/
+            test-results/results/
+            test-results/playwright/
+            tests/interaction-manifest.json
+            tests/interaction-manifest.schema.json
+            tests/interaction-manifest/visual-baselines.json
+            tests/accessibility-state-inventory.json
+          if-no-files-found: warn
+          include-hidden-files: false
+          retention-days: 14
+          overwrite: false
+
       - name: Remove transient runner output
         if: always()
         run: |

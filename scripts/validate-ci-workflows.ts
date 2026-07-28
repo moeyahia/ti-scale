@@ -14,7 +14,23 @@ const checkoutAction =
   "actions/checkout@11d5960a326750d5838078e36cf38b85af677262";
 const setupBunAction =
   "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6";
-const reviewedActions = new Set([checkoutAction, setupBunAction]);
+const uploadArtifactAction =
+  "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02";
+const reviewedActions = new Set([
+  checkoutAction,
+  setupBunAction,
+  uploadArtifactAction,
+]);
+const browserEvidencePaths = Object.freeze([
+  "playwright-report/",
+  "test-results/html/",
+  "test-results/results/",
+  "test-results/playwright/",
+  "tests/interaction-manifest.json",
+  "tests/interaction-manifest.schema.json",
+  "tests/interaction-manifest/visual-baselines.json",
+  "tests/accessibility-state-inventory.json",
+] as const);
 const requiredProjects = Object.freeze([
   "chromium-1440",
   "firefox-1440",
@@ -97,6 +113,9 @@ for (const name of reviewedWorkflows) {
     let checkoutSeen = false;
     let bunSeen = false;
     let cleanupSeen = false;
+    let cleanupStepIndex = -1;
+    let evidenceUploadSeen = false;
+    let evidenceUploadStepIndex = -1;
     for (const [index, unknownStep] of steps.entries()) {
       const step = mapping(unknownStep, `${name} ${jobName} step ${String(index + 1)}`);
       if (step.uses !== undefined) {
@@ -118,12 +137,70 @@ for (const name of reviewedWorkflows) {
             violations.push(`${name} must pin Bun 1.3.14`);
           }
         }
+        if (action === uploadArtifactAction) {
+          if (name !== "playwright-release.yml" || jobName !== "full-browser-gate") {
+            violations.push(
+              `${name} job ${jobName} must not upload browser release evidence`,
+            );
+          }
+          evidenceUploadSeen = true;
+          evidenceUploadStepIndex = index;
+          if (step.if !== "always()") {
+            violations.push(
+              "browser evidence upload must run under always() so failed tests retain diagnostics",
+            );
+          }
+          const options = mapping(step.with, `${name} browser evidence options`);
+          if (
+            options.name
+            !== "ti-scale-playwright-release-${{ github.run_id }}-${{ github.run_attempt }}"
+          ) {
+            violations.push(
+              "browser evidence artifact name must bind the GitHub run and attempt",
+            );
+          }
+          const uploadedPaths = scalar(
+            options.path,
+            `${name} browser evidence paths`,
+          ).split(/\r?\n/u).map((value) => value.trim()).filter(Boolean);
+          if (
+            JSON.stringify(uploadedPaths)
+            !== JSON.stringify(browserEvidencePaths)
+          ) {
+            violations.push(
+              "browser evidence upload paths must be the reviewed report, trace, "
+                + "screenshot, video, result, and coverage-manifest allowlist",
+            );
+          }
+          if (options["if-no-files-found"] !== "warn") {
+            violations.push(
+              "browser evidence upload must not obscure an earlier setup failure when no report exists",
+            );
+          }
+          if (options["include-hidden-files"] !== false) {
+            violations.push(
+              "browser evidence upload must explicitly exclude hidden files",
+            );
+          }
+          if (options["retention-days"] !== 14) {
+            violations.push(
+              "browser release evidence must use the reviewed 14-day retention bound",
+            );
+          }
+          if (options.overwrite !== false) {
+            violations.push(
+              "browser release evidence must not overwrite an earlier run attempt",
+            );
+          }
+        }
       }
-      if (step.if === "always()") cleanupSeen = true;
       if (typeof step.run === "string") {
         const lower = step.run.toLowerCase();
+        if (step.if === "always()" && lower.includes("rm -rf")) {
+          cleanupSeen = true;
+          cleanupStepIndex = index;
+        }
         for (const forbidden of [
-          "actions/upload-artifact",
           "actions/download-artifact",
           "actions/cache",
           "docker build",
@@ -143,6 +220,26 @@ for (const name of reviewedWorkflows) {
     if (!checkoutSeen) violations.push(`${name} is missing the pinned checkout action`);
     if (!bunSeen) violations.push(`${name} is missing the pinned setup-bun action`);
     if (!cleanupSeen) violations.push(`${name} is missing unconditional transient cleanup`);
+    if (name === "playwright-release.yml" && jobName === "full-browser-gate") {
+      if (!evidenceUploadSeen) {
+        violations.push(
+          "full browser workflow must upload its sanitized release evidence",
+        );
+      }
+      if (
+        evidenceUploadStepIndex >= 0
+        && cleanupStepIndex >= 0
+        && evidenceUploadStepIndex >= cleanupStepIndex
+      ) {
+        violations.push(
+          "browser release evidence must upload before transient cleanup",
+        );
+      }
+    } else if (evidenceUploadSeen) {
+      violations.push(
+        `${name} job ${jobName} contains an unexpected browser evidence upload`,
+      );
+    }
   }
 }
 
@@ -295,5 +392,5 @@ if (violations.length > 0) {
 console.log(
   `GitHub Actions policy verified structurally: ${String(requiredProjects.length)} `
     + "Playwright projects, immutable action SHAs, candidate-bound triggers, zero retries, "
-    + "and no retained artifact action",
+    + "and a failure-safe, allowlisted 14-day browser evidence artifact",
 );

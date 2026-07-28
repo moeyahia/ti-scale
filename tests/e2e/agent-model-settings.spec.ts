@@ -81,8 +81,8 @@ const MODEL_INTERACTIONS = {
   },
   "agents.model.save": {
     controlId: "agents-model-save",
-    materialState: "Fixture required: the specialist has a changed, compatible exact assignment and a valid rationale",
-    option: "Save one exact per-agent override with optimistic concurrency and idempotency",
+    materialState: "Fixture required: the specialist has a changed, compatible exact execution assignment and a valid rationale",
+    option: "Save one exact per-agent execution override with optimistic concurrency and idempotency",
   },
   "agents.model.conflict-retry": {
     controlId: "agents-model-conflict-retry",
@@ -470,6 +470,7 @@ async function installModelRoutes(page: Page, input: {
   readonly writes: CapturedPreferenceWrite[];
   readonly reads: {
     catalog: number;
+    configurations: number;
     preferences: number;
     resolution: number;
   };
@@ -478,6 +479,7 @@ async function installModelRoutes(page: Page, input: {
   const writes: CapturedPreferenceWrite[] = [];
   const reads = {
     catalog: 0,
+    configurations: 0,
     preferences: 0,
     resolution: 0,
   };
@@ -497,16 +499,40 @@ async function installModelRoutes(page: Page, input: {
         }), 503);
         return;
       }
-      const items = input.canonicalRuntimeCompatibility
-        ? catalogItems.map((item) => (
-          item.selectable && item.compatibleAgentIds.includes(AGENT_ID)
-          ? {
-              ...item,
-              compatibleAgentIds: [...RUNTIME_BOUND_AGENT_IDS],
-            }
-          : item))
-        : catalogItems;
+      const items = catalogItems.map((item) => {
+        if (!item.selectable) return item;
+        if (input.scope === "global") {
+          return {
+            ...item,
+            compatibleAgentIds: CANONICAL_AGENTS.map(({ id }) => id),
+          };
+        }
+        if (
+          input.canonicalRuntimeCompatibility
+          && item.compatibleAgentIds.includes(AGENT_ID)
+        ) {
+          return {
+            ...item,
+            compatibleAgentIds: [...RUNTIME_BOUND_AGENT_IDS],
+          };
+        }
+        return item;
+      });
       await json(route, { schemaVersion: "2.4", observedAt: NOW, items });
+      return;
+    }
+    if (
+      url.pathname === "/api/v2/model-configurations"
+      && request.method() === "GET"
+    ) {
+      reads.configurations += 1;
+      const ids = (url.searchParams.get("ids") ?? "")
+        .split(",")
+        .filter(Boolean);
+      await json(route, {
+        schemaVersion: "2.4",
+        items: ids.map(configuration),
+      });
       return;
     }
     if (url.pathname === "/api/v2/model-preferences" && request.method() === "GET") {
@@ -1369,6 +1395,7 @@ test(`${TEST_GLOBAL_DEFAULT} uses the same application-owned selectors for the w
   interactionActivation,
 }) => {
   test.setTimeout(240_000);
+  await installAgentRoutes(page);
   const model = await installModelRoutes(page, {
     scope: "global",
     resolution: "missing",
@@ -1471,6 +1498,7 @@ test(`${TEST_GLOBAL_DEFAULT} recovers the workspace editor only after a fresh ca
   interactionActivation,
 }) => {
   test.setTimeout(120_000);
+  await installAgentRoutes(page);
   const model = await installModelRoutes(page, {
     scope: "global",
     resolution: "missing",

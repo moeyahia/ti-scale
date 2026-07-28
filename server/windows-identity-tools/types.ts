@@ -1,4 +1,9 @@
-import type { ActionIntent, FailureCategory, GuidedDecision } from "../supervisor";
+import type {
+  ActionIntent,
+  AutonomousContractBoundary,
+  FailureCategory,
+  GuidedDecision,
+} from "../supervisor";
 
 export const WINDOWS_IDENTITY_TOOL_PACK_SCHEMA_VERSION =
   "ti-scale.windows-identity-tool-pack.v1" as const;
@@ -111,10 +116,12 @@ export interface WindowsIdentityMissionBoundary {
   readonly allowedActionClassIds: readonly string[];
   readonly prohibitedActionClassIds: readonly string[];
   readonly guidedDecision: GuidedDecision | null;
+  readonly autonomousContract?: AutonomousContractBoundary | null;
 }
 
 export interface CompiledWindowsIdentityInvocation {
   readonly schemaVersion: "ti-scale.windows-identity-invocation.v1";
+  readonly journey: "autonomous" | "guided";
   readonly toolId: WindowsIdentityToolId;
   readonly operation: WindowsIdentityOperation;
   readonly action: Readonly<ActionIntent>;

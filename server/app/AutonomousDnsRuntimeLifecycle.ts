@@ -80,6 +80,18 @@ import {
 } from "./AutonomousRuntimeComposition";
 import type { AutonomousDnsProductionConfiguration } from "./AutonomousDnsProductionConfiguration";
 import type { RuntimeProjectionInput } from "./RuntimeProjectionService";
+import {
+  inspectAutonomousWindowsIdentityComposition,
+  type AutonomousWindowsIdentityRuntimeBinding,
+} from "./AutonomousWindowsIdentityRuntimeComposition";
+import type {
+  WindowsIdentityActivationSnapshot,
+} from "./WindowsIdentityRuntimeComposition";
+import {
+  AutonomousWindowsIdentityExecutionFactory,
+  DirectWindowsIdentityProcessAdapter,
+  WindowsIdentityCapabilityRegistry,
+} from "../windows-identity-tools";
 
 export const AUTONOMOUS_DNS_RUNTIME_LIFECYCLE_SCHEMA_VERSION =
   "ti-scale.autonomous-dns-runtime-lifecycle.v1" as const;
@@ -216,6 +228,12 @@ export interface AutonomousDnsRuntimeLifecycleOptions {
   ) => ToolExecutionPreflightResult | undefined;
   readonly productionConfiguration: AutonomousDnsProductionConfiguration;
   readonly localToolConfiguration: ProductionLocalGuidedToolConfiguration;
+  readonly windowsIdentityAutonomous?: Readonly<{
+    registry: WindowsIdentityCapabilityRegistry;
+    adapter: DirectWindowsIdentityProcessAdapter;
+    logicalWorkspace: string;
+    readActivation: () => WindowsIdentityActivationSnapshot | undefined;
+  }>;
   readonly workerId?: string;
   readonly now?: () => Date;
   readonly timers?: TimerEnvironment;
@@ -240,7 +258,15 @@ export class AutonomousDnsRuntimeLifecycle {
   private executionFactory?: AutonomousDnsLocalProcessExecutionFactory
     | AutonomousLocalSafeReconExecutionFactory
     | AutonomousGeneralSafeReconExecutionFactory
-    | AutonomousExploitValidationExecutionFactory;
+    | AutonomousExploitValidationExecutionFactory
+    | AutonomousWindowsIdentityExecutionFactory;
+  /**
+   * Optional execution surfaces are fixed when the MissionRuntimeEngine is
+   * mounted. A later target-free readiness wave may withdraw a mounted route,
+   * but it must not advertise a newly available route until a runtime remount
+   * can install the matching planner and dispatcher.
+   */
+  private mountedWindowsIdentityAutonomous?: boolean;
   private activation?: LocalGuidedToolActivationCoordinator;
   private projectedPreflights = new Map<string, ToolExecutionPreflightResult>();
   private localProcess?: DirectProcessLocalToolInvocationAdapter;
@@ -493,6 +519,31 @@ export class AutonomousDnsRuntimeLifecycle {
     const localActivation = this.activation!.snapshot();
     const runtimeConfig = this.options.productionConfiguration.runtime;
     const manifest = this.options.localToolConfiguration.manifest;
+    let autonomousWindowsIdentity:
+      AutonomousWindowsIdentityRuntimeBinding | undefined;
+    if (this.options.windowsIdentityAutonomous) {
+      const activation =
+        this.options.windowsIdentityAutonomous.readActivation();
+      if (activation) {
+        const candidate: AutonomousWindowsIdentityRuntimeBinding = {
+          registry: this.options.windowsIdentityAutonomous.registry,
+          adapter: this.options.windowsIdentityAutonomous.adapter,
+          logicalWorkspace:
+            this.options.windowsIdentityAutonomous.logicalWorkspace,
+          activation,
+        };
+        if (
+          inspectAutonomousWindowsIdentityComposition(candidate, now).status
+            === "ready"
+          && (
+            !this.runtimeValue
+            || this.mountedWindowsIdentityAutonomous === true
+          )
+        ) {
+          autonomousWindowsIdentity = candidate;
+        }
+      }
+    }
     const candidateLinuxManifest =
       this.options.productionConfiguration.candidateLinuxTransportManifest;
     if (
@@ -524,6 +575,9 @@ export class AutonomousDnsRuntimeLifecycle {
       runtimeConfig.value,
       manifest,
       candidateLinuxTransportReady,
+      autonomousWindowsIdentity
+        ? { logicalWorkspace: autonomousWindowsIdentity.logicalWorkspace }
+        : undefined,
     );
     const planner = new LocalAutonomousContractPlanner({
       database: this.options.database,
@@ -537,6 +591,14 @@ export class AutonomousDnsRuntimeLifecycle {
       planner,
       evaluator,
       candidateLinuxTransportReady,
+      ...(autonomousWindowsIdentity
+        ? {
+            autonomousWindowsIdentity: {
+              logicalWorkspace:
+                autonomousWindowsIdentity.logicalWorkspace,
+            },
+          }
+        : {}),
       now,
     });
     const requiredToolIds = runtimeConfig.value.webSurface
@@ -672,6 +734,9 @@ export class AutonomousDnsRuntimeLifecycle {
       ...(specialistHeartbeat ? { specialistHeartbeat } : {}),
       localProcessTransport: this.localProcess!,
       workspaceResolver: this.workspaceResolver!,
+      ...(autonomousWindowsIdentity
+        ? { autonomousWindowsIdentity }
+        : {}),
       ...(this.options.brainContext ? { brainContext: this.options.brainContext } : {}),
       ...(this.options.productionConfiguration.status === "loaded"
         && this.options.productionConfiguration.cveCandidateCatalog
@@ -830,14 +895,18 @@ export class AutonomousDnsRuntimeLifecycle {
         || activation.adapters.execution instanceof AutonomousLocalSafeReconExecutionFactory
         || activation.adapters.execution instanceof AutonomousGeneralSafeReconExecutionFactory
         || activation.adapters.execution instanceof AutonomousExploitValidationExecutionFactory
+        || activation.adapters.execution instanceof AutonomousWindowsIdentityExecutionFactory
         ? activation.adapters.execution
         : undefined;
+      this.mountedWindowsIdentityAutonomous =
+        autonomousWindowsIdentity !== undefined;
       this.runtimeValue = runtime;
       this.resultSinkBound = true;
       try {
         await runtime.start();
       } catch (error) {
         this.runtimeStartupProjection = undefined;
+        this.mountedWindowsIdentityAutonomous = undefined;
         throw error;
       }
     }
@@ -876,6 +945,7 @@ export class AutonomousDnsRuntimeLifecycle {
     this.runtimeValue = undefined;
     this.executionFactory?.close();
     this.executionFactory = undefined;
+    this.mountedWindowsIdentityAutonomous = undefined;
     this.runtimeStartupProjection = undefined;
     this.resultSinkBound = false;
     if (this.localProcess && !this.readinessSinkUnbind) {

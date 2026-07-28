@@ -10,6 +10,7 @@ import {
 import { lstat, mkdir, open, realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { inspectLinuxFileCapabilities } from "../local-tools/AsyncFileCapabilityInspection";
+import { REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION } from "../orchestration";
 import { EngagementWorkspaceResolver } from "../system-capabilities";
 import { redactWindowsIdentityOutput } from "./WindowsIdentityResultNormalizer";
 import { windowsIdentityFailure } from "./failureTaxonomy";
@@ -376,7 +377,11 @@ export class DirectWindowsIdentityProcessAdapter implements WindowsIdentityExecu
     if (!definition || !readiness) boundary("windows_identity_tool_unavailable");
     if (signal.aborted) boundary("windows_identity_cancelled");
     if (invocation.schemaVersion !== "ti-scale.windows-identity-invocation.v1"
-      || invocation.action.arguments.schemaVersion !== WINDOWS_IDENTITY_ACTION_SCHEMA_VERSION
+      || (invocation.journey === "guided"
+        ? invocation.action.arguments.schemaVersion
+          !== WINDOWS_IDENTITY_ACTION_SCHEMA_VERSION
+        : invocation.action.arguments.schemaVersion
+          !== REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION)
       || invocation.action.actionType !== invocation.toolId
       || invocation.action.runId.length < 1
       || !SHA256.test(invocation.actionFingerprint)

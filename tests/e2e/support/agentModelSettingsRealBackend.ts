@@ -16,11 +16,17 @@ import {
   type RuntimeProjectionInput,
 } from "../../../server/app/RuntimeProjectionService";
 import type { RuntimeSourceManifests } from "../../../server/domain";
+import { PRODUCT_AGENT_REGISTRY } from "../../../server/agents";
 
 const OBSERVED_AT = "2099-07-28T12:00:00.000Z";
 const INTERNAL_ADAPTER_ID = "runtime:real-backend-recon-adapter";
 
-function manifests(): RuntimeSourceManifests {
+function manifests(
+  observedAt = OBSERVED_AT,
+  options: {
+    readonly primaryContextLimit?: number;
+  } = {},
+): RuntimeSourceManifests {
   return {
     riskClasses: [],
     evidenceKinds: [],
@@ -43,7 +49,7 @@ function manifests(): RuntimeSourceManifests {
       id: "titanium-primary",
       authenticated: true,
       healthy: true,
-      catalogObservedAt: OBSERVED_AT,
+      catalogObservedAt: observedAt,
       models: [{
         id: "ti-reasoner",
         displayName: "Titanium Reasoner",
@@ -53,13 +59,13 @@ function manifests(): RuntimeSourceManifests {
         reasoningEfforts: ["medium", "high"],
         compatibleActionClassIds: ["active_host_discovery"],
         disclosureClasses: ["public"],
-        contextLimit: 131_072,
+        contextLimit: options.primaryContextLimit ?? 131_072,
       }],
     }, {
       id: "titanium-fallback",
       authenticated: true,
       healthy: true,
-      catalogObservedAt: OBSERVED_AT,
+      catalogObservedAt: observedAt,
       models: [{
         id: "ti-fallback",
         displayName: "Titanium Fallback",
@@ -85,7 +91,21 @@ function manifests(): RuntimeSourceManifests {
         providerId: "titanium-fallback",
         modelId: "ti-fallback",
       }],
-    }],
+    }, ...PRODUCT_AGENT_REGISTRY.map(({ id }) => ({
+      id,
+      label: `${id} real-backend model route`,
+      available: true,
+      capabilityIds: [],
+      actionClassIds: [],
+      toolIds: [],
+      modelRefs: [{
+        providerId: "titanium-primary",
+        modelId: "ti-reasoner",
+      }, {
+        providerId: "titanium-fallback",
+        modelId: "ti-fallback",
+      }],
+    }))],
   };
 }
 
@@ -149,6 +169,12 @@ function projection(
 export interface AgentModelSettingsRealBackend {
   readonly url: string;
   readonly internalAdapterId: string;
+  renewCatalogAttestation(
+    observedAt: string,
+    options?: {
+      readonly primaryContextLimit?: number;
+    },
+  ): void;
   close(): Promise<void>;
 }
 
@@ -164,7 +190,7 @@ Promise<AgentModelSettingsRealBackend> {
     filename: ":memory:",
   });
   migrateDatabase(database);
-  const capabilityManifests = manifests();
+  let capabilityManifests = manifests();
   new RuntimeProjectionService({
     database,
     read: () => projection(capabilityManifests),
@@ -214,6 +240,9 @@ Promise<AgentModelSettingsRealBackend> {
   return {
     url: `http://127.0.0.1:${address.port}`,
     internalAdapterId: INTERNAL_ADAPTER_ID,
+    renewCatalogAttestation: (observedAt, options) => {
+      capabilityManifests = manifests(observedAt, options);
+    },
     close: async () => {
       if (closed) return;
       closed = true;

@@ -1976,6 +1976,21 @@ async function main(): Promise<void> {
       ?? toolBindingReadiness.runner.readToolExecutionPreflight(toolId),
     productionConfiguration: autonomousDnsProductionConfiguration,
     localToolConfiguration: localGuidedToolConfiguration,
+    ...(windowsIdentityRegistry
+      && windowsIdentityAdapter
+      && localGuidedToolConfiguration.status === "loaded"
+      && localGuidedToolConfiguration.workspaceMappings.mappings[0]
+      ? {
+          windowsIdentityAutonomous: {
+            registry: windowsIdentityRegistry,
+            adapter: windowsIdentityAdapter,
+            logicalWorkspace:
+              localGuidedToolConfiguration.workspaceMappings.mappings[0]
+                .logicalRoot,
+            readActivation: () => windowsIdentityActivation,
+          },
+        }
+      : {}),
     workerId: `ti-scale-autonomous-dns-${process.pid}`,
   });
   registerStartupComponent("runtimes", {
