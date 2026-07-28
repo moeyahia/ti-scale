@@ -2415,6 +2415,28 @@ describe("disposable Autonomous activation proof", () => {
     });
   });
 
+  test("rejects a pinned catalog snapshot whose enforced health semantics drift before contact", async () => {
+    const item = await fixture();
+    item.db.prepare(`
+      UPDATE model_configurations
+      SET health_state = 'offline', updated_at = ?
+      WHERE id = ?
+    `).run(NOW.toISOString(), MODEL_CONFIGURATION_ID);
+
+    await expect(item.runtime.processRunNow(RUN_ID)).rejects.toMatchObject({
+      code: "activation_execution_model_configuration_mismatch",
+    });
+
+    expect(item.adapter.dispatchCount).toBe(0);
+    expect(item.db.prepare(`
+      SELECT COUNT(*) AS count FROM actions WHERE run_id = ?
+    `).get(RUN_ID)).toEqual({ count: 0 });
+    expect(item.db.prepare(`
+      SELECT COUNT(*) AS count FROM autonomous_activation_receipts
+      WHERE run_id = ?
+    `).get(RUN_ID)).toEqual({ count: 0 });
+  });
+
   test("clears the stale validation action when verified evidence cannot satisfy completion", async () => {
     const item = await fixture();
     await item.runtime.processRunNow(RUN_ID);

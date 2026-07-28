@@ -698,10 +698,13 @@ function compiledProviderBindingIsFresh(
       && provider.requestedModel === binding.modelId
       && provider.returnedModel === binding.modelId
       && provider.modelConfigurationHash === binding.modelConfigurationHash
+      && typeof provider.completionProbeReceiptId === "string"
+      && PUBLIC_ID.test(provider.completionProbeReceiptId)
       && Number.isFinite(attestedAt)
       && Number.isFinite(expiresAt)
       && attestedAt <= nowMs
-      && expiresAt > nowMs;
+      && expiresAt > nowMs
+      && expiresAt > attestedAt;
   });
 }
 
