@@ -3,6 +3,13 @@
 Read and follow [`docs/project-goal.md`](docs/project-goal.md) before planning,
 editing, testing, or deploying Ti-Scale.
 
+The host-level operational methodology is `/root/AGENTS.md`. Its approved
+SHA-256 at this checkpoint is
+`8a83e8996bf00833997df96cb26050a5fa132f3d9c0002cea4ab13b2ed4c0606`.
+Read it before runtime, tool, engagement, or agent-orchestration work. Treat a
+missing file or checksum mismatch as an explicit continuity defect; do not
+silently replace the Kali-native methodology with wrapper-only behavior.
+
 ## Persistence and precedence
 
 These files are the durable source of truth for ongoing Ti-Scale work:
