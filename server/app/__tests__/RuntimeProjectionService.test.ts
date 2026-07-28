@@ -182,12 +182,21 @@ describe("RuntimeProjectionService", () => {
     const result = service.projectNow();
     expect(result).toEqual({
       projectedAt: "2026-07-15T09:00:00.000Z",
-      agentCount: 12,
+      agentCount: 13,
       mcpServerCount: 1,
       healthSnapshotCount: 4,
     });
     expect(db.prepare("SELECT COUNT(*) AS count FROM agents").get()).toEqual({
-      count: 12,
+      count: 13,
+    });
+    expect(db.prepare(`
+      SELECT id, status, json_extract(configuration_json, '$.executionAuthority')
+        AS execution_authority
+      FROM agents WHERE id = 'Commander'
+    `).get()).toEqual({
+      id: "Commander",
+      status: "available",
+      execution_authority: "none",
     });
     expect(db.prepare("SELECT id, status FROM agents WHERE id = 'ReconScout'").get()).toEqual({
       id: "ReconScout",

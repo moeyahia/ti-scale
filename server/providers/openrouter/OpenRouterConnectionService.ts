@@ -1,4 +1,4 @@
-import { PRODUCT_AGENT_REGISTRY } from "../../agents";
+import { COMMANDER_AGENT_ID } from "../../agents";
 import type { SqliteDatabase } from "../../db";
 import { inImmediateTransaction } from "../../db";
 import { canonicalJson, sha256 } from "../../missions/canonical";
@@ -185,9 +185,9 @@ export class OpenRouterConnectionService {
       runtime,
       planningCompatibility: {
         enforcementMode: "advisor_only",
-        compatibleAgentIds: PRODUCT_AGENT_REGISTRY.map(({ id }) => id),
+        compatibleAgentIds: [COMMANDER_AGENT_ID],
         localExecutionAuthorityUnchanged: true,
-        explanation: "OpenRouter may plan, explain, critique, and summarize for every canonical specialist after attestation. Local policy-gated adapters retain all tool and Autonomous execution authority.",
+        explanation: "OpenRouter may support Commander planning, explanation, critique, and supervision after attestation. Commander delegates all specialist actions; local policy-gated specialist adapters retain every tool and Autonomous execution authority.",
       },
     };
   }

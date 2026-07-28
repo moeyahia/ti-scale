@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { RuntimeSourceManifests } from "../../domain";
 import type { FleetAgentProjection } from "../../app/RuntimeProjectionService";
 import {
+  COMMANDER_AGENT_ID,
   PRODUCT_AGENT_REGISTRY,
   PRODUCT_AGENT_ROSTER_VERSION,
   productAgentIdsForRuntimeManifestAgent,
@@ -153,12 +154,27 @@ describe("standalone product agent registry", () => {
       agents: [binding()],
       capabilityManifests: manifests(),
     });
-    expect(projected).toHaveLength(13);
+    expect(projected).toHaveLength(14);
     const userFacing = projected.filter(({ configuration }) =>
       configuration.userFacing === true);
-    expect(userFacing.map(({ id }) => id)).toEqual([...EXPECTED_AGENT_IDS]);
+    expect(userFacing.map(({ id }) => id)).toEqual([
+      COMMANDER_AGENT_ID,
+      ...EXPECTED_AGENT_IDS,
+    ]);
     expect(userFacing.every(({ configuration }) =>
       configuration.schemaVersion === PRODUCT_AGENT_ROSTER_VERSION)).toBe(true);
+    expect(userFacing.find(({ id }) => id === COMMANDER_AGENT_ID)).toMatchObject({
+      status: "offline",
+      toolPolicy: {
+        allowedTools: [],
+        directToolExecution: false,
+        specialistDelegationRequired: true,
+      },
+      configuration: {
+        orchestrationAgent: true,
+        executionAuthority: "none",
+      },
+    });
 
     expect(userFacing.find(({ id }) => id === "ReconScout")).toMatchObject({
       status: "available",
@@ -212,11 +228,16 @@ describe("standalone product agent registry", () => {
 
   test("withdraws all readiness when no current runtime binding exists", () => {
     const projected = projectProductAgentRoster({ agents: [] });
-    expect(projected).toHaveLength(12);
+    expect(projected).toHaveLength(13);
     expect(projected.every(({ status }) => status === "offline")).toBe(true);
     expect(projected.every(({ configuration }) =>
       configuration.userFacing === true
       && configuration.productAgent === true)).toBe(true);
+    expect(projected.find(({ id }) => id === COMMANDER_AGENT_ID)
+      ?.configuration).toMatchObject({
+        orchestrationAgent: true,
+        executionAuthority: "none",
+      });
     expect(projected.flatMap(({ capabilities }) => capabilities)
       .every(({ enabled }) => enabled === false)).toBe(true);
   });

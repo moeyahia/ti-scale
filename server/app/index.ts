@@ -82,6 +82,16 @@ export {
   type WindowsIdentityRuntimeProjection,
 } from "./WindowsIdentityRuntimeComposition";
 export {
+  LOCAL_EXPLOIT_INTELLIGENCE_ACTIVATION_SNAPSHOT_SCHEMA_VERSION,
+  activateLocalExploitIntelligenceRuntime,
+  applyLocalExploitIntelligenceRuntimeProjection,
+  drainLocalExploitIntelligenceReadinessResources,
+  projectLocalExploitIntelligenceRuntime,
+  type LocalExploitIntelligenceActivationSnapshot,
+  type LocalExploitIntelligenceReadinessDrainResources,
+  type LocalExploitIntelligenceRuntimeProjection,
+} from "./LocalExploitIntelligenceRuntimeComposition";
+export {
   canonicalSecondBrainHealth,
   getSecondBrainRuntimeHealth,
   type SecondBrainRuntimeHealth,

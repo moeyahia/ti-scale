@@ -7,7 +7,8 @@ application as the current Ti-Scale service on port `3132`. The next deployment
 replaces the older Ti-Scale build; it is not another disposable or
 operator-invisible preview.
 
-ChillsPwn on port `3131` is outside this workstream and must remain untouched.
+Every unrelated application and service is outside this workstream and must
+remain untouched.
 
 ## Immediate completion target
 
@@ -37,8 +38,8 @@ Autonomous journey:
   must be configurable and inspectable per agent.
 - The active Brain/Vault integration must be used by the runtime, not populated
   only by manual or fixture-only operations.
-- Development work must not be diverted back to ChillsPwn unless the operator
-  explicitly opens a separate ChillsPwn task.
+- Development work must not be diverted into unrelated products or services
+  unless the operator explicitly expands the task.
 - The operator has requested a no-backup, forward-only Ti-Scale update.
 
 ## Functional invariants
@@ -57,5 +58,4 @@ features unavailable:
 ## Deployment target
 
 - Active Ti-Scale application: `http://127.0.0.1:3132`
-- ChillsPwn: `http://127.0.0.1:3131`, unchanged
 - Update mode: forward-only and no retained backup or rollback payload

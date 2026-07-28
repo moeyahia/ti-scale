@@ -55,7 +55,13 @@ interface Fixture {
   readonly ownerId: string;
 }
 
-function fixture(options: { readonly markerOnly?: boolean } = {}): Fixture {
+function fixture(options: {
+  readonly markerOnly?: boolean;
+  readonly noLease?: boolean;
+  readonly deploymentKind?:
+    | "no_backup_preview_v1"
+    | "no_backup_forward_v2";
+} = {}): Fixture {
   const root = mkdtempSync(join(tmpdir(), "ti-scale-orphan-no-backup-"));
   roots.push(root);
   const releaseId = "orphan-state-matrix";
@@ -65,6 +71,8 @@ function fixture(options: { readonly markerOnly?: boolean } = {}): Fixture {
   const receiptPath = join(metadataRoot, "receipt.json");
   mkdirSync(metadataRoot, { recursive: true, mode: 0o700 });
   writeFileSync(receiptPath, "{}\n", { mode: 0o600 });
+  const deploymentKind =
+    options.deploymentKind ?? "no_backup_preview_v1";
   createFunctionalReleaseTransactionJournal({
     directory: journalDirectory,
     operation: "deploy",
@@ -72,7 +80,18 @@ function fixture(options: { readonly markerOnly?: boolean } = {}): Fixture {
     receiptPath,
     recoveryIntent: "restore_predeploy",
     identity: {
-      deploymentKind: "no_backup_preview_v1",
+      deploymentKind,
+      ...(deploymentKind === "no_backup_forward_v2"
+        ? {
+            deploymentMode: "current_service",
+            releaseObserver: {
+              schemaVersion: "ti-scale.release-observer.v1",
+              mode: "standalone",
+              scope: "ti_scale_only",
+              externalServiceDependency: "none",
+            },
+          }
+        : {}),
       backupPolicy: "none",
       predeploy: { databaseSchema: 47 },
       target: { databaseSchema: 48 },
@@ -90,7 +109,10 @@ function fixture(options: { readonly markerOnly?: boolean } = {}): Fixture {
       database,
       DATABASE_MIGRATIONS.map(withoutBackupRequirement),
     );
-    if (options.markerOnly) {
+    if (options.noLease) {
+      // The interrupted controller may have released the lease before it
+      // disappeared. Recovery must accept that exact stopped v2 boundary.
+    } else if (options.markerOnly) {
       writeFileSync(
         markerPath,
         `${JSON.stringify({
@@ -201,6 +223,36 @@ afterEach(async () => {
 });
 
 describe("orphaned no-backup maintenance lease reconciliation", () => {
+  test("accepts a stopped v2 journal with no orphaned lease", async () => {
+    const value = fixture({
+      deploymentKind: "no_backup_forward_v2",
+      noLease: true,
+    });
+    await expect(reconcile(value)).resolves.toMatchObject({
+      status: "not_required",
+    });
+  });
+
+  test("releases an orphaned lease for a stopped v2 journal", async () => {
+    const value = fixture({
+      deploymentKind: "no_backup_forward_v2",
+    });
+    await expect(reconcile(value)).resolves.toMatchObject({
+      status: "released",
+      leaseId: value.leaseId,
+      ownerId: value.ownerId,
+    });
+    expect(existsSync(value.markerPath)).toBe(false);
+  });
+
+  test("continues to accept the historical v1 recovery identity", async () => {
+    const value = fixture();
+    await expect(reconcile(value)).resolves.toMatchObject({
+      status: "released",
+      leaseId: value.leaseId,
+    });
+  });
+
   test("reconciles row+marker, row-only, marker-only, and renewal-skew states", async () => {
     for (const state of [
       "row_and_marker",

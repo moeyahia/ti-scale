@@ -30,7 +30,7 @@ describe("Brain provenance source lookup migration", () => {
     const database = createDatabaseConnection({ filename: ":memory:" });
     try {
       const result = migrateDatabase(database);
-      expect(result.currentVersion).toBe(58);
+      expect(result.currentVersion).toBe(60);
       expect(indexColumns(database)).toEqual(["source_reference", "verified_at", "source_id"]);
 
       const plan = sourceLookupPlan(database);
@@ -58,7 +58,7 @@ describe("Brain provenance source lookup migration", () => {
 
       const result = migrateDatabase(database);
       expect(result.applied.map(({ version }) => version)).toEqual([
-        39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
+        39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60,
       ]);
       expect(indexColumns(database)).toEqual(["source_reference", "verified_at", "source_id"]);
       expect(sourceLookupPlan(database).some((detail) => detail.includes(

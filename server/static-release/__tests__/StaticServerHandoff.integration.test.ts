@@ -104,6 +104,7 @@ function spawnServer(input: {
   readonly vaultRoot: string;
   readonly scriptSourceRoot: string;
   readonly slowStartupIntegrity?: boolean;
+  readonly preview?: boolean;
 }): RunningServer {
   const child = Bun.spawn([process.execPath, "run", "server/index.ts"], {
     cwd: applicationRoot,
@@ -116,7 +117,7 @@ function spawnServer(input: {
       TI_SCALE_VAULT_ROOT: input.vaultRoot,
       TI_SCALE_STATIC_RELEASE_ROOT: input.releaseRoot,
       TI_SCALE_SERVE_STATIC: "true",
-      TI_SCALE_PREVIEW: "true",
+      TI_SCALE_PREVIEW: input.preview === false ? "false" : "true",
       TI_SCALE_KILL_SWITCH: "false",
       TI_SCALE_TEST_RUN_CONTROL_RUNTIME: "false",
       TI_SCALE_SECURE_COOKIES: "false",
@@ -339,7 +340,14 @@ test("standalone V2 server pins an immutable static release across pointer chang
   const releaseB = releases.stageRelease({ releaseId: "server-release-b", sourceDirectory });
   const port = await availablePort();
 
-  const firstProcess = spawnServer({ port, databasePath, releaseRoot, vaultRoot, scriptSourceRoot });
+  const firstProcess = spawnServer({
+    port,
+    databasePath,
+    releaseRoot,
+    vaultRoot,
+    scriptSourceRoot,
+    preview: false,
+  });
   expect(await waitForDocument(firstProcess, "STATIC_RELEASE_A_PINNED")).not.toContain(
     "STATIC_RELEASE_B_AFTER_RESTART",
   );
@@ -351,7 +359,14 @@ test("standalone V2 server pins an immutable static release across pointer chang
   expect(firstProcess.stdout.text()).toContain(`pinned static release ${releaseA.releaseId}`);
   expect(firstProcess.stdout.text()).toContain(releaseA.manifestSha256);
 
-  const restartedProcess = spawnServer({ port, databasePath, releaseRoot, vaultRoot, scriptSourceRoot });
+  const restartedProcess = spawnServer({
+    port,
+    databasePath,
+    releaseRoot,
+    vaultRoot,
+    scriptSourceRoot,
+    preview: false,
+  });
   expect(await waitForDocument(restartedProcess, "STATIC_RELEASE_B_AFTER_RESTART")).not.toContain(
     "STATIC_RELEASE_A_PINNED",
   );

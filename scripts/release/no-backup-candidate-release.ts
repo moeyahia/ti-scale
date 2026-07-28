@@ -5,6 +5,7 @@ import {
 } from "./NoBackupCandidateStaging";
 
 if (import.meta.main) {
+  const requestedCommand = process.argv.slice(2)[0];
   if (
     process.argv.slice(2).length === 0 ||
     process.argv.slice(2).includes("--help") ||
@@ -22,7 +23,13 @@ if (import.meta.main) {
             ? error.message
             : "No-backup candidate staging failed",
         backupPolicy: "none",
-        cutoverEligible: false,
+        ...(requestedCommand === "stage-deploy"
+          ? {
+              deploymentMode: "current_service",
+              activationState: "unknown",
+              reconciliationState: "operator_inspection_needed",
+            }
+          : {}),
         priorStateCopyCreatedByStager: false,
       })}\n`);
       process.exitCode = 1;

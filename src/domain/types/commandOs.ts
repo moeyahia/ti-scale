@@ -514,6 +514,21 @@ export interface GuidedMissionRequest {
     authenticationMode: "anonymous" | "credential_reference";
     credentialReference: { kind: "systemd_credential_bundle"; id: string } | null;
   };
+  guidedLocalExploitIntelligence?: {
+    query:
+      | {
+          kind: "cve";
+          cveId: string;
+          maximumResults: number;
+        }
+      | {
+          kind: "technology";
+          product: string;
+          version: string | null;
+          platform: string | null;
+          maximumResults: number;
+        };
+  };
 }
 
 export type GuidedTcpPortPresetId = "focused_services" | "web_services" | "remote_management";

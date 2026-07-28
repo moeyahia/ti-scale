@@ -38,6 +38,7 @@ import {
   type BrainGraphFixture,
 } from "./support/brainGraphFixtureController";
 import { canonicalFixtureNamespace } from "./support/fixtureNamespace";
+import { waitForInteractiveApplication } from "./support/applicationReadiness";
 import type {
   InteractionActivationInput,
   InteractionActivationRecorder,
@@ -58,6 +59,7 @@ const TEST_IDS = {
   atlasFallback: "e2e.brain-graph.atlas-fallback",
   visualCanvasTable: "e2e.brain-graph.visual-canvas-table",
   deepLinksHistory: "e2e.brain-graph.deep-links-history",
+  inspectorContextRetry: "e2e.brain-graph.inspector-context-retry",
 } as const;
 const GRAPH_API_PATH = "/api/v2/brain/graph";
 const FIXTURE_DAY = "2099-07-16";
@@ -409,6 +411,143 @@ test(`${TEST_IDS.errorEmptyRetry} explains a failed canonical read, retries it, 
   expect((await graphPayload(await unfilteredRead)).nodes.length).toBeGreaterThan(0);
   await waitForCanvas(page);
   await strictAudit(audit, testInfo);
+});
+
+test(`${TEST_IDS.inspectorContextRetry} distinguishes selected-memory and Context Pack recovery`, async ({
+  page,
+  browserAudit,
+  interactionActivation,
+}) => {
+  const nodePath = `/api/v2/brain/nodes/${fixture.preferenceNodeId}`;
+  const contextPath = `/api/v2/brain/context-packs/${fixture.contextPackId}`;
+  browserAudit.expectHttpResponse(page, {
+    id: "brain.graph.inspector.initial-unavailable",
+    transport: "browser",
+    method: "GET",
+    pathname: nodePath,
+    query: {},
+    status: 503,
+    occurrences: 2,
+    reason: "Exercise the selected-memory inspector retry without aliasing the graph retry.",
+  });
+  browserAudit.expectHttpResponse(page, {
+    id: "brain.graph.context-pack.initial-unavailable",
+    transport: "browser",
+    method: "GET",
+    pathname: contextPath,
+    query: {},
+    status: 503,
+    occurrences: 2,
+    reason: "Exercise the graph Context Pack retry as its own represented read.",
+  });
+  let failNode = false;
+  await page.route(`**${nodePath}`, async (route) => {
+    if (failNode) {
+      failNode = false;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: {
+            code: "brain_node_fixture_temporarily_unavailable",
+            message: "selected memory temporarily unavailable",
+            humanMessage: "The selected memory detail could not be read.",
+            retryable: true,
+            category: "dependency",
+            remediation: "Retry this selected memory without reloading the graph.",
+            traceId: "trace-brain-graph-inspector-retry",
+            timestamp: "2099-07-16T12:00:00.000Z",
+          },
+        }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+  let failContext = false;
+  await page.route(`**${contextPath}`, async (route) => {
+    if (failContext) {
+      failContext = false;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: {
+            code: "brain_context_fixture_temporarily_unavailable",
+            message: "context pack temporarily unavailable",
+            humanMessage: "The selected Context Pack could not be read.",
+            retryable: true,
+            category: "dependency",
+            remediation: "Retry only this Context Pack.",
+            traceId: "trace-brain-graph-context-retry",
+            timestamp: "2099-07-16T12:00:00.000Z",
+          },
+        }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  for (const modality of ["pointer", "keyboard"] as const) {
+    failNode = true;
+    failContext = true;
+    const destination = graphRoute({ table: "1", limit: "500" });
+    const graphRead = graphResponse(page, (url) => url.searchParams.get("engagementId") === fixture.engagementId);
+    if (page.url() === "about:blank") {
+      await page.goto(destination, { waitUntil: "domcontentloaded" });
+    } else {
+      await browserAudit.withExpectedDocumentNavigationTeardown(
+        page,
+        () => page.goto(destination, { waitUntil: "domcontentloaded" }),
+      );
+    }
+    await waitForInteractiveApplication(page);
+    await graphPayload(await graphRead);
+    const row = page.getByRole("row").filter({ hasText: fixture.preferenceTitle });
+    await activate(row.getByRole("button", { name: "Inspect", exact: true }), modality);
+    const inspectorRetry = page.getByRole("button", { name: "Retry selected memory details", exact: true });
+    await expect(inspectorRetry).toHaveAttribute("id", "brain-graph-inspector-retry");
+    await expect(inspectorRetry).toHaveAttribute("data-testid", "brain-graph-inspector-retry");
+    await expect(inspectorRetry).toHaveAttribute("data-control-id", "brain-graph-inspector-retry");
+    const recoveredNode = page.waitForResponse((response) => response.request().method() === "GET"
+      && new URL(response.url()).pathname === nodePath
+      && response.status() === 200);
+    await recordGraphActivation(
+      interactionActivation,
+      "brain.graph.retry.inspector",
+      "Retry only the selected node detail",
+      modality,
+      TEST_IDS.inspectorContextRetry,
+      () => activate(inspectorRetry, modality),
+    );
+    expect((await recoveredNode).status()).toBe(200);
+
+    const inspector = page.getByRole("complementary", { name: "Selected memory details", exact: true });
+    const contextToggle = inspector.getByRole("button", {
+      name: /^Context Pack use: .+/u,
+    });
+    await activate(contextToggle, modality);
+    const contextRetry = inspector.getByRole("button", { name: "Retry graph context pack", exact: true });
+    await expect(contextRetry).toHaveAttribute("id", "brain-graph-context-pack-retry");
+    await expect(contextRetry).toHaveAttribute("data-testid", "brain-graph-context-pack-retry");
+    const recoveredContext = page.waitForResponse((response) => response.request().method() === "GET"
+      && new URL(response.url()).pathname === contextPath
+      && response.status() === 200);
+    await recordGraphActivation(
+      interactionActivation,
+      "brain.graph.retry.context-pack",
+      "Retry only the selected graph Context Pack",
+      modality,
+      TEST_IDS.inspectorContextRetry,
+      () => activate(contextRetry, modality),
+    );
+    expect((await recoveredContext).status()).toBe(200);
+    await expect(inspector.getByRole("link", { name: "Show memory path", exact: true })).toBeVisible();
+  }
+
+  await page.unroute(`**${nodePath}`);
+  await page.unroute(`**${contextPath}`);
 });
 
 test(`${TEST_IDS.controlsFiltersViews} exercises progressive loading, every graph view, filter, cluster, display control, and named view`, async ({ page, context }, testInfo) => {
@@ -859,7 +998,7 @@ test(`${TEST_IDS.canvasTableInspector} exercises pointer and keyboard canvas inp
     && pathname(response) === `/api/v2/brain/context-packs/${fixture.contextPackId}`
     && response.status() === 200);
   const contextControl = inspector.getByRole("button", {
-    name: /Adapt the represented Guided explanation to the confirmed evidence-first preference/u,
+    name: /^Context Pack use: .+/u,
   });
   await activate(contextControl, "keyboard");
   expect((await contextRead).status()).toBe(200);
@@ -1269,10 +1408,13 @@ test(`${TEST_IDS.deepLinksHistory} preserves graph state through node, Context P
     && pathname(response) === `/api/v2/brain/context-packs/${fixture.contextPackId}`
     && response.status() === 200);
   await activate(inspector.getByRole("button", {
-    name: /Adapt the represented Guided explanation to the confirmed evidence-first preference/u,
+    name: /^Context Pack use: .+/u,
   }), "pointer");
   expect((await contextRead).status()).toBe(200);
-  const contextNodeLink = inspector.getByRole("link", { name: fixture.preferenceTitle, exact: true });
+  const contextNodeLink = inspector.getByRole("link", {
+    name: `Open memory node ${fixture.preferenceTitle}`,
+    exact: true,
+  });
   await expect(contextNodeLink).toHaveAttribute("href", `/brain/nodes/${fixture.preferenceNodeId}`);
   const contextPathRead = graphResponse(page, (url) => url.searchParams.get("view") === "local"
     && url.searchParams.get("nodeId") === fixture.preferenceNodeId);
@@ -1394,7 +1536,7 @@ test(`${TEST_IDS.deepLinksHistory} and ${TEST_IDS.canvasTableInspector} record b
     await selectPreferenceInTable(page, modality);
     let inspector = page.getByRole("complementary", { name: "Selected memory details", exact: true });
     let contextControl = inspector.getByRole("button", {
-      name: /Adapt the represented Guided explanation to the confirmed evidence-first preference/u,
+      name: /^Context Pack use: .+/u,
     });
 
     const contextRead = page.waitForResponse((response) => response.request().method() === "GET"
@@ -1444,11 +1586,14 @@ test(`${TEST_IDS.deepLinksHistory} and ${TEST_IDS.canvasTableInspector} record b
     await recordGraphActivation(
       interactionActivation,
       "brain.graph.context.node-link",
-      "Open the exact Context Pack memory node",
+      "Open each exact Context Pack memory node",
       modality,
       TEST_IDS.deepLinksHistory,
       async () => {
-        await activate(inspector.getByRole("link", { name: fixture.preferenceTitle, exact: true }), modality);
+        await activate(inspector.getByRole("link", {
+          name: `Open memory node ${fixture.preferenceTitle}`,
+          exact: true,
+        }), modality);
         expect((await contextNodeRead).status()).toBe(200);
         await expect(page).toHaveURL(`/brain/nodes/${fixture.preferenceNodeId}`);
         await expect(page.getByRole("heading", { name: fixture.preferenceTitle, exact: true }).first()).toBeVisible();
@@ -1463,7 +1608,7 @@ test(`${TEST_IDS.deepLinksHistory} and ${TEST_IDS.canvasTableInspector} record b
     await selectPreferenceInTable(page, modality);
     inspector = page.getByRole("complementary", { name: "Selected memory details", exact: true });
     contextControl = inspector.getByRole("button", {
-      name: /Adapt the represented Guided explanation to the confirmed evidence-first preference/u,
+      name: /^Context Pack use: .+/u,
     });
     await activate(contextControl, modality);
     await expect(inspector.getByRole("link", { name: "Show memory path", exact: true })).toBeVisible();

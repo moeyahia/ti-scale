@@ -21,8 +21,13 @@ export function percent(value: number | null | undefined, fractional = true): st
   return `${Math.round((fractional ? value * 100 : value))}%`;
 }
 
-export function JsonDetails({ value, label = "Technical detail", id }: { value: unknown; label?: string; id?: string }) {
-  return <details id={id} className="os-raw-details"><summary>{label}</summary><pre>{JSON.stringify(value, null, 2)}</pre></details>;
+export function JsonDetails({ value, label = "Technical detail", id, controlId }: {
+  value: unknown;
+  label?: string;
+  id?: string;
+  controlId?: string;
+}) {
+  return <details id={id} className="os-raw-details"><summary data-control-id={controlId}>{label}</summary><pre>{JSON.stringify(value, null, 2)}</pre></details>;
 }
 
 export function StreamState() {

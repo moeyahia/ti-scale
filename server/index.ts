@@ -43,6 +43,10 @@ import {
   applyWindowsIdentityRuntimeProjection,
   drainWindowsIdentityReadinessResources,
   projectWindowsIdentityRuntime,
+  activateLocalExploitIntelligenceRuntime,
+  applyLocalExploitIntelligenceRuntimeProjection,
+  drainLocalExploitIntelligenceReadinessResources,
+  projectLocalExploitIntelligenceRuntime,
   StartupDatabaseIntegrityVerifier,
 } from "./app";
 import { createProductionPublicNvdMcpBoundary } from "./mcp";
@@ -123,7 +127,12 @@ import {
   type MissionRuntimeEngine,
   type ResultAwareExecutionPort,
   CompositeGuidedExecutionPort,
+  FailClosedManualExecutionPort,
+  LocalExploitIntelligenceGuidedPlanner,
   LocalGuidedToolPlanner,
+  LocalGuidedManualPlanner,
+  WindowsIdentityGuidedPlanner,
+  createProductionGuidedLocalExploitIntelligenceRuntime,
 } from "./command-runtime";
 import { assertTestRunMutationAuthority } from "./control-plane/TestRunMutationAuthority";
 import {
@@ -165,6 +174,12 @@ import {
   WindowsIdentityCapabilityRegistry,
   WindowsIdentityGuidedExecutionPort,
 } from "./windows-identity-tools";
+import {
+  DirectSearchSploitProcessAdapter,
+  SearchSploitActivationService,
+  SearchSploitGuidedExecutionPort,
+  SearchSploitToolPack,
+} from "./local-exploit-intelligence";
 import type { PlanChangeAffectedWorkStopReceipt } from "./plan-changes";
 import { ProcessWriterLeaseHeartbeat } from "./app/ProcessWriterLeaseHeartbeat";
 
@@ -547,7 +562,13 @@ function resolveStaticApplicationAdmission(): StaticApplicationAdmission {
     ?? managedE2EStaticBuild
     ?? mutableDevelopmentDist;
   return {
-    enabled: serveStatic && previewEnabled && existsSync(resolve(dist, "index.html")),
+    // A manifest-pinned immutable release is the production application and
+    // must remain available when development preview mode is disabled.
+    // Mutable source-tree and Playwright-managed builds continue to require
+    // the explicit preview boundary.
+    enabled: serveStatic
+      && (pinned !== undefined || previewEnabled)
+      && existsSync(resolve(dist, "index.html")),
     dist,
     ...(pinned ? {
       pinnedRelease: {
@@ -922,6 +943,9 @@ async function main(): Promise<void> {
   const configuredRuntimeManifest = loadProductionRuntimeManifest();
   const localGuidedToolConfiguration = loadProductionLocalGuidedToolConfiguration();
   const windowsIdentityEnabled = enabled("TI_SCALE_WINDOWS_IDENTITY_ENABLED");
+  const localExploitIntelligenceEnabled = enabled(
+    "TI_SCALE_LOCAL_EXPLOIT_INTELLIGENCE_ENABLED",
+  );
   if (windowsIdentityEnabled && localGuidedToolConfiguration.status !== "loaded") {
     throw new Error(
       "TI_SCALE_WINDOWS_IDENTITY_ENABLED requires the complete deployment-pinned local Guided sandbox and workspace configuration",
@@ -931,6 +955,9 @@ async function main(): Promise<void> {
   let localGuidedToolAdapter: DirectProcessLocalToolInvocationAdapter | undefined;
   let localGuidedToolExecution: ReviewedLocalToolExecutionPort | undefined;
   let windowsIdentityExecution: WindowsIdentityGuidedExecutionPort | undefined;
+  let localExploitIntelligenceExecution:
+    SearchSploitGuidedExecutionPort | undefined;
+  let localExploitIntelligenceMissionRuntimeMounted = false;
   let localGuidedToolActivation: LocalGuidedToolActivationCoordinator | undefined;
   const loadedOpenRouterConnection = loadOpenRouterConnectionConfiguration();
   const openRouterConfiguration = loadedOpenRouterConnection.configuration;
@@ -1128,6 +1155,94 @@ async function main(): Promise<void> {
       }, 30_000)
     : undefined;
   windowsIdentityRefreshTimer?.unref();
+  const localExploitIntelligencePack = localExploitIntelligenceEnabled
+    ? new SearchSploitToolPack()
+    : undefined;
+  const localExploitIntelligenceAdapter = localExploitIntelligencePack
+    ? new DirectSearchSploitProcessAdapter({
+        pack: localExploitIntelligencePack,
+      })
+    : undefined;
+  const localExploitIntelligenceActivationService = localExploitIntelligencePack
+    ? new SearchSploitActivationService({
+        pack: localExploitIntelligencePack,
+      })
+    : undefined;
+  const localExploitIntelligenceStopController = new AbortController();
+  const localExploitIntelligenceInitialActivation =
+    localExploitIntelligencePack
+    && localExploitIntelligenceAdapter
+    && localExploitIntelligenceActivationService
+      ? activateLocalExploitIntelligenceRuntime({
+          pack: localExploitIntelligencePack,
+          activation: localExploitIntelligenceActivationService,
+          adapter: localExploitIntelligenceAdapter,
+          signal: localExploitIntelligenceStopController.signal,
+        })
+      : undefined;
+  let localExploitIntelligenceRefreshInFlight: Promise<void> | undefined;
+  let localExploitIntelligenceRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  let localExploitIntelligenceReadinessStopped = false;
+  const beginStopLocalExploitIntelligenceReadiness = (): void => {
+    if (localExploitIntelligenceReadinessStopped) return;
+    localExploitIntelligenceReadinessStopped = true;
+    localExploitIntelligenceStopController.abort(
+      "Ti-Scale local exploit intelligence readiness is stopping",
+    );
+    if (localExploitIntelligenceRefreshTimer) {
+      clearInterval(localExploitIntelligenceRefreshTimer);
+    }
+    localExploitIntelligenceRefreshTimer = undefined;
+  };
+  const stopLocalExploitIntelligenceReadiness = async (): Promise<void> => {
+    beginStopLocalExploitIntelligenceReadiness();
+    await drainLocalExploitIntelligenceReadinessResources({
+      ...(localExploitIntelligenceInitialActivation
+        ? { initialActivation: localExploitIntelligenceInitialActivation }
+        : {}),
+      ...(localExploitIntelligenceRefreshInFlight
+        ? { refreshInFlight: localExploitIntelligenceRefreshInFlight }
+        : {}),
+    });
+  };
+  if (localExploitIntelligenceInitialActivation) {
+    registerStartupComponent("readiness", {
+      name: "startup-local-exploit-intelligence-readiness",
+      beginStop: beginStopLocalExploitIntelligenceReadiness,
+      stop: stopLocalExploitIntelligenceReadiness,
+    });
+  }
+  startupPhase = "local_exploit_intelligence_readiness";
+  let localExploitIntelligenceActivation =
+    await localExploitIntelligenceInitialActivation;
+  assertStartupActive();
+  localExploitIntelligenceRefreshTimer = localExploitIntelligencePack
+    && localExploitIntelligenceAdapter
+    && localExploitIntelligenceActivationService
+    ? setInterval(() => {
+        if (localExploitIntelligenceReadinessStopped
+          || startupShutdownStarted
+          || localExploitIntelligenceRefreshInFlight) return;
+        const refresh = activateLocalExploitIntelligenceRuntime({
+          pack: localExploitIntelligencePack,
+          activation: localExploitIntelligenceActivationService,
+          adapter: localExploitIntelligenceAdapter,
+          signal: localExploitIntelligenceStopController.signal,
+        }).then((snapshot) => {
+          if (!localExploitIntelligenceReadinessStopped
+            && !startupShutdownStarted) {
+            localExploitIntelligenceActivation = snapshot;
+          }
+        }).finally(() => {
+          if (localExploitIntelligenceRefreshInFlight === refresh) {
+            localExploitIntelligenceRefreshInFlight = undefined;
+          }
+        });
+        localExploitIntelligenceRefreshInFlight = refresh;
+        void refresh.catch(() => undefined);
+      }, 30_000)
+    : undefined;
+  localExploitIntelligenceRefreshTimer?.unref();
   const nonAutonomousRuntimeProjection = (): RuntimeProjectionInput => {
     const raw = rawRuntimeProjection();
     const attested: RuntimeProjectionInput = {
@@ -1144,13 +1259,26 @@ async function main(): Promise<void> {
           adapterId: localGuidedToolAdapter?.adapterId ?? null,
         }))
       : attested;
-    return windowsIdentityRegistry && windowsIdentityActivation
+    const identityProjected = windowsIdentityRegistry && windowsIdentityActivation
       ? applyWindowsIdentityRuntimeProjection(localProjected, projectWindowsIdentityRuntime({
           baselineManifests: localProjected.capabilityManifests ?? emptyRuntimeSourceManifests(),
           registry: windowsIdentityRegistry,
           activation: windowsIdentityActivation,
         }))
       : localProjected;
+    return localExploitIntelligencePack && localExploitIntelligenceActivation
+      ? applyLocalExploitIntelligenceRuntimeProjection(
+          identityProjected,
+          projectLocalExploitIntelligenceRuntime({
+            baselineManifests: identityProjected.capabilityManifests
+              ?? emptyRuntimeSourceManifests(),
+            pack: localExploitIntelligencePack,
+            activation: localExploitIntelligenceActivation,
+            missionRuntimeMounted:
+              localExploitIntelligenceMissionRuntimeMounted,
+          }),
+        )
+      : identityProjected;
   };
   let autonomousDnsLifecycle: AutonomousDnsRuntimeLifecycle | undefined;
   const runtimeProjection = (): RuntimeProjectionInput => {
@@ -1589,6 +1717,67 @@ async function main(): Promise<void> {
           return productionGuidedRuntime.assertControlPlaneMutationAuthority(runId);
         },
       });
+    }
+    if (
+      localExploitIntelligencePack
+      && localExploitIntelligenceAdapter
+      && localExploitIntelligenceActivation?.status === "ready"
+    ) {
+      localExploitIntelligenceExecution =
+        new SearchSploitGuidedExecutionPort({
+          database: application.database,
+          pack: localExploitIntelligencePack,
+          adapter: localExploitIntelligenceAdapter,
+          assertControlPlaneAuthority: (runId) => {
+            if (!productionGuidedRuntime) {
+              throw new Error(
+                "Guided local ExploitDB runtime authority is unavailable",
+              );
+            }
+            return productionGuidedRuntime
+              .assertControlPlaneMutationAuthority(runId);
+          },
+        });
+      const basePlanner = new LocalGuidedToolPlanner({
+        manifest: localGuidedToolConfiguration.manifest,
+        logicalWorkspace: defaultWorkspace.logicalRoot,
+        readReadyToolIds: () =>
+          localGuidedToolActivation?.readyToolIds() ?? new Set(),
+      });
+      const fallbackPlanner = windowsIdentityRegistry
+        ? new WindowsIdentityGuidedPlanner({
+            pack: windowsIdentityRegistry.pack,
+            logicalWorkspace: defaultWorkspace.logicalRoot,
+            readReadyToolIds: () =>
+              new Set(windowsIdentityActivation?.readyToolIds ?? []),
+            fallback: basePlanner,
+          })
+        : basePlanner;
+      productionGuidedRuntime =
+        createProductionGuidedLocalExploitIntelligenceRuntime({
+          database: application.database,
+          operationalHazardHmacKey: operationalHazardObservationKey,
+          brainContext: application.brainContext,
+          projectMemoryNodes,
+          fallbackPlanner,
+          pack: localExploitIntelligencePack,
+          readReadyToolIds: () =>
+            new Set(
+              localExploitIntelligenceActivation?.readyToolIds ?? [],
+            ),
+          execution: new CompositeGuidedExecutionPort(
+            localGuidedToolExecution,
+            windowsIdentityExecution,
+            localExploitIntelligenceExecution,
+          ),
+          workerId: `ti-scale-guided-local-exploit-${process.pid}`,
+        });
+      localExploitIntelligenceMissionRuntimeMounted = true;
+    } else if (
+      windowsIdentityRegistry
+      && windowsIdentityExecution
+      && windowsIdentityActivation
+    ) {
       productionGuidedRuntime = createProductionGuidedCompositeRuntime({
         database: application.database,
         operationalHazardHmacKey: operationalHazardObservationKey,
@@ -1597,7 +1786,8 @@ async function main(): Promise<void> {
         fallbackPlanner: new LocalGuidedToolPlanner({
           manifest: localGuidedToolConfiguration.manifest,
           logicalWorkspace: defaultWorkspace.logicalRoot,
-          readReadyToolIds: () => localGuidedToolActivation?.readyToolIds() ?? new Set(),
+          readReadyToolIds: () =>
+            localGuidedToolActivation?.readyToolIds() ?? new Set(),
         }),
         windowsIdentityPack: windowsIdentityRegistry.pack,
         windowsIdentityLogicalWorkspace: defaultWorkspace.logicalRoot,
@@ -1642,13 +1832,55 @@ async function main(): Promise<void> {
     await localGuidedToolActivation.start();
     assertStartupActive();
   } else {
-    productionGuidedRuntime = createProductionGuidedManualRuntime({
-      database: application.database,
-      operationalHazardHmacKey: operationalHazardObservationKey,
-      brainContext: application.brainContext,
-      projectMemoryNodes,
-      workerId: `ti-scale-guided-manual-${process.pid}`,
-    });
+    if (
+      localExploitIntelligencePack
+      && localExploitIntelligenceAdapter
+      && localExploitIntelligenceActivation?.status === "ready"
+    ) {
+      localExploitIntelligenceExecution =
+        new SearchSploitGuidedExecutionPort({
+          database: application.database,
+          pack: localExploitIntelligencePack,
+          adapter: localExploitIntelligenceAdapter,
+          assertControlPlaneAuthority: (runId) => {
+            if (!productionGuidedRuntime) {
+              throw new Error(
+                "Guided local ExploitDB runtime authority is unavailable",
+              );
+            }
+            return productionGuidedRuntime
+              .assertControlPlaneMutationAuthority(runId);
+          },
+        });
+      productionGuidedRuntime =
+        createProductionGuidedLocalExploitIntelligenceRuntime({
+          database: application.database,
+          operationalHazardHmacKey: operationalHazardObservationKey,
+          brainContext: application.brainContext,
+          projectMemoryNodes,
+          fallbackPlanner: new LocalGuidedManualPlanner(),
+          pack: localExploitIntelligencePack,
+          readReadyToolIds: () =>
+            new Set(
+              localExploitIntelligenceActivation?.readyToolIds ?? [],
+            ),
+          execution: new CompositeGuidedExecutionPort(
+            new FailClosedManualExecutionPort(),
+            undefined,
+            localExploitIntelligenceExecution,
+          ),
+          workerId: `ti-scale-guided-local-exploit-${process.pid}`,
+        });
+      localExploitIntelligenceMissionRuntimeMounted = true;
+    } else {
+      productionGuidedRuntime = createProductionGuidedManualRuntime({
+        database: application.database,
+        operationalHazardHmacKey: operationalHazardObservationKey,
+        brainContext: application.brainContext,
+        projectMemoryNodes,
+        workerId: `ti-scale-guided-manual-${process.pid}`,
+      });
+    }
     registerStartupComponent("runtimes", {
       name: "startup-guided-mission-runtime",
       beginStop: () => productionGuidedRuntime?.beginStop(),
@@ -2068,6 +2300,21 @@ async function main(): Promise<void> {
       "Ti-Scale reviewed Windows/identity runtime disabled; set TI_SCALE_WINDOWS_IDENTITY_ENABLED=true with the pinned local sandbox/workspace configuration to opt in\n",
     );
   }
+  if (localExploitIntelligenceActivation) {
+    process.stdout.write(
+      `Ti-Scale local ExploitDB intelligence runtime ${localExploitIntelligenceActivation.status}; `
+      + `${localExploitIntelligenceActivation.readyToolIds.length}/1 exact offline binding ready `
+      + `(visible under VulnIntel; durable Guided mission selection ${
+        localExploitIntelligenceMissionRuntimeMounted
+          ? "mounted"
+          : "unavailable"
+      })\n`,
+    );
+  } else {
+    process.stdout.write(
+      "Ti-Scale local ExploitDB intelligence runtime disabled; set TI_SCALE_LOCAL_EXPLOIT_INTELLIGENCE_ENABLED=true to activate the pinned offline SearchSploit binding\n",
+    );
+  }
   startupPhase = "runtime_recovery";
   application.start();
   operationalHazardObservationWorker.start();
@@ -2170,6 +2417,12 @@ async function main(): Promise<void> {
       beginStop: beginStopWindowsIdentityReadiness,
       stop: stopWindowsIdentityReadiness,
     }] : []),
+    ...(localExploitIntelligenceInitialActivation
+      || localExploitIntelligenceRefreshInFlight ? [{
+        name: "local-exploit-intelligence-readiness",
+        beginStop: beginStopLocalExploitIntelligenceReadiness,
+        stop: stopLocalExploitIntelligenceReadiness,
+      }] : []),
     {
       name: "tool-binding-readiness",
       beginStop: () => toolBindingReadiness.runner.beginStop(),

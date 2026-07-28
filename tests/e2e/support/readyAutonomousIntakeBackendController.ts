@@ -34,7 +34,9 @@ export interface ReadyAutonomousIntakeBackend {
 
 export type ReadyAutonomousIntakeBackendProfile =
   | "full"
-  | "team_boundary";
+  | "team_boundary"
+  | "guided_windows_identity"
+  | "guided_local_exploit_intelligence";
 
 export interface ReadyAutonomousIntakeBackendOptions {
   readonly profile?: ReadyAutonomousIntakeBackendProfile;

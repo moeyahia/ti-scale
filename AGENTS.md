@@ -1,18 +1,26 @@
 # Ti-Scale Working Instructions
 
-The root operating and Kali tooling instructions in [`/root/AGENTS.md`](/root/AGENTS.md)
-also apply to every Ti-Scale agent and sub-agent. They are durable workspace
-instructions, not conversation-only context.
-
 Read and follow [`docs/project-goal.md`](docs/project-goal.md) before planning,
 editing, testing, or deploying Ti-Scale.
+
+## Persistence and precedence
+
+These files are the durable source of truth for ongoing Ti-Scale work:
+
+1. this file for repository-specific working instructions; and
+2. `docs/project-goal.md` for the current product and deployment outcome.
+
+They must be read after context compaction and by every sub-agent. The
+standalone, forward-only Ti-Scale completion objective below supersedes older
+conversation or thread-goal wording that describes Ti-Scale as a preview or
+requires keeping its cutover closed.
 
 The operator's current objective is to finish the actual standalone Ti-Scale
 product and activate the completed build as the current service on port `3132`;
 do not substitute another disposable or operator-invisible preview.
 
-Keep ChillsPwn on port `3131` outside this workstream unless the operator
-explicitly opens a separate ChillsPwn task.
+Keep every unrelated application and service outside this workstream unless the
+operator explicitly expands the Ti-Scale task.
 
 Prioritize coherent operator-visible functionality:
 

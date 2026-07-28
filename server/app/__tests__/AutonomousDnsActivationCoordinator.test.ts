@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,6 +61,7 @@ import {
   runtimeCapabilityMemoryNodeId,
 } from "../../agent-tool-memory";
 import { buildRuntimeCapabilityProjection } from "../../domain";
+import { productAgentIdForActionClass } from "../../agents";
 import { MemoryRepository, SecondBrainService } from "../../memory";
 import {
   DirectProcessLocalToolInvocationAdapter,
@@ -70,11 +71,15 @@ import {
   type LocalProcessToolInvocation,
   type LocalProcessToolResultSink,
   type LocalToolActivationReceipt,
+  type ReviewedLocalProcessInvocationAdapter,
 } from "../../local-tools";
 import { digestCanonicalJson } from "../../mcp";
 import {
+  AUTONOMOUS_LOCAL_PLANNING_SELECTION,
+  modelConfigurationBindingHash,
   ModelConfigurationRepository,
   ModelConfigurationService,
+  createModelConfigurationRouter,
   type AgentModelAssignmentSelection,
 } from "../../model-config";
 import {
@@ -95,9 +100,12 @@ import { RuntimeProjectionService } from "../RuntimeProjectionService";
 import { createCommandOsRouter } from "../../routes/commandOsRoutes";
 import { createOperationsRouter } from "../../routes/operationsRoutes";
 import {
+  attackKnowledgeVaultSyncScope,
   ConnectedVaultMemoryProjector,
   ObsidianVaultBridge,
+  parseObsidianNote,
   VaultPathPolicy,
+  VaultProjectionReconciliationService,
 } from "../../vault";
 import {
   composeReviewedWebAssessmentLocalManifest,
@@ -128,6 +136,8 @@ const NOW = new Date("2026-07-24T20:00:00.000Z");
 const EXECUTABLE_SHA256 = "e474c98c9ec6d064d9015c11874a50cab7a7ae73541bf4fa9a6659380fa023e4";
 const SANDBOX_SHA256 = "042763bc80c8a895a497e6f801af003d585ea5588a580f7a4349d9ab2aa22980";
 const MODEL_CONFIGURATION_HASH = "a".repeat(64);
+const FULL_ASSESSMENT_MODEL_CONFIGURATION_HASH =
+  "e56498a1d682a3a707b8acfb0f3eeb29c5f1535b3fbdb9cf8abdb18d7670b0ac";
 const CONFIG_SOURCE_SHA256 = "d".repeat(64);
 const AGENT_ID = "specialist:autonomous-dns";
 const PRODUCT_AGENT_ID = "ReconScout";
@@ -726,6 +736,7 @@ function seedTerminalDnsRun(
       toolPolicy: "contract_allowlist",
       specialistAgentIds: [PRODUCT_AGENT_ID],
       agentModelAssignments: [options.modelAssignment],
+      planningSelection: AUTONOMOUS_LOCAL_PLANNING_SELECTION,
       contextNodeIds: exactContextNodeIds,
     }),
     JSON.stringify(budget),
@@ -811,6 +822,110 @@ function completeInputs(options: Readonly<{
   };
 }
 
+function exactPinnedDnsActivation(
+  fixture: ReturnType<typeof completeInputs>,
+  localProcessTransport: ReviewedLocalProcessInvocationAdapter,
+  resolver: EngagementWorkspaceResolver,
+) {
+  const bootstrapActivation = composeAutonomousDnsActivation({
+    database: fixture.db,
+    baselineProjection: baseline(),
+    manifest: fixture.toolManifest,
+    localActivation: fixture.activation,
+    configuration: fixture.config,
+    providerAttestation: fixture.providerAttestation,
+    specialistHeartbeat: fixture.specialistHeartbeat,
+    localProcessTransport,
+    workspaceResolver: resolver,
+    now: NOW,
+  });
+  if (bootstrapActivation.status !== "ready") {
+    throw new Error(
+      `Bootstrap activation fixture blocked: ${JSON.stringify(bootstrapActivation.blockers)}`,
+    );
+  }
+  const modelConfigurationRepository = new ModelConfigurationRepository(
+    fixture.db,
+    () => NOW,
+  );
+  const bootstrapModelConfigurations = new ModelConfigurationService(
+    modelConfigurationRepository,
+    {
+      readRuntimeManifests: () =>
+        bootstrapActivation.projection.capabilityManifests!,
+      clock: () => NOW,
+    },
+  );
+  const selectedConfiguration = bootstrapModelConfigurations.catalog().items.find(
+    (candidate) =>
+      candidate.selectable
+      && candidate.providerId === PROVIDER_ID
+      && candidate.modelId === MODEL_ID
+      && candidate.compatibleAgentIds.includes(PRODUCT_AGENT_ID),
+  );
+  if (!selectedConfiguration) {
+    throw new Error(
+      "Disposable loopback proof could not resolve its exact local model configuration",
+    );
+  }
+  modelConfigurationRepository.materializeCatalogConfiguration(
+    selectedConfiguration,
+  );
+  const selectedConfigurationHash = modelConfigurationBindingHash(
+    modelConfigurationRepository.getConfiguration(
+      selectedConfiguration.configurationId,
+    ),
+  );
+  const configuration = trustedConfiguration(configurationDocument({
+    dns: {
+      ...fixture.config.value.dns,
+      modelConfigurationHash: selectedConfigurationHash,
+    },
+    provider: {
+      ...fixture.config.value.provider,
+      modelConfigurationHash: selectedConfigurationHash,
+    },
+  }));
+  const planner = new LocalAutonomousContractPlanner({
+    database: fixture.db,
+    policy: createAutonomousDnsSafeReconPlanningPolicy(
+      configuration.value.dns,
+      fixture.toolManifest,
+    ),
+    readRuntimeProjection: baseline,
+    now: () => NOW,
+  });
+  const evaluator = new LocalVerifiedEvidenceOutcomeEvaluator(fixture.db);
+  const providerAttestation = attestLocalDeterministicAutonomousDnsProvider({
+    configuration,
+    planner,
+    evaluator,
+    now: NOW,
+  });
+  const specialistHeartbeat = attestAutonomousDnsSpecialistHeartbeat({
+    configuration,
+    manifest: fixture.toolManifest,
+    activationReceipt: fixture.activation.activationReceipts[0]!,
+    adapterContract: AUTONOMOUS_DNS_LOCAL_PROCESS_EXECUTION_CONTRACT,
+    now: NOW,
+  });
+  return {
+    activation: composeAutonomousDnsActivation({
+      database: fixture.db,
+      baselineProjection: baseline(),
+      manifest: fixture.toolManifest,
+      localActivation: fixture.activation,
+      configuration,
+      providerAttestation,
+      specialistHeartbeat,
+      localProcessTransport,
+      workspaceResolver: resolver,
+      now: NOW,
+    }),
+    modelConfigurationRepository,
+  } as const;
+}
+
 function exploitConfigurationDocument(): unknown {
   return configurationDocument({
     ipRecon: {
@@ -879,14 +994,25 @@ function fullAssessmentConfigurationDocument(logicalWorkspace: string): unknown 
     "ipRecon",
     "fullTcpBaseline",
     "webSurface",
+    "cveApplicability",
     "vulnerabilityAssessment",
     "exploitValidation",
   ]) {
     const configuration = document[key];
     if (configuration && typeof configuration === "object"
       && !Array.isArray(configuration)) {
-      (configuration as Record<string, unknown>).logicalWorkspace = logicalWorkspace;
+      if (key !== "cveApplicability") {
+        (configuration as Record<string, unknown>).logicalWorkspace =
+          logicalWorkspace;
+      }
+      (configuration as Record<string, unknown>).modelConfigurationHash =
+        FULL_ASSESSMENT_MODEL_CONFIGURATION_HASH;
     }
+  }
+  const provider = document.provider;
+  if (provider && typeof provider === "object" && !Array.isArray(provider)) {
+    (provider as Record<string, unknown>).modelConfigurationHash =
+      FULL_ASSESSMENT_MODEL_CONFIGURATION_HASH;
   }
   return document;
 }
@@ -2065,18 +2191,10 @@ describe("Autonomous DNS activation coordinator", () => {
       adapterId: LOCAL_PROCESS_ADAPTER_ID,
       now: () => NOW,
     });
-    const activation = composeAutonomousDnsActivation({
-      database: fixture.db,
-      baselineProjection: baseline(),
-      manifest: fixture.toolManifest,
-      localActivation: fixture.activation,
-      configuration: fixture.config,
-      providerAttestation: fixture.providerAttestation,
-      specialistHeartbeat: fixture.specialistHeartbeat,
-      localProcessTransport: directAdapter,
-      workspaceResolver: resolver,
-      now: NOW,
-    });
+    const {
+      activation,
+      modelConfigurationRepository: modelRepository,
+    } = exactPinnedDnsActivation(fixture, directAdapter, resolver);
     if (activation.status !== "ready") {
       throw new Error(`Terminal activation fixture blocked: ${JSON.stringify(activation.blockers)}`);
     }
@@ -2097,10 +2215,6 @@ describe("Autonomous DNS activation coordinator", () => {
       productAgent: true,
       runtimeBindingAgentIds: [AGENT_ID],
     });
-    const modelRepository = new ModelConfigurationRepository(
-      fixture.db,
-      () => NOW,
-    );
     const modelConfigurations = new ModelConfigurationService(
       modelRepository,
       {
@@ -2239,26 +2353,19 @@ describe("Autonomous DNS activation coordinator", () => {
       adapterId: LOCAL_PROCESS_ADAPTER_ID,
       now: () => NOW,
     });
-    const activation = composeAutonomousDnsActivation({
-      database: fixture.db,
-      baselineProjection: baseline(),
-      manifest: fixture.toolManifest,
-      localActivation: fixture.activation,
-      configuration: fixture.config,
-      providerAttestation: fixture.providerAttestation,
-      specialistHeartbeat: fixture.specialistHeartbeat,
-      localProcessTransport: directAdapter,
-      workspaceResolver: resolver,
-      now: NOW,
-    });
+    const {
+      activation,
+      modelConfigurationRepository,
+    } = exactPinnedDnsActivation(fixture, directAdapter, resolver);
     if (activation.status !== "ready") {
       throw new Error(`Intake activation fixture blocked: ${JSON.stringify(activation.blockers)}`);
     }
     const memory = new MemoryRepository(fixture.db, { clock: () => NOW });
+    const vaultPaths = new VaultPathPolicy(join(runtimeRoot, "vaults"));
     const vaultBridge = new ObsidianVaultBridge(
       fixture.db,
       memory,
-      new VaultPathPolicy(join(runtimeRoot, "vaults")),
+      vaultPaths,
       { clock: () => NOW },
     );
     const vaultConnection = vaultBridge.connect({
@@ -2296,17 +2403,6 @@ describe("Autonomous DNS activation coordinator", () => {
       "b".repeat(64),
       NOW.toISOString(),
     );
-    const brainContext = new BrainContextService({
-      database: fixture.db,
-      secondBrain: new SecondBrainService(memory),
-      clock: () => NOW,
-      resolveExistingVaultPath: (configuredPath) => {
-        if (configuredPath !== vaultConnection.vaultPath) {
-          throw new Error("Unexpected Vault path");
-        }
-        return vaultBridge.requireExistingConnection(vaultConnection.id).vaultPath;
-      },
-    });
     const vaultProjector = new ConnectedVaultMemoryProjector(fixture.db, vaultBridge, {
       clock: () => NOW,
     });
@@ -2326,6 +2422,33 @@ describe("Autonomous DNS activation coordinator", () => {
       },
     });
     expect(capabilityMemory.vaultBackedNodeIds).toHaveLength(2);
+    const attackKnowledgeVaultConnection = vaultBridge.connect({
+      id: "vault-autonomous-loopback-attack-knowledge",
+      vaultPath: "Attack-Knowledge-Vault",
+      displayName: "Ti-Scale Attack Knowledge Vault",
+      syncScope: attackKnowledgeVaultSyncScope({ includeConfirmed: true }),
+      permissionGranted: true,
+    });
+    vaultBridge.refreshConnectionHealthProof(
+      attackKnowledgeVaultConnection.id,
+      "system:autonomous-loopback-e2e-health",
+    );
+    const brainContext = new BrainContextService({
+      database: fixture.db,
+      secondBrain: new SecondBrainService(memory),
+      clock: () => NOW,
+      resolveExistingVaultPath: (configuredPath) => {
+        for (const connection of [
+          vaultConnection,
+          attackKnowledgeVaultConnection,
+        ]) {
+          if (configuredPath === connection.vaultPath) {
+            return vaultBridge.requireExistingConnection(connection.id).vaultPath;
+          }
+        }
+        throw new Error("Unexpected Vault path");
+      },
+    });
     const vaultProjectionReports: ReturnType<typeof vaultProjector.project>[] = [];
     const projectMemoryNodes = (nodeIds: readonly string[]) => {
       vaultProjectionReports.push(vaultProjector.project(nodeIds));
@@ -2337,7 +2460,7 @@ describe("Autonomous DNS activation coordinator", () => {
     });
     projection.projectNow();
     const modelConfigurations = new ModelConfigurationService(
-      new ModelConfigurationRepository(fixture.db, () => NOW),
+      modelConfigurationRepository,
       {
         readRuntimeManifests: () => activation.projection.capabilityManifests!,
         clock: () => NOW,
@@ -2465,10 +2588,10 @@ describe("Autonomous DNS activation coordinator", () => {
       });
       const attackKnowledge = memory.createNode({
         id: "mem_a17ac4e0a5d948349384d811a99cfd52",
-        nodeType: "attack_vector",
-        title: String(resolved.request.objective),
-        summary: `Prior confirmed attack knowledge for the authorized ${target} DNS evidence baseline.`,
-        body: "Use historical DNS outcomes only as a hypothesis. Corroborate the current product, version, target, and prerequisites with current evidence before relying on them.",
+        nodeType: "attack_procedure",
+        title: "Evidence-gated local DNS baseline",
+        summary: "Use one bounded local DNS query and retain attributable current evidence before advancing.",
+        body: "Historical outcomes remain hypotheses. Corroborate the current product, version, target, and prerequisites with current evidence before relying on this procedure.",
         scope: { kind: "global" },
         sensitivity: "internal",
         confidence: 1,
@@ -2479,7 +2602,7 @@ describe("Autonomous DNS activation coordinator", () => {
           explanation: "Disposable fixture representing confirmed knowledge imported through the connected attack-knowledge Vault.",
           sources: [{
             sourceType: "obsidian_vault_fixture",
-            sourceId: "Autonomous-Loopback-E2E/Attack Vectors/DNS baseline.md",
+            sourceId: "Attack-Knowledge-Vault/Attack Procedures/DNS baseline.md",
             acquiredAt: NOW.toISOString(),
           }],
         },
@@ -2550,13 +2673,199 @@ describe("Autonomous DNS activation coordinator", () => {
       }
       expect(terminalStatus).toBe("completed");
 
+      const executionGraph = fixture.db.prepare(`
+        SELECT p.id AS plan_id, p.version AS plan_version,
+          p.status AS plan_status, ps.id AS step_id,
+          ps.status AS step_status,
+          ps.assigned_agent_id AS step_agent_id,
+          ass.id AS assignment_id, ass.agent_id AS assignment_agent_id,
+          ass.status AS assignment_status,
+          a.id AS action_id, a.assignment_id AS action_assignment_id,
+          a.action_type, a.action_class, a.scoped_target,
+          a.status AS action_status
+        FROM plans p
+        JOIN plan_steps ps ON ps.plan_id = p.id AND ps.run_id = p.run_id
+        JOIN assignments ass ON ass.step_id = ps.id
+          AND ass.run_id = p.run_id
+        JOIN actions a ON a.step_id = ps.id AND a.run_id = p.run_id
+        WHERE p.run_id = ?
+        ORDER BY p.version DESC, ps.ordinal, ass.created_at, a.created_at
+        LIMIT 1
+      `).get(created.run.id) as {
+        plan_id: string;
+        plan_version: number;
+        plan_status: string;
+        step_id: string;
+        step_status: string;
+        step_agent_id: string;
+        assignment_id: string;
+        assignment_agent_id: string;
+        assignment_status: string;
+        action_id: string;
+        action_assignment_id: string;
+        action_type: string;
+        action_class: string;
+        scoped_target: string;
+        action_status: string;
+      };
+      expect(executionGraph).toMatchObject({
+        plan_version: 1,
+        plan_status: "completed",
+        step_status: "completed",
+        step_agent_id: PRODUCT_AGENT_ID,
+        assignment_agent_id: PRODUCT_AGENT_ID,
+        assignment_status: "completed",
+        action_assignment_id: executionGraph.assignment_id,
+        action_type: AUTONOMOUS_DNS_SAFE_RECON_TOOL_ID,
+        action_class: AUTONOMOUS_DNS_SAFE_RECON_ACTION_CLASS,
+        scoped_target: target,
+        action_status: "succeeded",
+      });
+
       const evidence = fixture.db.prepare(`
-        SELECT id, step_id FROM evidence
+        SELECT id, mission_id, run_id, step_id, action_id, source, target,
+          content_hash, provenance_json, verification_state, summary
+        FROM evidence
         WHERE run_id = ? AND verification_state = 'verified'
           AND evidence_type = 'dns_certificate_record'
         ORDER BY acquired_at, id LIMIT 1
-      `).get(created.run.id) as { id: string; step_id: string };
-      expect(evidence.step_id).toBeTruthy();
+      `).get(created.run.id) as {
+        id: string;
+        mission_id: string;
+        run_id: string;
+        step_id: string;
+        action_id: string;
+        source: string;
+        target: string;
+        content_hash: string;
+        provenance_json: string;
+        verification_state: string;
+        summary: string;
+      };
+      expect(evidence).toMatchObject({
+        mission_id: created.mission.id,
+        run_id: created.run.id,
+        step_id: executionGraph.step_id,
+        action_id: executionGraph.action_id,
+        source: `specialist:${AGENT_ID}`,
+        target,
+        verification_state: "verified",
+        summary: expect.stringContaining(
+          `The exact DNS A query for ${target} returned`,
+        ),
+      });
+      expect(evidence.content_hash).toMatch(/^[a-f0-9]{64}$/u);
+
+      const operationalTruth = fixture.db.prepare(`
+        SELECT log.id AS log_id, log.mission_id, log.run_id,
+          log.plan_id, log.step_id, log.action_id, log.agent_id,
+          log.tool_call_id, log.domain, log.record_type,
+          log.human_summary, log.technical_payload_json,
+          observation.id AS observation_id,
+          observation.statement AS observation_statement,
+          observation.normalized_value_json,
+          observation.verification_state AS observation_verification_state,
+          observation.source_agent_id, observation.source_tool,
+          source.parser_id, source.parser_version
+        FROM engagement_log_records log
+        JOIN observation_log_sources source
+          ON source.log_record_id = log.id
+        JOIN observations observation
+          ON observation.id = source.observation_id
+        WHERE log.run_id = ?
+        ORDER BY log.occurred_at, log.id
+        LIMIT 1
+      `).get(created.run.id) as {
+        log_id: string;
+        mission_id: string;
+        run_id: string;
+        plan_id: string;
+        step_id: string;
+        action_id: string;
+        agent_id: string;
+        tool_call_id: string;
+        domain: string;
+        record_type: string;
+        human_summary: string;
+        technical_payload_json: string;
+        observation_id: string;
+        observation_statement: string;
+        normalized_value_json: string;
+        observation_verification_state: string;
+        source_agent_id: string;
+        source_tool: string;
+        parser_id: string;
+        parser_version: string;
+      };
+      expect(operationalTruth).toMatchObject({
+        mission_id: created.mission.id,
+        run_id: created.run.id,
+        plan_id: executionGraph.plan_id,
+        step_id: executionGraph.step_id,
+        action_id: executionGraph.action_id,
+        agent_id: AGENT_ID,
+        tool_call_id: expect.any(String),
+        domain: "autonomous_dns_safe_recon",
+        record_type: "bounded_dns_process_output",
+        observation_verification_state: "corroborated",
+        source_agent_id: AGENT_ID,
+        source_tool: AUTONOMOUS_DNS_SAFE_RECON_TOOL_ID,
+        parser_id: "ti-scale.autonomous-dns-deterministic-parser",
+        parser_version: "1.0.0",
+      });
+      expect(operationalTruth.observation_statement)
+        .toBe(operationalTruth.human_summary);
+      expect(operationalTruth.human_summary).toContain(
+        `The exact DNS A query for ${target} returned`,
+      );
+      const normalizedObservation = JSON.parse(
+        operationalTruth.normalized_value_json,
+      ) as Record<string, unknown>;
+      expect(normalizedObservation).toMatchObject({
+        schemaVersion: "ti-scale.autonomous-dns-evidence-verifier.v1",
+        queryName: target,
+        recordType: "A",
+        noRecord: false,
+        answerCount: 1,
+        actionId: executionGraph.action_id,
+        toolCallId: operationalTruth.tool_call_id,
+        toolId: AUTONOMOUS_DNS_SAFE_RECON_TOOL_ID,
+      });
+      const technicalLog = JSON.parse(
+        operationalTruth.technical_payload_json,
+      ) as Record<string, unknown>;
+      expect(technicalLog).toMatchObject({
+        exitCode: 0,
+        outputTruncated: false,
+        shell: false,
+      });
+      const evidenceProvenance = JSON.parse(
+        evidence.provenance_json,
+      ) as Record<string, unknown>;
+      expect(evidenceProvenance).toMatchObject({
+        schemaVersion: "ti-scale.autonomous-dns-evidence-verifier.v1",
+        method: "deterministic_reviewed_dns_result_validation",
+        actionId: executionGraph.action_id,
+        toolCallId: operationalTruth.tool_call_id,
+        observationId: operationalTruth.observation_id,
+        logRecordId: operationalTruth.log_id,
+        specialistAgentId: AGENT_ID,
+        executionRoute: {
+          kind: "reviewed_local_process",
+          toolId: AUTONOMOUS_DNS_SAFE_RECON_TOOL_ID,
+        },
+        rawOutputPromoted: false,
+      });
+      expect(fixture.db.prepare(`
+        SELECT event_type FROM evidence_chain_events
+        WHERE evidence_id = ? ORDER BY event_type
+      `).all(evidence.id)).toEqual([
+        { event_type: "acquired" },
+        { event_type: "verified" },
+      ]);
+      expect(fixture.db.prepare(`
+        SELECT COUNT(*) AS count FROM evidence_candidates WHERE run_id = ?
+      `).get(created.run.id)).toEqual({ count: 0 });
 
       // A verified DNS answer is evidence, not a vulnerability finding. The
       // terminal materializer must preserve that boundary without an operator
@@ -2725,22 +3034,216 @@ describe("Autonomous DNS activation coordinator", () => {
         WHERE source.mission_id = ?
       `).get(created.mission.id) as { count: number }).count;
       expect(closeoutEdgeCount).toBeGreaterThan(0);
+
+      const reusableAttackKnowledge = fixture.db.prepare(`
+        SELECT id, node_type, title, summary, body, scope,
+          engagement_id, mission_id, lifecycle_status, confirmation_state,
+          retention_policy_json
+        FROM memory_nodes
+        WHERE node_type IN ('outcome', 'attack_lesson')
+          AND author_id = 'run-evaluator'
+        ORDER BY node_type
+      `).all() as Array<{
+        id: string;
+        node_type: "attack_lesson" | "outcome";
+        title: string;
+        summary: string;
+        body: string;
+        scope: string;
+        engagement_id: string | null;
+        mission_id: string | null;
+        lifecycle_status: string;
+        confirmation_state: string;
+        retention_policy_json: string;
+      }>;
+      expect(reusableAttackKnowledge).toHaveLength(2);
+      expect(reusableAttackKnowledge.map(({ node_type }) => node_type)).toEqual([
+        "attack_lesson",
+        "outcome",
+      ]);
+      for (const node of reusableAttackKnowledge) {
+        expect(node).toMatchObject({
+          scope: "global",
+          engagement_id: null,
+          mission_id: null,
+          lifecycle_status: "candidate",
+          confirmation_state: "pending",
+        });
+        expect(JSON.parse(node.retention_policy_json)).toMatchObject({
+          allowAutonomous: false,
+          allowGuided: false,
+          terminalAttackKnowledgeReview: {
+            schemaVersion: "ti-scale.terminal-attack-knowledge-candidate.v1",
+            status: "pending_operator_review",
+          },
+        });
+        const reusableText = [
+          node.title,
+          node.summary,
+          node.body,
+        ].join("\n");
+        for (const forbidden of [
+          target,
+          created.mission.id,
+          created.run.id,
+          String(resolved.request.objective),
+        ]) {
+          expect(reusableText).not.toContain(forbidden);
+        }
+      }
+      const outcomeNodeId = reusableAttackKnowledge.find(
+        ({ node_type }) => node_type === "outcome",
+      )!.id;
+      const attackLessonNodeId = reusableAttackKnowledge.find(
+        ({ node_type }) => node_type === "attack_lesson",
+      )!.id;
+      expect(fixture.db.prepare(`
+        SELECT source_node_id, target_node_id, edge_type, lifecycle_status
+        FROM memory_edges
+        WHERE edge_type IN ('produces_outcome', 'improves')
+          AND (
+            source_node_id IN (?, ?, ?)
+            OR target_node_id IN (?, ?, ?)
+          )
+        ORDER BY edge_type
+      `).all(
+        attackKnowledge.id,
+        outcomeNodeId,
+        attackLessonNodeId,
+        attackKnowledge.id,
+        outcomeNodeId,
+        attackLessonNodeId,
+      )).toEqual([
+        {
+          source_node_id: attackLessonNodeId,
+          target_node_id: attackKnowledge.id,
+          edge_type: "improves",
+          lifecycle_status: "candidate",
+        },
+        {
+          source_node_id: attackKnowledge.id,
+          target_node_id: outcomeNodeId,
+          edge_type: "produces_outcome",
+          lifecycle_status: "candidate",
+        },
+      ]);
+
       expect(vaultProjectionReports.length).toBeGreaterThanOrEqual(2);
       const terminalProjection = vaultProjectionReports.at(-1)!;
       expect(terminalProjection).toMatchObject({
-        requestedNodeIds: expect.any(Array),
-        attempted: 0,
-        synchronized: 0,
-        skippedByPolicy: 4,
+        attempted: 4,
+        synchronized: 4,
+        skippedByPolicy: 10,
         failures: 0,
+        attentionRequired: 0,
       });
-      // Mission/run/evaluation records stay in the canonical graph, while the
-      // candidate lesson remains pending. The reusable Vault records four
-      // policy skips instead of publishing private provenance or approving a
-      // lesson without independent review.
+      expect(terminalProjection.requestedNodeIds).toEqual(expect.arrayContaining([
+        attackKnowledge.id,
+        outcomeNodeId,
+        attackLessonNodeId,
+      ]));
+
+      const projectedAttackKnowledgeIds = [
+        attackKnowledge.id,
+        outcomeNodeId,
+        attackLessonNodeId,
+      ];
       expect(fixture.db.prepare(`
-        SELECT status FROM vault_connections WHERE id = ?
-      `).get(vaultConnection.id)).toEqual({ status: "connected" });
+        SELECT node_id, status
+        FROM vault_sync_state
+        WHERE connection_id = ?
+          AND node_id IN (?, ?, ?)
+        ORDER BY node_id
+      `).all(
+        attackKnowledgeVaultConnection.id,
+        ...projectedAttackKnowledgeIds,
+      )).toEqual(
+        [...projectedAttackKnowledgeIds]
+          .sort()
+          .map((node_id) => ({ node_id, status: "synced" })),
+      );
+      for (const nodeId of projectedAttackKnowledgeIds) {
+        const rendered = vaultBridge.renderNode(
+          nodeId,
+          attackKnowledgeVaultConnection,
+        );
+        const notePath = join(
+          attackKnowledgeVaultConnection.vaultPath,
+          rendered.relativePath,
+        );
+        expect(existsSync(notePath)).toBeTrue();
+        const noteText = readFileSync(notePath, "utf8");
+        expect(parseObsidianNote(noteText).id).toBe(nodeId);
+        for (const forbidden of [
+          target,
+          created.mission.id,
+          created.run.id,
+          String(resolved.request.objective),
+        ]) {
+          expect(noteText).not.toContain(forbidden);
+        }
+      }
+      const procedureNote = readFileSync(
+        join(
+          attackKnowledgeVaultConnection.vaultPath,
+          vaultBridge.renderNode(
+            attackKnowledge.id,
+            attackKnowledgeVaultConnection,
+          ).relativePath,
+        ),
+        "utf8",
+      );
+      const lessonNote = readFileSync(
+        join(
+          attackKnowledgeVaultConnection.vaultPath,
+          vaultBridge.renderNode(
+            attackLessonNodeId,
+            attackKnowledgeVaultConnection,
+          ).relativePath,
+        ),
+        "utf8",
+      );
+      expect(procedureNote).toContain(
+        `ti-scale-edge:produces_outcome:${outcomeNodeId}`,
+      );
+      expect(lessonNote).toContain(
+        `ti-scale-edge:improves:${attackKnowledge.id}`,
+      );
+      expect(procedureNote).toContain("[[");
+      expect(lessonNote).toContain("[[");
+      expect(new VaultProjectionReconciliationService(
+        fixture.db,
+        vaultBridge,
+        vaultPaths,
+        { clock: () => NOW },
+      ).reconcile(attackKnowledgeVaultConnection.id)).toMatchObject({
+        status: "complete",
+        eligibleNodeCount: 3,
+        syncedNodeCount: 3,
+        unresolvedWikilinkCount: 0,
+        unsafeContentCount: 0,
+        issueCount: 0,
+      });
+
+      // Operational mission/run/evaluation provenance remains canonical-only;
+      // only the confirmed procedure and generalized review candidates enter
+      // the reusable Vault, and neither candidate gains execution authority.
+      expect(fixture.db.prepare(`
+        SELECT id, status FROM vault_connections WHERE id IN (?, ?)
+        ORDER BY id
+      `).all(
+        vaultConnection.id,
+        attackKnowledgeVaultConnection.id,
+      )).toEqual([
+        {
+          id: attackKnowledgeVaultConnection.id,
+          status: "connected",
+        },
+        {
+          id: vaultConnection.id,
+          status: "connected",
+        },
+      ]);
       const vaultCloseoutAuditCount = (fixture.db.prepare(`
         SELECT COUNT(*) AS count FROM audit_records
         WHERE mission_id = ? AND action = 'memory.vault_projection_completed'
@@ -2757,10 +3260,11 @@ describe("Autonomous DNS activation coordinator", () => {
         SELECT COUNT(*) AS count FROM actions WHERE run_id = ?
       `).get(created.run.id)).toEqual({ count: 1 });
       expect(fixture.db.prepare(`
-        SELECT tc.provider, tc.tool_name, tc.mcp_server_id, tc.status
+        SELECT tc.id, tc.provider, tc.tool_name, tc.mcp_server_id, tc.status
         FROM tool_calls tc JOIN actions a ON a.id = tc.action_id
         WHERE a.run_id = ?
       `).get(created.run.id)).toEqual({
+        id: operationalTruth.tool_call_id,
         provider: "reviewed-local-process",
         tool_name: AUTONOMOUS_DNS_SAFE_RECON_TOOL_ID,
         mcp_server_id: null,
@@ -2791,6 +3295,52 @@ describe("Autonomous DNS activation coordinator", () => {
           OR summary LIKE '%waiting_guided_decision%'
         )
       `).get(created.run.id)).toEqual({ count: 0 });
+      expect(fixture.db.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM assignments
+            WHERE run_id = ? AND status IN ('queued', 'active', 'blocked'))
+            AS open_assignments,
+          (SELECT COUNT(*) FROM actions
+            WHERE run_id = ? AND status IN ('queued', 'running'))
+            AS open_actions,
+          (SELECT COUNT(*) FROM tool_calls
+            WHERE action_id IN (SELECT id FROM actions WHERE run_id = ?)
+              AND status IN ('queued', 'running'))
+            AS open_tool_calls,
+          (SELECT COUNT(*) FROM plan_steps
+            WHERE run_id = ? AND status IN (
+              'pending', 'ready', 'running', 'waiting_guided_decision',
+              'blocked', 'recovering'
+            ))
+            AS open_steps,
+          (SELECT COUNT(*) FROM control_plane_leases
+            WHERE run_id = ? AND released_at IS NULL)
+            AS active_control_plane_leases
+      `).get(
+        created.run.id,
+        created.run.id,
+        created.run.id,
+        created.run.id,
+        created.run.id,
+      )).toEqual({
+        open_assignments: 0,
+        open_actions: 0,
+        open_tool_calls: 0,
+        open_steps: 0,
+        active_control_plane_leases: 0,
+      });
+      expect(fixture.db.prepare(`
+        SELECT lease_owner, lease_acquired_at, last_heartbeat_at,
+          lease_expires_at, current_owner_id, current_step_id
+        FROM runs WHERE id = ?
+      `).get(created.run.id)).toEqual({
+        lease_owner: null,
+        lease_acquired_at: null,
+        last_heartbeat_at: null,
+        lease_expires_at: null,
+        current_owner_id: null,
+        current_step_id: null,
+      });
       expect(activation.projection.mcpServers).toEqual([]);
       expect(activation.composition.components).toMatchObject({
         localProcessExecution: true,
@@ -3060,6 +3610,14 @@ describe("Autonomous DNS activation coordinator", () => {
       }
       next();
     });
+    app.use(createModelConfigurationRouter({
+      database,
+      readRuntimeManifests: () =>
+        activation.projection.capabilityManifests!,
+      resolveActor: () => "operator:test",
+      service: modelConfigurations,
+      clock: () => NOW,
+    }));
     app.use(createCommandOsRouter({
       database,
       readinessProviders: createRuntimeReadinessProviders(
@@ -3185,6 +3743,58 @@ describe("Autonomous DNS activation coordinator", () => {
       if (createResponse.status !== 201) {
         throw new Error(`Eight-class mission create failed: ${JSON.stringify(created)}`);
       }
+      const pinnedModelResponse = await fetch(
+        `${base}/api/v2/runs/${created.run.id}/model-assignments`,
+        { headers },
+      );
+      expect(pinnedModelResponse.status).toBe(200);
+      const pinnedModelReadback = await pinnedModelResponse.json() as {
+        activeRunPinning: string;
+        items: Array<{
+          assignment: {
+            agentId: string;
+            missionId: string | null;
+            runId: string | null;
+            purpose: string;
+            primaryConfigurationId: string;
+            fallbackConfigurationId: string | null;
+            pinned: boolean;
+          };
+          primaryConfiguration: {
+            providerId: string;
+            modelId: string;
+            reasoningEffort: string | null;
+            enforcementMode: string;
+            disclosureClass: string;
+          };
+          fallbackConfiguration: unknown;
+        }>;
+      };
+      expect(pinnedModelReadback.activeRunPinning).toBe("immutable");
+      expect(pinnedModelReadback.items.map(({ assignment }) =>
+        assignment.agentId).sort()).toEqual([...assessmentAgentIds].sort());
+      expect(pinnedModelReadback.items).toHaveLength(4);
+      for (const item of pinnedModelReadback.items) {
+        expect(item.assignment).toMatchObject({
+          missionId: created.mission.id,
+          runId: created.run.id,
+          purpose: "execution",
+          primaryConfigurationId: exactModel.configurationId,
+          fallbackConfigurationId: null,
+          pinned: true,
+        });
+        expect(item.assignment.agentId).not.toBe(
+          configuration.value.specialist.id,
+        );
+        expect(item.primaryConfiguration).toMatchObject({
+          providerId: configuration.value.provider.id,
+          modelId: configuration.value.provider.modelId,
+          reasoningEffort: null,
+          enforcementMode: "enforced_executor",
+          disclosureClass: "local_only",
+        });
+        expect(item.fallbackConfiguration).toBeNull();
+      }
       await runtime.processRunNow(created.run.id);
       let terminal: string;
       try {
@@ -3264,6 +3874,93 @@ describe("Autonomous DNS activation coordinator", () => {
         approvals: 0,
         targetConfinement: "127.0.0.2_only",
       });
+      const activationRoutes = database.prepare(`
+        SELECT item.action_class_id, item.agent_id,
+          item.execution_primary_configuration_id,
+          item.execution_fallback_configuration_id,
+          assignment.agent_id AS model_assignment_agent_id,
+          assignment.assignment_purpose,
+          configuration.provider_id,
+          configuration.model_id,
+          configuration.reasoning_effort,
+          configuration.enforcement_mode,
+          configuration.disclosure_class
+        FROM autonomous_activation_receipts receipt
+        JOIN autonomous_activation_receipt_items item
+          ON item.receipt_id = receipt.id
+        JOIN agent_model_assignments assignment
+          ON assignment.id = item.execution_model_assignment_id
+        JOIN model_configurations configuration
+          ON configuration.id = item.execution_primary_configuration_id
+        WHERE receipt.run_id = ?
+          AND receipt.generation = (
+            SELECT MAX(latest.generation)
+            FROM autonomous_activation_receipts latest
+            WHERE latest.run_id = receipt.run_id
+          )
+        ORDER BY item.action_class_id
+      `).all(created.run.id) as Array<{
+        action_class_id: string;
+        agent_id: string;
+        execution_primary_configuration_id: string;
+        execution_fallback_configuration_id: string | null;
+        model_assignment_agent_id: string;
+        assignment_purpose: string;
+        provider_id: string;
+        model_id: string;
+        reasoning_effort: string | null;
+        enforcement_mode: string;
+        disclosure_class: string;
+      }>;
+      expect(activationRoutes).toHaveLength(
+        AUTONOMOUS_ASSESSMENT_ACTION_CLASS_IDS.length,
+      );
+      for (const route of activationRoutes) {
+        const expectedOwner = productAgentIdForActionClass(
+          route.action_class_id,
+        );
+        expect(expectedOwner).toBeDefined();
+        expect(route).toMatchObject({
+          agent_id: expectedOwner,
+          model_assignment_agent_id: expectedOwner,
+          execution_primary_configuration_id: exactModel.configurationId,
+          execution_fallback_configuration_id: null,
+          assignment_purpose: "execution",
+          provider_id: configuration.value.provider.id,
+          model_id: configuration.value.provider.modelId,
+          reasoning_effort: null,
+          enforcement_mode: "enforced",
+          disclosure_class: "local_only",
+        });
+        expect(route.agent_id).not.toBe(configuration.value.specialist.id);
+      }
+      const routedActions = database.prepare(`
+        SELECT action.action_class, step.assigned_agent_id,
+          assignment.agent_id AS assignment_agent_id
+        FROM actions action
+        JOIN plan_steps step ON step.id = action.step_id
+        JOIN assignments assignment ON assignment.id = action.assignment_id
+        WHERE action.run_id = ?
+        ORDER BY action.created_at, action.id
+      `).all(created.run.id) as Array<{
+        action_class: string;
+        assigned_agent_id: string;
+        assignment_agent_id: string;
+      }>;
+      expect(routedActions.length).toBeGreaterThanOrEqual(7);
+      for (const action of routedActions) {
+        const expectedOwner = productAgentIdForActionClass(
+          action.action_class,
+        );
+        expect(expectedOwner).toBeDefined();
+        expect(action).toMatchObject({
+          assigned_agent_id: expectedOwner,
+          assignment_agent_id: expectedOwner,
+        });
+        expect(action.assigned_agent_id).not.toBe(
+          configuration.value.specialist.id,
+        );
+      }
     } finally {
       await runtime.stop();
       await new Promise<void>((resolve) =>

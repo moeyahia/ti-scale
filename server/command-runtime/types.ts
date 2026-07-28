@@ -43,6 +43,9 @@ export interface PlanningMission {
   readonly guidedReconnaissance?: GuidedReconnaissanceSelection;
   /** Optional persisted reviewed Windows/identity first-step intent. */
   readonly guidedWindowsIdentity?: GuidedMissionRequest["guidedWindowsIdentity"];
+  /** Optional persisted pinned local ExploitDB first-step intent. */
+  readonly guidedLocalExploitIntelligence?:
+    GuidedMissionRequest["guidedLocalExploitIntelligence"];
 }
 
 export interface PlanningRun {

@@ -1,5 +1,5 @@
 import type { RuntimeProviderManifest } from "../domain";
-import { PRODUCT_AGENT_REGISTRY } from "../agents";
+import { COMMANDER_AGENT_DEFINITION, COMMANDER_AGENT_ID } from "../agents";
 import type { OpenRouterReadinessRuntimeSnapshot } from "../providers/openrouter";
 import type { ProviderReadiness } from "./RuntimeReadiness";
 import type { RuntimeProjectionInput } from "./RuntimeProjectionService";
@@ -86,36 +86,41 @@ function planningAgentManifests(
     providerId: OPENROUTER_RUNTIME_PROVIDER_ID,
     modelId: state.requestedModel,
   } as const;
-  for (const product of PRODUCT_AGENT_REGISTRY) {
-    const actionClassIds = product.capabilities.flatMap(({ actionClassIds }) => actionClassIds);
-    const index = agents.findIndex(({ id }) => id === product.id);
-    if (index >= 0) {
-      const current = agents[index]!;
-      const alreadyBound = current.modelRefs.some(
-        (reference) =>
-          reference.providerId === modelRef.providerId
-          && reference.modelId === modelRef.modelId,
+  const index = agents.findIndex(({ id }) => id === COMMANDER_AGENT_ID);
+  if (index >= 0) {
+    const current = agents[index]!;
+    if (
+      current.available
+      || current.capabilityIds.length > 0
+      || (current.actionClassIds?.length ?? 0) > 0
+      || current.toolIds.length > 0
+      || (current.deliverableIds?.length ?? 0) > 0
+    ) {
+      throw new Error(
+        "OpenRouter Commander manifest collides with executable specialist authority",
       );
-      agents[index] = {
-        ...current,
-        actionClassIds: [...new Set([
-          ...(current.actionClassIds ?? []),
-          ...actionClassIds,
-        ])],
-        modelRefs: alreadyBound ? current.modelRefs : [...current.modelRefs, modelRef],
-      };
-      continue;
     }
-    // This is a provider-planning definition only. It deliberately remains
-    // unavailable as an execution agent and has no tool or capability grant.
+    const alreadyBound = current.modelRefs.some(
+      (reference) =>
+        reference.providerId === modelRef.providerId
+        && reference.modelId === modelRef.modelId,
+    );
+    agents[index] = {
+      ...current,
+      actionClassIds: [],
+      modelRefs: alreadyBound ? current.modelRefs : [...current.modelRefs, modelRef],
+    };
+  } else {
+    // Commander may use the provider for planning and explanation only. It
+    // remains unavailable as an execution adapter and receives no tool,
+    // action-class, or deliverable authority.
     agents.push({
-      id: product.id,
-      label: product.displayName,
+      id: COMMANDER_AGENT_ID,
+      label: COMMANDER_AGENT_DEFINITION.displayName,
       available: false,
       capabilityIds: [],
-      actionClassIds,
+      actionClassIds: [],
       toolIds: [],
-      ...(product.deliverableIds ? { deliverableIds: product.deliverableIds } : {}),
       modelRefs: [modelRef],
     });
   }

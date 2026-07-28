@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { COMMANDER_AGENT_ID } from "../../agents";
 import { BrainContextService } from "../../brain-runtime";
 import {
   ControlPlaneLeaseError,
@@ -36,6 +37,17 @@ function modelManifests(): RuntimeSourceManifests {
     tools: [],
     mcpServers: [],
     agents: [{
+      id: COMMANDER_AGENT_ID,
+      label: COMMANDER_AGENT_ID,
+      available: true,
+      capabilityIds: [],
+      actionClassIds: [],
+      toolIds: [],
+      modelRefs: [{
+        providerId: "provider-branch",
+        modelId: "model-branch-planner",
+      }],
+    }, {
       id: "ReconScout",
       label: "ReconScout",
       available: true,
@@ -45,9 +57,6 @@ function modelManifests(): RuntimeSourceManifests {
       modelRefs: [{
         providerId: "provider-branch",
         modelId: "model-branch",
-      }, {
-        providerId: "provider-branch",
-        modelId: "model-branch-planner",
       }],
     }],
     providers: [{
@@ -140,7 +149,7 @@ const providerPlanningRequest: AutonomousMissionRequest = {
     ...request.contract,
     planningSelection: {
       route: "provider_advisory",
-      agentId: "ReconScout",
+      agentId: COMMANDER_AGENT_ID,
       primaryConfigurationId: BRANCH_PLANNING_CONFIGURATION_ID,
       fallbackConfigurationId: null,
       enforcementMode: "advisor_only",
@@ -180,6 +189,18 @@ function setup() {
       '2.4', ?, ?, ?
     )
   `).run(NOW, NOW, NOW);
+  database.prepare(`
+    INSERT INTO agents (
+      id, role, display_name, status, provider_policy_json, tool_policy_json,
+      configuration_json, version, last_heartbeat_at, created_at, updated_at
+    ) VALUES (
+      ?, 'mission-planning', 'Commander', 'available',
+      '{"defaultProvider":"provider-branch"}',
+      '{"allowedTools":[],"deniedTools":[],"approvalRequiredTools":[]}',
+      '{"userFacing":true,"productAgent":true,"executionAuthority":"none"}',
+      '2.4', ?, ?, ?
+    )
+  `).run(COMMANDER_AGENT_ID, NOW, NOW, NOW);
   database.prepare(`
     INSERT INTO agent_capabilities (agent_id, capability, source, enabled, metadata_json)
     VALUES ('ReconScout', 'nmap', 'live-route-attestation', 1, ?)
@@ -721,33 +742,38 @@ describe("AutonomousBranchService", () => {
         hash: context.contract.hash,
       });
       expect(database.prepare(`
-        SELECT run_id, assignment_purpose, primary_configuration_id
+        SELECT run_id, agent_id, assignment_purpose, primary_configuration_id
         FROM agent_model_assignments
-        WHERE agent_id = 'ReconScout' AND run_id IN (?, ?)
-        ORDER BY run_id, assignment_purpose
+        WHERE agent_id IN ('Commander', 'ReconScout') AND run_id IN (?, ?)
+        ORDER BY run_id, agent_id, assignment_purpose
       `).all(initial.run.id, branch.run.id)).toEqual([
         {
           run_id: initial.run.id,
-          assignment_purpose: "execution",
-          primary_configuration_id: BRANCH_MODEL_CONFIGURATION_ID,
+          agent_id: COMMANDER_AGENT_ID,
+          assignment_purpose: "planning",
+          primary_configuration_id: BRANCH_PLANNING_CONFIGURATION_ID,
         },
         {
           run_id: initial.run.id,
-          assignment_purpose: "planning",
-          primary_configuration_id: BRANCH_PLANNING_CONFIGURATION_ID,
-        },
-        {
-          run_id: branch.run.id,
+          agent_id: "ReconScout",
           assignment_purpose: "execution",
           primary_configuration_id: BRANCH_MODEL_CONFIGURATION_ID,
         },
         {
           run_id: branch.run.id,
+          agent_id: COMMANDER_AGENT_ID,
           assignment_purpose: "planning",
           primary_configuration_id: BRANCH_PLANNING_CONFIGURATION_ID,
         },
+        {
+          run_id: branch.run.id,
+          agent_id: "ReconScout",
+          assignment_purpose: "execution",
+          primary_configuration_id: BRANCH_MODEL_CONFIGURATION_ID,
+        },
       ].sort((left, right) =>
         left.run_id.localeCompare(right.run_id)
+        || left.agent_id.localeCompare(right.agent_id)
         || left.assignment_purpose.localeCompare(right.assignment_purpose)));
     } finally {
       database.close();

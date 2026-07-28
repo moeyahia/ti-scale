@@ -16,12 +16,17 @@ describe("shared recovery controls", () => {
         <ErrorPanel
           error={new Error("A bounded operation failed")}
           retryControlId="agent-model-conflict-retry"
+          retryLabel="Retry agent model configuration"
           onRetry={() => undefined}
         />
       </form>,
     );
 
-    expect(markup).toContain('<button class="os-button os-button--secondary " data-ti-actuator="secondary" type="button" data-control-id="agent-model-conflict-retry">');
+    expect(markup).toContain('type="button"');
+    expect(markup).toContain('id="agent-model-conflict-retry"');
+    expect(markup).toContain('data-testid="agent-model-conflict-retry"');
+    expect(markup).toContain('data-control-id="agent-model-conflict-retry"');
+    expect(markup).toContain('aria-label="Retry agent model configuration"');
     expect(markup).toContain('<span class="os-button__label">Try again</span>');
     expect(markup).toContain('<span class="os-button__mechanism" aria-hidden="true"><i></i><i></i><i></i></span>');
     expect(markup).not.toContain('type="submit"');

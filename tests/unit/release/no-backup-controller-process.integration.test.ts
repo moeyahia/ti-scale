@@ -46,13 +46,18 @@ interface FixtureState {
 }
 
 interface FixtureReceipt {
+  readonly schemaVersion:
+    | "ti-scale.no-backup-preview-release-receipt.v1"
+    | "ti-scale.no-backup-forward-release-receipt.v2";
   readonly status: string;
   readonly backupPolicy: "none";
-  readonly cutoverEligible: false;
+  readonly cutoverEligible?: false;
+  readonly deploymentMode?: "current_service";
+  readonly releaseObserver?: typeof STANDALONE_RELEASE_OBSERVER;
   readonly rollbackCapability: "none_after_schema_commit";
-  readonly sourceSchema: 47;
-  readonly targetSchema: 60;
-  readonly legacyBefore: FixtureServiceIdentity;
+  readonly sourceSchema: number;
+  readonly targetSchema: number;
+  readonly legacyBefore?: FixtureServiceIdentity;
   readonly legacyAfter?: FixtureServiceIdentity;
   readonly schemaCommitted?: boolean;
   readonly forwardRecoveryRequired?: boolean;
@@ -65,6 +70,8 @@ interface FixtureReceipt {
 
 interface FixtureConfiguration {
   readonly releaseId: string;
+  readonly sourceSchema: number;
+  readonly targetSchema: number;
   readonly statePath: string;
   readonly legacyIdentityPath: string;
   readonly hostBootIdPath: string;
@@ -86,6 +93,8 @@ interface BoundaryReceipt {
     | "pre_schema"
     | "post_schema"
     | `schema_${number}`
+    | "target_precommit"
+    | "target_committed"
     | "target_receipt_prepared"
     | "target_receipt_written"
     | "target_receipt_committed"
@@ -100,6 +109,12 @@ type CrashBoundary = BoundaryReceipt["boundary"] | "none";
 
 const SOURCE_SCHEMA = 47;
 const TARGET_SCHEMA = 60;
+const STANDALONE_RELEASE_OBSERVER = Object.freeze({
+  schemaVersion: "ti-scale.release-observer.v1" as const,
+  mode: "standalone" as const,
+  scope: "ti_scale_only" as const,
+  externalServiceDependency: "none" as const,
+});
 const FORWARD_SCHEMAS = Object.freeze(
   Array.from(
     { length: TARGET_SCHEMA - SOURCE_SCHEMA },
@@ -182,7 +197,16 @@ async function waitForFile(path: string, timeoutMs = 8_000): Promise<void> {
   if (!existsSync(path)) throw new Error(`Timed out waiting for ${path}`);
 }
 
-function setupFixture(suffix: string): {
+function setupFixture(
+  suffix: string,
+  schemas: {
+    readonly sourceSchema: number;
+    readonly targetSchema: number;
+  } = {
+    sourceSchema: SOURCE_SCHEMA,
+    targetSchema: TARGET_SCHEMA,
+  },
+): {
   readonly root: string;
   readonly configurationPath: string;
   readonly configuration: FixtureConfiguration;
@@ -219,7 +243,7 @@ function setupFixture(suffix: string): {
   const legacyIdentityPath = join(root, "legacy-service.json");
   const hostBootIdPath = join(root, "host-boot-id");
   const initialState: FixtureState = {
-    schema: SOURCE_SCHEMA,
+    schema: schemas.sourceSchema,
     application: "source-application",
     staticRelease: "source-static",
     tiScale: {
@@ -254,7 +278,7 @@ function setupFixture(suffix: string): {
     migrateDatabase(
       leaseDatabase,
       DATABASE_MIGRATIONS
-        .slice(0, SOURCE_SCHEMA)
+        .slice(0, schemas.sourceSchema)
         .map(withoutBackupRequirement),
     );
   } finally {
@@ -262,6 +286,8 @@ function setupFixture(suffix: string): {
   }
   const configuration: FixtureConfiguration = {
     releaseId: `release-${suffix}`,
+    sourceSchema: schemas.sourceSchema,
+    targetSchema: schemas.targetSchema,
     statePath,
     legacyIdentityPath,
     hostBootIdPath,
@@ -398,7 +424,7 @@ function receiptMutationCommitment(
     | "terminal_receipt_commit",
 ): {
   readonly receiptSha256: string;
-  readonly legacyIdentitySha256: string;
+  readonly observerProofSha256: string;
 } {
   const record = readFunctionalReleaseTransactionJournal(
     configuration.journalDirectory,
@@ -407,12 +433,16 @@ function receiptMutationCommitment(
     candidate.mutation === mutation
   );
   const receiptSha256 = record?.detail?.receiptSha256;
-  const legacyIdentitySha256 = record?.detail?.legacyIdentitySha256;
+  const proofField = configuration.sourceSchema === 60 &&
+      configuration.targetSchema === 60
+    ? "observerProofSha256"
+    : "legacyIdentitySha256";
+  const observerProofSha256 = record?.detail?.[proofField];
   expect(receiptSha256).toMatch(/^[a-f0-9]{64}$/u);
-  expect(legacyIdentitySha256).toMatch(/^[a-f0-9]{64}$/u);
+  expect(observerProofSha256).toMatch(/^[a-f0-9]{64}$/u);
   return {
     receiptSha256: String(receiptSha256),
-    legacyIdentitySha256: String(legacyIdentitySha256),
+    observerProofSha256: String(observerProofSha256),
   };
 }
 
@@ -420,7 +450,7 @@ function assertTerminalHashes(
   configuration: FixtureConfiguration,
   receiptCommitment: {
     readonly receiptSha256: string;
-    readonly legacyIdentitySha256: string;
+    readonly observerProofSha256: string;
   },
   currentLegacy: FixtureServiceIdentity,
 ): void {
@@ -429,10 +459,27 @@ function assertTerminalHashes(
   ).terminal;
   expect(terminal?.detail?.receiptSha256)
     .toBe(receiptCommitment.receiptSha256);
+  if (
+    configuration.sourceSchema === 60 &&
+    configuration.targetSchema === 60
+  ) {
+    const observerSha256 = releaseTransactionSha256(
+      STANDALONE_RELEASE_OBSERVER,
+    );
+    expect(terminal?.detail?.deploymentMode).toBe("current_service");
+    expect(terminal?.detail?.observerProofSha256)
+      .toBe(receiptCommitment.observerProofSha256);
+    expect(terminal?.detail?.receiptObserverProofSha256)
+      .toBe(receiptCommitment.observerProofSha256);
+    expect(terminal?.detail?.reconciliationObserverProofSha256)
+      .toBe(observerSha256);
+    expect(terminal?.detail?.legacyIdentitySha256).toBeUndefined();
+    return;
+  }
   expect(terminal?.detail?.legacyIdentitySha256)
-    .toBe(receiptCommitment.legacyIdentitySha256);
+    .toBe(receiptCommitment.observerProofSha256);
   expect(terminal?.detail?.receiptLegacyIdentitySha256)
-    .toBe(receiptCommitment.legacyIdentitySha256);
+    .toBe(receiptCommitment.observerProofSha256);
   expect(terminal?.detail?.reconciliationLegacyIdentitySha256)
     .toBe(releaseTransactionSha256(currentLegacy));
 }
@@ -449,16 +496,32 @@ function assertCommonTerminalProof(
   expect(receipt).toMatchObject({
     status: expectedStatus,
     backupPolicy: "none",
-    cutoverEligible: false,
     rollbackCapability: "none_after_schema_commit",
-    sourceSchema: SOURCE_SCHEMA,
-    targetSchema: TARGET_SCHEMA,
+    sourceSchema: configuration.sourceSchema,
+    targetSchema: configuration.targetSchema,
     forwardRecoveryRequired: false,
     backupPayloadInventoryUnchanged: true,
   });
-  expect(receipt.legacyAfter).toEqual(
-    expectedLegacyAfter ?? receipt.legacyBefore,
-  );
+  const forwardV2 = configuration.sourceSchema === 60 &&
+    configuration.targetSchema === 60;
+  if (forwardV2) {
+    expect(receipt).toMatchObject({
+      schemaVersion: "ti-scale.no-backup-forward-release-receipt.v2",
+      deploymentMode: "current_service",
+      releaseObserver: STANDALONE_RELEASE_OBSERVER,
+    });
+    expect(receipt.cutoverEligible).toBeUndefined();
+    expect(receipt.legacyBefore).toBeUndefined();
+    expect(receipt.legacyAfter).toBeUndefined();
+  } else {
+    expect(receipt).toMatchObject({
+      schemaVersion: "ti-scale.no-backup-preview-release-receipt.v1",
+      cutoverEligible: false,
+    });
+    expect(receipt.legacyAfter).toEqual(
+      expectedLegacyAfter ?? receipt.legacyBefore,
+    );
+  }
   expect(sha256(configuration.legacyIdentityPath)).toBe(legacySha256);
 
   const inventoryAfter = captureNoBackupPayloadInventory(
@@ -476,10 +539,45 @@ function assertCommonTerminalProof(
   );
   expect(journal.terminal?.detail?.outcome).toBe(expectedOutcome);
   expect(journal.terminal?.detail?.backupPolicy).toBe("none");
+  if (forwardV2) {
+    const observerSha256 = releaseTransactionSha256(
+      STANDALONE_RELEASE_OBSERVER,
+    );
+    const receiptRecords = journal.records.filter((record) =>
+      record.mutation === "deployment_receipt_commit" ||
+      record.mutation === "deployment_receipt_restore" ||
+      record.mutation === "terminal_receipt_commit"
+    );
+    expect(receiptRecords.length).toBeGreaterThanOrEqual(2);
+    for (const record of receiptRecords) {
+      expect(record.detail?.observerProofSha256).toBe(observerSha256);
+      expect(record.detail?.legacyIdentitySha256).toBeUndefined();
+    }
+    expect(journal.terminal?.detail).toMatchObject({
+      deploymentMode: "current_service",
+      observerProofSha256: observerSha256,
+      receiptObserverProofSha256: observerSha256,
+      reconciliationObserverProofSha256: observerSha256,
+    });
+    expect(journal.terminal?.detail?.legacyIdentitySha256).toBeUndefined();
+  }
+  expect(journal.binding.identity).toMatchObject(
+    forwardV2
+      ? {
+        deploymentKind: "no_backup_forward_v2",
+        deploymentMode: "current_service",
+        releaseObserver: STANDALONE_RELEASE_OBSERVER,
+      }
+      : {
+        deploymentKind: "no_backup_preview_v1",
+      },
+  );
   expect(existsSync(configuration.maintenanceMarkerPath)).toBe(false);
   expect(existsSync(configuration.startupMutationBarrierPath)).toBe(false);
   expect(sqliteSchema(configuration.leaseDatabasePath)).toBe(
-    expectedStatus === "deployed" ? TARGET_SCHEMA : SOURCE_SCHEMA,
+    expectedStatus === "deployed"
+      ? configuration.targetSchema
+      : configuration.sourceSchema,
   );
   assertNoMigrationCopyArtifacts(configuration.leaseDatabasePath);
   assertNoAuthorizationResidue(root, configuration.authorizationPath);
@@ -535,6 +633,138 @@ describe("full no-backup controller process recovery", () => {
       "deployed",
     );
     expect(receipt.schemaCommitted).toBe(true);
+  }, 30_000);
+
+  test("cleanly deploys an exact schema-60 source to a new schema-60 target", async () => {
+    const fixture = setupFixture("clean-60-to-60", {
+      sourceSchema: 60,
+      targetSchema: 60,
+    });
+    const deploy = spawnController(
+      fixture.configurationPath,
+      "deploy",
+      "none",
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      deploy.exited,
+      new Response(deploy.stdout).text(),
+      new Response(deploy.stderr).text(),
+    ]);
+    children.delete(deploy);
+    if (exitCode !== 0) {
+      throw new Error(
+        `Clean same-schema deploy exited ${String(exitCode)}: ${stderr || stdout}`,
+      );
+    }
+    expect(stdout).toBe("");
+    expect(stderr).toBe("");
+    expect(readJson<FixtureState>(fixture.configuration.statePath))
+      .toMatchObject({
+        schema: 60,
+        application: "target-application",
+        staticRelease: "target-static",
+        tiScale: { active: true, runtime: "target" },
+      });
+    const receipt = assertCommonTerminalProof(
+      fixture.root,
+      fixture.configuration,
+      fixture.legacySha256,
+      "deployed",
+      "deployed",
+    );
+    expect(receipt.schemaCommitted).toBe(true);
+  }, 30_000);
+
+  test("same-schema SIGKILL before target commitment restores source pointers", async () => {
+    const fixture = setupFixture("same-schema-target-precommit", {
+      sourceSchema: 60,
+      targetSchema: 60,
+    });
+    const deploy = spawnController(
+      fixture.configurationPath,
+      "deploy",
+      "target_precommit",
+    );
+    const boundary = await killAtBoundary(fixture.configuration, deploy);
+    expect(boundary.boundary).toBe("target_precommit");
+    expect(boundary.state).toMatchObject({
+      schema: 60,
+      application: "target-application",
+      staticRelease: "target-static",
+      tiScale: { active: false, runtime: "source" },
+    });
+    expect(functionalReleaseTargetCommitRecord(
+      readFunctionalReleaseTransactionJournal(
+        fixture.configuration.journalDirectory,
+      ),
+    )).toBeUndefined();
+
+    await recoverInFreshProcess(
+      fixture.configurationPath,
+      boundary.controllerPid,
+      fixture.configuration,
+    );
+
+    expect(readJson<FixtureState>(fixture.configuration.statePath))
+      .toMatchObject({
+        schema: 60,
+        application: "source-application",
+        staticRelease: "source-static",
+        tiScale: { active: true, runtime: "source" },
+      });
+    assertCommonTerminalProof(
+      fixture.root,
+      fixture.configuration,
+      fixture.legacySha256,
+      "failed_predeploy_restored",
+      "predeploy_restored",
+    );
+  }, 30_000);
+
+  test("same-schema SIGKILL after target commitment completes target forward", async () => {
+    const fixture = setupFixture("same-schema-target-committed", {
+      sourceSchema: 60,
+      targetSchema: 60,
+    });
+    const deploy = spawnController(
+      fixture.configurationPath,
+      "deploy",
+      "target_committed",
+    );
+    const boundary = await killAtBoundary(fixture.configuration, deploy);
+    expect(boundary.boundary).toBe("target_committed");
+    expect(boundary.state).toMatchObject({
+      schema: 60,
+      application: "target-application",
+      staticRelease: "target-static",
+      tiScale: { active: false, runtime: "source" },
+    });
+    expect(functionalReleaseTargetCommitRecord(
+      readFunctionalReleaseTransactionJournal(
+        fixture.configuration.journalDirectory,
+      ),
+    )).toBeDefined();
+
+    await recoverInFreshProcess(
+      fixture.configurationPath,
+      boundary.controllerPid,
+      fixture.configuration,
+    );
+
+    expect(readJson<FixtureState>(fixture.configuration.statePath))
+      .toMatchObject({
+        schema: 60,
+        application: "target-application",
+        staticRelease: "target-static",
+        tiScale: { active: true, runtime: "target" },
+      });
+    assertCommonTerminalProof(
+      fixture.root,
+      fixture.configuration,
+      fixture.legacySha256,
+      "deployed",
+      "deployed",
+    );
   }, 30_000);
 
   test("SIGKILL before schema commit restores the exact source in a new process", async () => {
@@ -900,7 +1130,7 @@ describe("full no-backup controller process recovery", () => {
     expect(terminal?.detail?.restoredReceiptSha256)
       .toBe(restored.receiptSha256);
     expect(terminal?.detail?.restoredLegacyIdentitySha256)
-      .toBe(restored.legacyIdentitySha256);
+      .toBe(restored.observerProofSha256);
   }, 30_000);
 
   test("source terminal receipt preparation survives a second SIGKILL without recomputation", async () => {

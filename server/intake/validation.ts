@@ -13,10 +13,14 @@ import {
 import { MissionIntakeValidationError } from "./MissionIntakeService";
 import type { MissionIntakeRequest, MissionIntakeTargetInput } from "./types";
 import { parseGuidedReconnaissanceSelection } from "../missions/GuidedReconnaissance";
+import { parseGuidedWindowsIdentitySelection } from "./GuidedWindowsIdentityRegistry";
 import {
   type AgentModelAssignmentSelection,
   type AutonomousPlanningSelection,
 } from "../model-config";
+import {
+  parseGuidedLocalExploitIntelligenceSelection,
+} from "../local-exploit-intelligence/GuidedLocalExploitIntelligence";
 
 type RecordValue = Record<string, unknown>;
 
@@ -360,6 +364,32 @@ export function validateMissionIntakeRequest(value: unknown): MissionIntakeReque
   if (input.guidedReconnaissance !== undefined && journey !== "guided") {
     issues.push("guidedReconnaissance is available only for the Guided journey.");
   }
+  const guidedWindowsIdentity =
+    parseGuidedWindowsIdentitySelection(input.guidedWindowsIdentity);
+  issues.push(...guidedWindowsIdentity.issues);
+  if (input.guidedWindowsIdentity !== undefined && journey !== "guided") {
+    issues.push("guidedWindowsIdentity is available only for the Guided journey.");
+  }
+  if (guidedWindowsIdentity.selection && guidedReconnaissance.selection) {
+    issues.push("Choose either guidedReconnaissance or guidedWindowsIdentity for the first represented Guided step, not both.");
+  }
+  const guidedLocalExploitIntelligence =
+    parseGuidedLocalExploitIntelligenceSelection(
+      input.guidedLocalExploitIntelligence,
+    );
+  issues.push(...guidedLocalExploitIntelligence.issues);
+  if (
+    input.guidedLocalExploitIntelligence !== undefined
+    && journey !== "guided"
+  ) {
+    issues.push("guidedLocalExploitIntelligence is available only for the Guided journey.");
+  }
+  if (
+    guidedLocalExploitIntelligence.selection
+    && (guidedReconnaissance.selection || guidedWindowsIdentity.selection)
+  ) {
+    issues.push("Choose exactly one first represented Guided step: reconnaissance, Windows/identity, or local ExploitDB intelligence.");
+  }
   const title = optionalString(input.title, "title", issues, 240);
   const objective = optionalString(input.objective, "objective", issues);
   const engagementId = optionalString(input.engagementId, "engagementId", issues, 240);
@@ -404,6 +434,13 @@ export function validateMissionIntakeRequest(value: unknown): MissionIntakeReque
     ...(explanationDepth ? { explanationDepth } : {}),
     ...(executionPreference ? { executionPreference } : {}),
     ...(guidedReconnaissance.selection ? { guidedReconnaissance: guidedReconnaissance.selection } : {}),
+    ...(guidedWindowsIdentity.selection ? {
+      guidedWindowsIdentity: guidedWindowsIdentity.selection,
+    } : {}),
+    ...(guidedLocalExploitIntelligence.selection ? {
+      guidedLocalExploitIntelligence:
+        guidedLocalExploitIntelligence.selection,
+    } : {}),
     ...(specialistAgentIds ? { specialistAgentIds } : {}),
     ...(modelAssignments ? { agentModelAssignments: modelAssignments } : {}),
     ...(planningSelection ? { planningSelection } : {}),

@@ -32,9 +32,9 @@ writable, owner-drifted, oversized, or changing configuration file.
 
 The reviewed v2 manifest adds these independently bounded classes:
 
-- the separate `/home/chillspwn/htb/boxes` engagement tree;
+- a separately configured secondary engagement tree;
 - runtime runs, sessions, events, model logs, memory, and training state;
-- Hermes sessions plus Markdown conversations and memory notes;
+- orchestration sessions plus Markdown conversations and memory notes;
 - Claude project JSONL history;
 - Grok JSON/JSONL sessions and bounded logs;
 - Codex JSONL sessions that fit the canonical source-size boundary.

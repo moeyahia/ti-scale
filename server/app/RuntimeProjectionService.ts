@@ -8,7 +8,7 @@ import type {
 import type { RuntimeSourceManifests } from "../domain";
 import type { McpCapabilityAttestation } from "../mcp";
 import {
-  PRODUCT_AGENT_IDS,
+  PRODUCT_ROSTER_AGENT_IDS,
   projectProductAgentRoster,
 } from "../agents";
 
@@ -206,6 +206,11 @@ export class RuntimeProjectionService {
     const input = generation ?? this.read();
     const projectedAgents = projectProductAgentRoster({
       agents: input.agents,
+      commanderReady:
+        input.readiness.actionBoundaryActive
+        && input.readiness.delegationEnforced
+        && input.readiness.noHandsCommanderEnforced
+        && input.readiness.directCommanderToolsDenied,
       ...(input.capabilityManifests
         ? { capabilityManifests: input.capabilityManifests }
         : {}),
@@ -264,8 +269,8 @@ export class RuntimeProjectionService {
           json('false')
         ),
         updated_at = ?
-        WHERE id NOT IN (${[...PRODUCT_AGENT_IDS].map(() => "?").join(",")})
-      `).run(projectedAt, ...PRODUCT_AGENT_IDS);
+        WHERE id NOT IN (${[...PRODUCT_ROSTER_AGENT_IDS].map(() => "?").join(",")})
+      `).run(projectedAt, ...PRODUCT_ROSTER_AGENT_IDS);
 
       for (const agent of projectedAgents) {
         const id = identifier(agent.id, "agent ID");
@@ -290,7 +295,7 @@ export class RuntimeProjectionService {
           projectedAt,
           projectedAt,
         );
-        if (PRODUCT_AGENT_IDS.has(id)) {
+        if (PRODUCT_ROSTER_AGENT_IDS.has(id)) {
           // A product row aggregates changing runtime adapters. Delete its
           // prior generation completely so withdrawn routes cannot remain
           // enabled under an old source label.

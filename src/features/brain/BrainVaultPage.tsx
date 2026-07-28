@@ -82,6 +82,28 @@ export default function BrainVaultPage() {
   }>({});
   const snapshot = vault.data;
   const preset = attackVaultPreset.data;
+  const operationRetryControlId = state.errorSource === "health"
+    ? "brain-vault-custom-health-retry"
+    : state.errorSource === "connect"
+      ? "brain-vault-connect-retry"
+      : state.errorSource === "repair"
+        ? "brain-vault-repair-retry"
+        : state.errorSource === "reindex"
+          ? "brain-vault-reindex-retry"
+          : state.errorSource === "reconcile"
+            ? "brain-vault-reconcile-retry"
+            : undefined;
+  const operationRetryLabel = state.errorSource === "health"
+    ? "Retry custom Vault path health check"
+    : state.errorSource === "connect"
+      ? "Retry Vault connection"
+      : state.errorSource === "repair"
+        ? "Retry Vault repair"
+        : state.errorSource === "reindex"
+          ? "Retry Vault reindex"
+          : state.errorSource === "reconcile"
+            ? "Retry Vault status refresh"
+            : undefined;
   useEffect(() => {
     if (!includeOperatorProfile || preset?.operatorProfileAvailability.available !== false) return;
     // The authenticated operator may remove or expire the last eligible
@@ -382,9 +404,20 @@ export default function BrainVaultPage() {
       <PageHeader eyebrow="Human-readable memory projection" title="Obsidian Vault" description="A versioned Markdown, YAML, and [[wikilink]] projection. SQLite remains canonical; filesystem conflicts never overwrite operator edits silently." />
       <BrainNav />
       {vault.isLoading && <LoadingPanel label="Checking Obsidian vault health and conflicts" />}
-      {vault.error && !vault.data && <ErrorPanel error={vault.error} onRetry={vault.refresh} />}
+      {vault.error && !vault.data && <ErrorPanel
+        error={vault.error}
+        onRetry={vault.refresh}
+        retryControlId="brain-vault-snapshot-retry"
+        retryLabel="Retry Vault snapshot"
+      />}
       {attackVaultPreset.isLoading && <LoadingPanel label="Preparing the Attack Knowledge Vault policy preview" />}
-      {attackVaultPreset.error && !preset && <ErrorPanel title="Attack Knowledge Vault preview is unavailable" error={attackVaultPreset.error} onRetry={attackVaultPreset.refresh} />}
+      {attackVaultPreset.error && !preset && <ErrorPanel
+        title="Attack Knowledge Vault preview is unavailable"
+        error={attackVaultPreset.error}
+        onRetry={attackVaultPreset.refresh}
+        retryControlId="brain-vault-preset-preview-retry"
+        retryLabel="Retry Attack Knowledge Vault preview"
+      />}
       {preset && <Card className="brain-vault-connect brain-attack-vault-preset">
         <div className="os-section-heading"><div><p className="os-eyebrow">Recommended reusable knowledge projection</p><h2>{preset.displayName}</h2></div><StatusPill status={preset.activePreset ? "connected" : preset.enabled ? "review" : "disabled"} /></div>
         <p>Build a reusable library around technology versions, topology patterns, vulnerabilities, attack procedures, scripts, outcomes, hazards, and recoveries. Operational records stay in SQLite and are not copied into this Vault.</p>
@@ -414,7 +447,13 @@ export default function BrainVaultPage() {
         {preset.activePreset && !scopeUpgradeSelected && !operatorProfileUpgradeSelected && <div className="os-state-panel" role="status"><div><strong>Attack Knowledge Vault is active</strong><p>{preset.activePreset.includeOperatorProfile ? "This exact connection includes verified and explicitly confirmed reusable attack knowledge plus the separately consented Operator Preferences and Profile in 10 Operator." : preset.activePreset.includeConfirmed ? "This exact connection includes verified and explicitly confirmed reusable attack knowledge. Operator Preferences remain private unless you select and separately acknowledge the profile option above." : "This exact connection currently includes verified reusable attack knowledge. Select the confirmed option above to review a same-connection scope expansion."}</p></div></div>}
         {presetHealth?.vaultPath === preset.vaultPath && <div className="os-state-panel" role="status"><div><strong>Preset path round-trip verified</strong><p>Write, read, rename, and delete passed at {formatBrainDate(presetHealth.checkedAt)}. Activation repeats this proof.</p></div></div>}
         {presetState.message && <div className="os-state-panel" role="status"><div><strong>Attack Knowledge Vault update</strong><p>{presetState.message}</p></div></div>}
-        {presetState.error && <ErrorPanel title={presetState.errorSource === "health" ? "Preset path health check failed" : presetState.errorSource === "amend" ? "Attack Knowledge Vault scope amendment failed" : "Attack Knowledge Vault activation failed"} error={presetState.error} onRetry={presetState.errorSource === "health" ? testAttackKnowledgeVaultHealth : undefined} />}
+        {presetState.error && <ErrorPanel
+          title={presetState.errorSource === "health" ? "Preset path health check failed" : presetState.errorSource === "amend" ? "Attack Knowledge Vault scope amendment failed" : "Attack Knowledge Vault activation failed"}
+          error={presetState.error}
+          onRetry={presetState.errorSource === "health" ? testAttackKnowledgeVaultHealth : undefined}
+          retryControlId="brain-vault-preset-health-retry"
+          retryLabel="Retry preset path health check"
+        />}
       </Card>}
       {snapshot && <>
         {activeConnections.length > 0 ? <div className="brain-vault-active" role="region" aria-labelledby="active-obsidian-vaults-heading">
@@ -472,7 +511,7 @@ export default function BrainVaultPage() {
         <Card className="brain-conflicts"><div className="os-section-heading"><div><p className="os-eyebrow">Never silently overwritten</p><h2>Vault conflicts</h2></div><span className="os-count">{snapshot.conflicts.filter((item) => item.status === "open").length}</span></div>{snapshot.conflicts.filter((item) => item.status === "open").length === 0 ? <p className="os-muted">No concurrent database and vault edits require resolution.</p> : <div className="brain-conflict-list">{snapshot.conflicts.filter((item) => item.status === "open").map((conflict) => <article key={conflict.id}><header><div><strong>{conflict.relativePath}</strong><small>Detected {formatBrainDate(conflict.detectedAt)}</small></div><StatusPill status="conflict" /></header>{(conflict.databaseTextRedacted || conflict.vaultTextRedacted) && <div className="brain-conflict-diff"><section><h3>Canonical database</h3><pre>{conflict.databaseTextRedacted ?? "Preview not returned by the service."}</pre></section><section><h3>Obsidian vault</h3><pre>{conflict.vaultTextRedacted ?? "Preview not returned by the service."}</pre></section></div>}<p>Choose which version becomes canonical. The losing version remains represented by audit and version history according to policy.</p><div><Button variant="secondary" onClick={() => run(`resolve-db:${conflict.id}`, () => resolveVaultConflict(conflict.id, "database"), "Conflict resolved using the canonical database version.")} disabled={Boolean(state.busy)}>Keep database version</Button><Button variant="secondary" onClick={() => run(`resolve-vault:${conflict.id}`, () => resolveVaultConflict(conflict.id, "vault"), "Conflict resolved using the operator's vault version.")} disabled={Boolean(state.busy)}>Keep vault version</Button></div></article>)}</div>}</Card>
       </>}
       {(state.busy?.startsWith("repair:") || state.busy?.startsWith("reindex:")) && <div className="os-state-panel" role="status"><div><strong>{state.busy.startsWith("repair:") ? "Repairing the existing Vault" : "Reindexing managed Vault notes"}</strong><p>Validating the current path and round-trip health, then processing a bounded note set. SQLite remains canonical and open conflicts stay untouched.</p></div></div>}
-      {recoveryResult && <Card className="brain-vault-recovery-result"><div className="os-section-heading"><div><p className="os-eyebrow">Latest recovery receipt</p><h2>{recoveryResult.operation === "repair" ? "Vault repair" : "Vault reindex"}</h2></div><StatusPill status={recoveryResult.status} /></div><p>{recoveryResult.message}</p><dl><div><dt>Processed</dt><dd>{recoveryResult.progress.processed}</dd></div><div><dt>Indexed</dt><dd>{recoveryResult.counts.indexed}</dd></div><div><dt>Conflicts preserved</dt><dd>{recoveryResult.counts.conflictsPreserved}</dd></div><div><dt>Quarantined</dt><dd>{recoveryResult.counts.quarantined}</dd></div><div><dt>Missing</dt><dd>{recoveryResult.counts.missing}</dd></div><div><dt>Errors</dt><dd>{recoveryResult.counts.errors}</dd></div></dl>{recoveryResult.issues.length > 0 && <details><summary>Recovery details</summary><ul>{recoveryResult.issues.map((issue, index) => <li key={`${issue.category}-${issue.relativePath ?? index}`}><strong>{issue.category.replaceAll("_", " ")}</strong> — {issue.message}{issue.relativePath && <code>{issue.relativePath}</code>}</li>)}</ul></details>}</Card>}
+      {recoveryResult && <Card className="brain-vault-recovery-result"><div className="os-section-heading"><div><p className="os-eyebrow">Latest recovery receipt</p><h2>{recoveryResult.operation === "repair" ? "Vault repair" : "Vault reindex"}</h2></div><StatusPill status={recoveryResult.status} /></div><p>{recoveryResult.message}</p><dl><div><dt>Processed</dt><dd>{recoveryResult.progress.processed}</dd></div><div><dt>Indexed</dt><dd>{recoveryResult.counts.indexed}</dd></div><div><dt>Conflicts preserved</dt><dd>{recoveryResult.counts.conflictsPreserved}</dd></div><div><dt>Quarantined</dt><dd>{recoveryResult.counts.quarantined}</dd></div><div><dt>Missing</dt><dd>{recoveryResult.counts.missing}</dd></div><div><dt>Errors</dt><dd>{recoveryResult.counts.errors}</dd></div></dl>{recoveryResult.issues.length > 0 && <details><summary id="brain-vault-recovery-details" data-testid="brain-vault-recovery-details" data-control-id="brain-vault-recovery-details">Recovery details</summary><ul>{recoveryResult.issues.map((issue, index) => <li key={`${issue.category}-${issue.relativePath ?? index}`}><strong>{issue.category.replaceAll("_", " ")}</strong> — {issue.message}{issue.relativePath && <code>{issue.relativePath}</code>}</li>)}</ul></details>}</Card>}
       {state.message && <div className="brain-operation-toast" role="status"><p>{state.message}</p></div>}
       {state.error && <>
         <div className="os-state-panel os-state-panel--error" role="status"><div>
@@ -483,6 +522,8 @@ export default function BrainVaultPage() {
           title={state.errorSource === "reconcile" ? "Vault status refresh could not complete" : state.errorSource === "health" ? "Vault path health check failed" : state.errorSource === "connect" ? "Vault could not be connected" : state.errorSource === "repair" ? "Vault repair could not complete" : state.errorSource === "reindex" ? "Vault reindex could not complete" : "Vault operation failed"}
           error={state.error}
           onRetry={state.errorSource === "health" ? testCandidateHealth : state.errorSource === "connect" ? connect : state.errorSource === "repair" || state.errorSource === "reindex" || state.errorSource === "reconcile" ? retryRecovery : undefined}
+          retryControlId={operationRetryControlId}
+          retryLabel={operationRetryLabel}
         />
       </>}
       {disconnectTarget && <VaultDisconnectDialog

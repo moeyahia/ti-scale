@@ -97,7 +97,7 @@ describe("Ti-Scale command selector", () => {
       "autonomous-branch-model-fallback-model",
       "autonomous-branch-model-fallback-reasoning",
     ].forEach((controlId) => expect(interactionManifest).toContain(controlId));
-    expect(migratedCount).toBe(64);
+    expect(migratedCount).toBe(72);
   });
 
   test("owns a branded portal disclosure without native picker or compositor top-layer dependencies", () => {

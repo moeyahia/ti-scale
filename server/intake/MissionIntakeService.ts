@@ -41,7 +41,15 @@ import type {
   ResolvedMissionIntake,
 } from "./types";
 import { buildGuidedReconnaissanceRegistry } from "./GuidedReconnaissanceRegistry";
+import {
+  buildGuidedWindowsIdentityRegistry,
+  parseGuidedWindowsIdentitySelection,
+} from "./GuidedWindowsIdentityRegistry";
+import {
+  buildGuidedLocalExploitIntelligenceRegistry,
+} from "./GuidedLocalExploitIntelligenceRegistry";
 import { parseGuidedReconnaissanceSelection } from "../missions/GuidedReconnaissance";
+import { canonicalWindowsIdentityTarget } from "../windows-identity-tools";
 import {
   PRODUCT_AGENT_IDS,
   PRODUCT_AGENT_REGISTRY,
@@ -56,6 +64,12 @@ import {
   type AutonomousPlanningSelection,
   type ModelConfigurationService,
 } from "../model-config";
+import {
+  SEARCHSPLOIT_LOCAL_TOOL_ID,
+} from "../local-exploit-intelligence/types";
+import {
+  parseGuidedLocalExploitIntelligenceSelection,
+} from "../local-exploit-intelligence/GuidedLocalExploitIntelligence";
 
 const MAX_TARGETS = 250;
 const MAX_TEXT = 20_000;
@@ -433,6 +447,9 @@ export class MissionIntakeService {
       },
       budgets: MISSION_BUDGET_PRESETS,
       guidedReconnaissance: buildGuidedReconnaissanceRegistry(manifests),
+      guidedWindowsIdentity: buildGuidedWindowsIdentityRegistry(manifests),
+      guidedLocalExploitIntelligence:
+        buildGuidedLocalExploitIntelligenceRegistry(manifests),
     };
   }
 
@@ -445,6 +462,7 @@ export class MissionIntakeService {
     const normalizedTargets = normalizeTargets(input.targets);
     const allowedTargets = normalizedTargets.filter(({ excluded }) => !excluded);
     const prohibitedTargets = normalizedTargets.filter(({ excluded }) => excluded);
+    const manifests = this.readRuntimeManifests();
     const guidedReconnaissance = parseGuidedReconnaissanceSelection(input.guidedReconnaissance);
     if (guidedReconnaissance.issues.length > 0) {
       throw new MissionIntakeValidationError(guidedReconnaissance.issues);
@@ -457,11 +475,98 @@ export class MissionIntakeService {
         "The selected first reconnaissance step requires one host, IP address, or hostname as the first authorized target. Remove the selection to keep target-derived behavior, or supply a host target instead of a URL, CIDR, cloud, file, engagement, or lab reference.",
       ]);
     }
+    const guidedWindowsIdentity =
+      parseGuidedWindowsIdentitySelection(input.guidedWindowsIdentity);
+    if (guidedWindowsIdentity.issues.length > 0) {
+      throw new MissionIntakeValidationError(guidedWindowsIdentity.issues);
+    }
+    if (input.guidedWindowsIdentity && input.journey !== "guided") {
+      throw new MissionIntakeValidationError([
+        "The selected Windows or identity read is available only in Guided missions.",
+      ]);
+    }
+    if (guidedWindowsIdentity.selection && guidedReconnaissance.selection) {
+      throw new MissionIntakeValidationError([
+        "Choose either one reconnaissance step or one Windows or identity read as the first Guided action, not both.",
+      ]);
+    }
+    if (guidedWindowsIdentity.selection) {
+      try {
+        canonicalWindowsIdentityTarget(allowedTargets[0]!.value);
+      } catch {
+        throw new MissionIntakeValidationError([
+          "The selected Windows or identity read requires one exact approved IP address or hostname without a scheme, port, CIDR, or range.",
+        ]);
+      }
+      if (input.executionPreference !== "single_step_agent") {
+        throw new MissionIntakeValidationError([
+          "The selected Windows or identity read requires “Run one represented step for me” because it uses an exact reviewed local binding. Change the Guided execution preference or remove the selection.",
+        ]);
+      }
+      const selectedMode = buildGuidedWindowsIdentityRegistry(manifests).modes
+        .find(({ id }) => id === guidedWindowsIdentity.selection!.operation);
+      if (
+        !selectedMode
+        || selectedMode.readiness !== "ready"
+        || !selectedMode.readyAuthenticationModes.includes(
+          guidedWindowsIdentity.selection.authenticationMode,
+        )
+      ) {
+        throw new MissionIntakeValidationError([
+          `${selectedMode?.readinessExplanation ?? "The selected Windows or identity operation is not present in the current reviewed registry."} ${selectedMode?.remediation ?? "Restore the reviewed runtime binding and refresh readiness."}`,
+        ]);
+      }
+    }
+    const guidedLocalExploitIntelligence =
+      parseGuidedLocalExploitIntelligenceSelection(
+        input.guidedLocalExploitIntelligence,
+      );
+    if (guidedLocalExploitIntelligence.issues.length > 0) {
+      throw new MissionIntakeValidationError(
+        guidedLocalExploitIntelligence.issues,
+      );
+    }
+    if (
+      input.guidedLocalExploitIntelligence
+      && input.journey !== "guided"
+    ) {
+      throw new MissionIntakeValidationError([
+        "The local ExploitDB catalog lookup is available only in Guided missions.",
+      ]);
+    }
+    if (
+      guidedLocalExploitIntelligence.selection
+      && (guidedReconnaissance.selection || guidedWindowsIdentity.selection)
+    ) {
+      throw new MissionIntakeValidationError([
+        "Choose exactly one first represented Guided step: reconnaissance, Windows or identity, or local ExploitDB intelligence.",
+      ]);
+    }
+    if (guidedLocalExploitIntelligence.selection) {
+      if (input.executionPreference !== "single_step_agent") {
+        throw new MissionIntakeValidationError([
+          "The selected local ExploitDB lookup requires “Run one represented step for me”. It does not contact the target, but it still requires one exact Guided decision before the local process starts.",
+        ]);
+      }
+      const tool = manifests.tools.find(
+        ({ id }) => id === SEARCHSPLOIT_LOCAL_TOOL_ID,
+      );
+      if (
+        !tool
+        || tool.available !== true
+        || tool.missionSelectable !== true
+        || !tool.runtimeAdapterAttestation
+      ) {
+        throw new MissionIntakeValidationError([
+          tool?.missionSelectionReason
+            ?? "The pinned local ExploitDB binding is not ready for durable Guided mission execution.",
+        ]);
+      }
+    }
     const templateId = input.templateId ?? "safe_recon";
     const template = templateById(templateId);
     const applied = applyMissionTemplate(template, input.journey, normalizedTargets);
     assertTemplatePreservedTargetScope(normalizedTargets, applied);
-    const manifests = this.readRuntimeManifests();
     const projection = buildRuntimeCapabilityProjection(manifests);
     const registeredTemplate = buildMissionTemplateRegistry(projection).templates[template.id];
     const allowedTargetKinds = new Set<"domain" | "ip">(
@@ -722,6 +827,13 @@ export class MissionIntakeService {
           executionPreference: input.executionPreference ?? "manual",
           evidenceExpectations: evidenceTypeIds,
           ...(guidedReconnaissance.selection ? { guidedReconnaissance: guidedReconnaissance.selection } : {}),
+          ...(guidedWindowsIdentity.selection ? {
+            guidedWindowsIdentity: guidedWindowsIdentity.selection,
+          } : {}),
+          ...(guidedLocalExploitIntelligence.selection ? {
+            guidedLocalExploitIntelligence:
+              guidedLocalExploitIntelligence.selection,
+          } : {}),
         },
         normalizedTargets,
         template: { id: template.id, version: template.version },

@@ -26,6 +26,7 @@ import type {
   AutonomousMissionRequest,
   AutonomousMissionPreflight,
   AutonomousPlanningSelection,
+  GuidedMissionRequest,
   GuidedReconnaissanceSelection,
   GuidedTcpPortPresetId,
   Journey,
@@ -128,6 +129,21 @@ interface IntakeFormState {
   readonly guidedReconChoice: "recommended" | "host_liveness" | "tcp_service_scan";
   readonly guidedTcpPortPresetId: GuidedTcpPortPresetId | "custom";
   readonly guidedCustomTcpPorts: string;
+  readonly guidedWindowsIdentityOperation?: NonNullable<
+    GuidedMissionRequest["guidedWindowsIdentity"]
+  >["operation"];
+  readonly guidedWindowsIdentityAuthenticationMode: NonNullable<
+    GuidedMissionRequest["guidedWindowsIdentity"]
+  >["authenticationMode"];
+  readonly guidedWindowsIdentityCredentialReference: string;
+  readonly guidedLocalExploitQueryKind?: NonNullable<
+    GuidedMissionRequest["guidedLocalExploitIntelligence"]
+  >["query"]["kind"];
+  readonly guidedLocalExploitCveId: string;
+  readonly guidedLocalExploitProduct: string;
+  readonly guidedLocalExploitVersion: string;
+  readonly guidedLocalExploitPlatform: string;
+  readonly guidedLocalExploitMaximumResults: string;
 }
 
 const INITIAL_FORM: IntakeFormState = {
@@ -149,6 +165,13 @@ const INITIAL_FORM: IntakeFormState = {
   guidedReconChoice: "recommended",
   guidedTcpPortPresetId: "focused_services",
   guidedCustomTcpPorts: "22, 80, 443",
+  guidedWindowsIdentityAuthenticationMode: "anonymous",
+  guidedWindowsIdentityCredentialReference: "",
+  guidedLocalExploitCveId: "",
+  guidedLocalExploitProduct: "",
+  guidedLocalExploitVersion: "",
+  guidedLocalExploitPlatform: "",
+  guidedLocalExploitMaximumResults: "20",
 };
 
 function looksLikeSingleHost(value: string): boolean {
@@ -171,6 +194,29 @@ function parseCustomTcpPorts(value: string, maximum: number): { readonly ports?:
   const ports = [...new Set(values)].sort((left, right) => left - right);
   if (ports.length > maximum) return { issue: `Choose no more than ${maximum} individual TCP ports. Use a reviewed preset or remove ports from the custom list.` };
   return { ports };
+}
+
+const GUIDED_LOCAL_EXPLOIT_CVE_ID = /^CVE-[12][0-9]{3}-[0-9]{4,10}$/u;
+const GUIDED_LOCAL_EXPLOIT_TECHNOLOGY_TEXT =
+  /^[\p{L}\p{N}][\p{L}\p{N} ._+/:()#-]*$/u;
+
+function guidedLocalExploitTextIssue(
+  value: string,
+  label: string,
+  minimum: number,
+  maximum: number,
+  optional = false,
+): string | undefined {
+  if (optional && value.length === 0) return undefined;
+  if (
+    value !== value.trim()
+    || value.length < minimum
+    || value.length > maximum
+    || !GUIDED_LOCAL_EXPLOIT_TECHNOLOGY_TEXT.test(value)
+  ) {
+    return `${label} must use ${minimum} through ${maximum} readable technology characters. Remove command options, shell syntax, secrets, and leading or trailing spaces.`;
+  }
+  return undefined;
 }
 
 function listToggle(current: readonly string[], value: string, checked: boolean): string[] {
@@ -391,6 +437,26 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
   const selectedGuidedReconMode = registry.data?.guidedReconnaissance.modes.find(
     ({ id }) => id === form.guidedReconChoice,
   );
+  const selectedGuidedWindowsIdentityMode =
+    registry.data?.guidedWindowsIdentity.modes.find(
+      ({ id }) => id === form.guidedWindowsIdentityOperation,
+    );
+  const selectedGuidedLocalExploitQueryKind =
+    registry.data?.guidedLocalExploitIntelligence.queryKinds.find(
+      ({ id }) => id === form.guidedLocalExploitQueryKind,
+    );
+  const resolvedGuidedRequest =
+    resolved?.request.journey === "guided" ? resolved.request : undefined;
+  const resolvedGuidedWindowsIdentityMode =
+    registry.data?.guidedWindowsIdentity.modes.find(
+      ({ id }) => id === resolvedGuidedRequest?.guidedWindowsIdentity?.operation,
+    );
+  const resolvedGuidedLocalExploitQuery =
+    resolvedGuidedRequest?.guidedLocalExploitIntelligence?.query;
+  const resolvedGuidedLocalExploitQueryKind =
+    registry.data?.guidedLocalExploitIntelligence.queryKinds.find(
+      ({ id }) => id === resolvedGuidedLocalExploitQuery?.kind,
+    );
   const resolvedGuidedReconPresetId = resolved?.request.journey === "guided"
     && resolved.request.guidedReconnaissance?.mode === "tcp_service_scan"
     && resolved.request.guidedReconnaissance.portSelection.source === "preset"
@@ -399,6 +465,29 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
   const resolvedGuidedReconPreset = registry.data?.guidedReconnaissance.tcpPortPresets.find(
     ({ id }) => id === resolvedGuidedReconPresetId,
   );
+  const resolvedGuidedFirstStepLabel =
+    resolved?.request.journey === "guided"
+      ? resolved.request.guidedLocalExploitIntelligence
+        ? resolvedGuidedLocalExploitQueryKind?.label
+          ?? "Selected local ExploitDB lookup"
+        : resolved.request.guidedWindowsIdentity
+          ? resolvedGuidedWindowsIdentityMode?.label
+            ?? "Selected Windows or identity metadata read"
+          : resolved.request.guidedReconnaissance?.mode === "tcp_service_scan"
+            ? "Selected TCP service scan"
+            : resolved.request.guidedReconnaissance?.mode === "host_liveness"
+              ? "Selected host reachability check"
+              : "Recommended target-based behavior"
+      : undefined;
+  const currentGuidedFirstStepLabel = form.guidedLocalExploitQueryKind
+    ? selectedGuidedLocalExploitQueryKind?.label ?? "Local ExploitDB lookup"
+    : form.guidedWindowsIdentityOperation
+      ? selectedGuidedWindowsIdentityMode?.label ?? "Windows or identity metadata read"
+      : form.guidedReconChoice === "recommended"
+        ? "Target-based default"
+        : form.guidedReconChoice === "host_liveness"
+          ? "Host reachability"
+          : "Selected TCP services";
   const contractCustomized = form.deliverableIds !== undefined
     || form.evidenceTypeIds !== undefined
     || form.optionalSafeStopIds !== undefined
@@ -430,6 +519,88 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
           ? { boundedDestructiveTargetIds: [] }
           : {}
       ),
+    }));
+  };
+
+  const selectGuidedReconChoice = (
+    choice: IntakeFormState["guidedReconChoice"],
+  ) => {
+    setResolved(undefined);
+    setPreflightStale(true);
+    setPreflightRefreshState("idle");
+    setError(undefined);
+    setForm((current) => ({
+      ...current,
+      guidedReconChoice: choice,
+      guidedWindowsIdentityOperation: undefined,
+      guidedWindowsIdentityCredentialReference: "",
+      guidedLocalExploitQueryKind: undefined,
+    }));
+  };
+
+  const selectGuidedWindowsIdentityOperation = (
+    operation: NonNullable<
+      GuidedMissionRequest["guidedWindowsIdentity"]
+    >["operation"],
+  ) => {
+    const mode = registry.data?.guidedWindowsIdentity.modes.find(
+      (candidate) => candidate.id === operation,
+    );
+    const authenticationMode =
+      mode?.readyAuthenticationModes[0]
+      ?? form.guidedWindowsIdentityAuthenticationMode;
+    setResolved(undefined);
+    setPreflightStale(true);
+    setPreflightRefreshState("idle");
+    setError(undefined);
+    setForm((current) => ({
+      ...current,
+      guidedReconChoice: "recommended",
+      guidedWindowsIdentityOperation: operation,
+      guidedWindowsIdentityAuthenticationMode: authenticationMode,
+      guidedWindowsIdentityCredentialReference:
+        authenticationMode === "credential_reference"
+          ? current.guidedWindowsIdentityCredentialReference
+          : "",
+      guidedLocalExploitQueryKind: undefined,
+      executionPreference: "single_step_agent",
+    }));
+  };
+
+  const selectGuidedLocalExploitQueryKind = (
+    queryKind: NonNullable<
+      GuidedMissionRequest["guidedLocalExploitIntelligence"]
+    >["query"]["kind"],
+  ) => {
+    const definition =
+      registry.data?.guidedLocalExploitIntelligence.queryKinds.find(
+        ({ id }) => id === queryKind,
+      );
+    setResolved(undefined);
+    setPreflightStale(true);
+    setPreflightRefreshState("idle");
+    setError(undefined);
+    setForm((current) => ({
+      ...current,
+      guidedReconChoice: "recommended",
+      guidedWindowsIdentityOperation: undefined,
+      guidedWindowsIdentityCredentialReference: "",
+      guidedLocalExploitQueryKind: queryKind,
+      guidedLocalExploitMaximumResults:
+        current.guidedLocalExploitMaximumResults
+        || String(definition?.example.maximumResults ?? 20),
+      executionPreference: "single_step_agent",
+    }));
+  };
+
+  const clearGuidedLocalExploitQuery = () => {
+    setResolved(undefined);
+    setPreflightStale(true);
+    setPreflightRefreshState("idle");
+    setError(undefined);
+    setForm((current) => ({
+      ...current,
+      guidedLocalExploitQueryKind: undefined,
     }));
   };
 
@@ -513,7 +684,12 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
   );
 
   const guidedReconnaissanceRequest = (): GuidedReconnaissanceSelection | undefined => {
-    if (journey !== "guided" || form.guidedReconChoice === "recommended") return undefined;
+    if (
+      journey !== "guided"
+      || form.guidedWindowsIdentityOperation
+      || form.guidedLocalExploitQueryKind
+      || form.guidedReconChoice === "recommended"
+    ) return undefined;
     if (form.guidedReconChoice === "host_liveness") return { mode: "host_liveness" };
     if (form.guidedTcpPortPresetId === "custom") {
       const parsed = parseCustomTcpPorts(
@@ -536,6 +712,51 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
         ports: [...preset.ports],
       },
     } : undefined;
+  };
+
+  const guidedWindowsIdentityRequest = (
+  ): GuidedMissionRequest["guidedWindowsIdentity"] | undefined => {
+    if (
+      journey !== "guided"
+      || form.guidedLocalExploitQueryKind
+      || !form.guidedWindowsIdentityOperation
+    ) return undefined;
+    return {
+      operation: form.guidedWindowsIdentityOperation,
+      authenticationMode: form.guidedWindowsIdentityAuthenticationMode,
+      credentialReference:
+        form.guidedWindowsIdentityAuthenticationMode === "credential_reference"
+          ? {
+              kind: "systemd_credential_bundle",
+              id: form.guidedWindowsIdentityCredentialReference.trim(),
+            }
+          : null,
+    };
+  };
+
+  const guidedLocalExploitIntelligenceRequest = (
+  ): GuidedMissionRequest["guidedLocalExploitIntelligence"] | undefined => {
+    if (journey !== "guided" || !form.guidedLocalExploitQueryKind) {
+      return undefined;
+    }
+    const maximumResults = Number(form.guidedLocalExploitMaximumResults);
+    return form.guidedLocalExploitQueryKind === "cve"
+      ? {
+          query: {
+            kind: "cve",
+            cveId: form.guidedLocalExploitCveId.trim().toLocaleUpperCase("en-US"),
+            maximumResults,
+          },
+        }
+      : {
+          query: {
+            kind: "technology",
+            product: form.guidedLocalExploitProduct.trim(),
+            version: form.guidedLocalExploitVersion.trim() || null,
+            platform: form.guidedLocalExploitPlatform.trim() || null,
+            maximumResults,
+          },
+        };
   };
 
   const intakeRequest = (): MissionIntakeRequest => ({
@@ -581,6 +802,13 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
       ...(guidedReconnaissanceRequest() ? {
         guidedReconnaissance: guidedReconnaissanceRequest(),
       } : {}),
+      ...(guidedWindowsIdentityRequest() ? {
+        guidedWindowsIdentity: guidedWindowsIdentityRequest(),
+      } : {}),
+      ...(guidedLocalExploitIntelligenceRequest() ? {
+        guidedLocalExploitIntelligence:
+          guidedLocalExploitIntelligenceRequest(),
+      } : {}),
     } : {}),
   });
 
@@ -588,12 +816,104 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
     const issues: string[] = [];
     if (lines(form.targets).length === 0) issues.push("Add at least one authorized target or environment reference.");
     if (!form.authorizationAcknowledged) issues.push("Confirm that you are authorized to assess the supplied target scope.");
-    if (journey === "guided" && form.guidedReconChoice !== "recommended" && !guidedReconEligible) {
-      issues.push("The selected first reconnaissance step needs one host, IP address, or hostname as the first target. Use recommended target-based behavior, or replace the first target with one host without a scheme, port, CIDR, or range.");
+    if (
+      journey === "guided"
+      && (
+        form.guidedReconChoice !== "recommended"
+        || form.guidedWindowsIdentityOperation
+      )
+      && !guidedReconEligible
+    ) {
+      issues.push("The selected first step needs one host, IP address, or hostname as the first target. Use recommended target-based behavior, or replace the first target with one host without a scheme, port, CIDR, or range.");
     }
     if (journey === "guided" && form.guidedReconChoice === "tcp_service_scan" && form.guidedTcpPortPresetId === "custom") {
       const parsed = parseCustomTcpPorts(form.guidedCustomTcpPorts, registry.data!.guidedReconnaissance.customPorts.maximumIndividualPorts);
       if (parsed.issue) issues.push(parsed.issue);
+    }
+    if (journey === "guided" && form.guidedWindowsIdentityOperation) {
+      if (
+        !selectedGuidedWindowsIdentityMode
+        || selectedGuidedWindowsIdentityMode.readiness !== "ready"
+      ) {
+        issues.push("The selected Windows or identity read is not ready. Choose a ready operation or restore its reviewed runtime dependency.");
+      } else if (!selectedGuidedWindowsIdentityMode.readyAuthenticationModes.includes(
+        form.guidedWindowsIdentityAuthenticationMode,
+      )) {
+        issues.push("Choose one authentication mode that has a current runtime readiness receipt.");
+      }
+      if (form.executionPreference !== "single_step_agent") {
+        issues.push("Windows and identity reads require the single represented agent-step preference.");
+      }
+      if (
+        form.guidedWindowsIdentityAuthenticationMode === "credential_reference"
+        && !/^[A-Za-z0-9._:@/-]{1,200}$/u.test(
+          form.guidedWindowsIdentityCredentialReference.trim(),
+        )
+      ) {
+        issues.push("Enter the opaque systemd credential bundle ID. Use only letters, numbers, period, underscore, colon, at sign, slash, or hyphen; do not enter a password or secret.");
+      }
+    }
+    if (journey === "guided" && form.guidedLocalExploitQueryKind) {
+      if (registry.data!.guidedLocalExploitIntelligence.readiness !== "ready") {
+        issues.push(
+          "The local ExploitDB lookup is not ready. Restore its pinned catalog and reviewed local runtime, then refresh the mission controls.",
+        );
+      }
+      if (form.executionPreference !== "single_step_agent") {
+        issues.push(
+          "Local ExploitDB intelligence requires the single represented agent-step preference.",
+        );
+      }
+      if (
+        form.guidedReconChoice !== "recommended"
+        || form.guidedWindowsIdentityOperation
+      ) {
+        issues.push(
+          "Choose exactly one first Guided action: reconnaissance, Windows or identity metadata, or local ExploitDB intelligence.",
+        );
+      }
+      if (
+        !/^(?:[1-9]|[1-9][0-9]|100)$/u.test(
+          form.guidedLocalExploitMaximumResults,
+        )
+      ) {
+        issues.push(
+          "Set the local ExploitDB result limit to a whole number from 1 through 100.",
+        );
+      }
+      if (form.guidedLocalExploitQueryKind === "cve") {
+        const cveId = form.guidedLocalExploitCveId.trim()
+          .toLocaleUpperCase("en-US");
+        if (!GUIDED_LOCAL_EXPLOIT_CVE_ID.test(cveId)) {
+          issues.push(
+            "Enter one canonical CVE ID, for example CVE-2021-44228.",
+          );
+        }
+      } else {
+        const productIssue = guidedLocalExploitTextIssue(
+          form.guidedLocalExploitProduct,
+          "Product",
+          2,
+          120,
+        );
+        const versionIssue = guidedLocalExploitTextIssue(
+          form.guidedLocalExploitVersion,
+          "Version",
+          1,
+          80,
+          true,
+        );
+        const platformIssue = guidedLocalExploitTextIssue(
+          form.guidedLocalExploitPlatform,
+          "Platform",
+          1,
+          80,
+          true,
+        );
+        if (productIssue) issues.push(productIssue);
+        if (versionIssue) issues.push(versionIssue);
+        if (platformIssue) issues.push(platformIssue);
+      }
     }
     if (issues.length > 0) {
       setValidation(issues);
@@ -830,19 +1150,221 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
             <label>Additional success criteria <span>Optional · one per line</span><textarea rows={3} value={form.customSuccessCriteria} onChange={(event) => set("customSuccessCriteria", event.target.value)} placeholder="At least one safe authorized attack path is validated when prerequisites exist." /></label>
             {!isAutonomous && <>
               <label>Explanation depth<TitaniumSelect value={form.explanationDepth} onChange={(event) => set("explanationDepth", event.target.value as IntakeFormState["explanationDepth"])}><option value="concise">Concise</option><option value="balanced">Balanced</option><option value="deep">Deep</option></TitaniumSelect></label>
-              <fieldset className="os-choice-group"><legend>Execution preference</legend><label className="os-radio-card"><input type="radio" name="execution-preference" checked={form.executionPreference === "manual"} onChange={() => set("executionPreference", "manual")} /><span><strong>I run commands manually</strong><small>Ti-Scale explains and interprets the result you provide.</small></span></label><label className="os-radio-card"><input type="radio" name="execution-preference" checked={form.executionPreference === "single_step_agent"} onChange={() => set("executionPreference", "single_step_agent")} /><span><strong>Allow one represented agent step</strong><small>Each exact action and normalized parameter set still requires a deliberate decision.</small></span></label></fieldset>
+              <fieldset className="os-choice-group"><legend>Execution preference</legend><label className="os-radio-card"><input type="radio" name="execution-preference" disabled={Boolean(form.guidedWindowsIdentityOperation || form.guidedLocalExploitQueryKind)} checked={form.executionPreference === "manual"} onChange={() => set("executionPreference", "manual")} /><span><strong>I run commands manually</strong><small>{form.guidedWindowsIdentityOperation ? "Remove the selected Windows or identity operation to return to manual execution." : form.guidedLocalExploitQueryKind ? "Remove the local ExploitDB lookup to return to manual execution." : "Ti-Scale explains and interprets the result you provide."}</small></span></label><label className="os-radio-card"><input type="radio" name="execution-preference" checked={form.executionPreference === "single_step_agent"} onChange={() => set("executionPreference", "single_step_agent")} /><span><strong>Allow one represented agent step</strong><small>Each exact action and normalized parameter set still requires a deliberate decision.</small></span></label></fieldset>
               <fieldset className="os-choice-group" aria-describedby="guided-first-recon-help">
                 <legend>First represented reconnaissance step <span>Optional</span></legend>
                 <p id="guided-first-recon-help" className="os-policy-note">Choose what the first Guided card should establish. This is not another journey and does not authorize a chain of actions; the exact represented step still waits for your decision.</p>
-                <label className="os-radio-card"><input data-control-id="guided-intake-recon-recommended" type="radio" name="guided-recon-choice" checked={form.guidedReconChoice === "recommended"} onChange={() => set("guidedReconChoice", "recommended")} /><span><strong>Use recommended target-based behavior</strong><small>Keep the existing safe default: Ti-Scale chooses a reachability, DNS, or web metadata baseline from the target type.</small></span></label>
-                <label className="os-radio-card"><input data-control-id="guided-intake-recon-host-liveness" type="radio" name="guided-recon-choice" disabled={!guidedReconEligible} checked={form.guidedReconChoice === "host_liveness"} onChange={() => set("guidedReconChoice", "host_liveness")} /><span><strong>Check host reachability</strong><small>{registry.data.guidedReconnaissance.modes.find(({ id }) => id === "host_liveness")?.description}</small></span></label>
-                <label className="os-radio-card"><input data-control-id="guided-intake-recon-tcp-service-scan" type="radio" name="guided-recon-choice" disabled={!guidedReconEligible} checked={form.guidedReconChoice === "tcp_service_scan"} onChange={() => set("guidedReconChoice", "tcp_service_scan")} /><span><strong>Scan selected TCP services</strong><small>{registry.data.guidedReconnaissance.modes.find(({ id }) => id === "tcp_service_scan")?.description}</small></span></label>
+                <label className="os-radio-card"><input data-control-id="guided-intake-recon-recommended" type="radio" name="guided-recon-choice" checked={form.guidedReconChoice === "recommended" && !form.guidedWindowsIdentityOperation && !form.guidedLocalExploitQueryKind} onChange={() => selectGuidedReconChoice("recommended")} /><span><strong>Use recommended target-based behavior</strong><small>Keep the existing safe default: Ti-Scale chooses a reachability, DNS, or web metadata baseline from the target type.</small></span></label>
+                <label className="os-radio-card"><input data-control-id="guided-intake-recon-host-liveness" type="radio" name="guided-recon-choice" disabled={!guidedReconEligible} checked={form.guidedReconChoice === "host_liveness"} onChange={() => selectGuidedReconChoice("host_liveness")} /><span><strong>Check host reachability</strong><small>{registry.data.guidedReconnaissance.modes.find(({ id }) => id === "host_liveness")?.description}</small></span></label>
+                <label className="os-radio-card"><input data-control-id="guided-intake-recon-tcp-service-scan" type="radio" name="guided-recon-choice" disabled={!guidedReconEligible} checked={form.guidedReconChoice === "tcp_service_scan"} onChange={() => selectGuidedReconChoice("tcp_service_scan")} /><span><strong>Scan selected TCP services</strong><small>{registry.data.guidedReconnaissance.modes.find(({ id }) => id === "tcp_service_scan")?.description}</small></span></label>
                 {!guidedReconEligible && <p className="os-policy-note">This optional override is available when the first target is one host, IP address, or hostname. The current URL, CIDR, environment, or other reference keeps recommended target-based behavior.</p>}
                 {form.guidedReconChoice === "tcp_service_scan" && guidedReconEligible && <div className="os-details-content">
                   <label>TCP port selection<TitaniumSelect data-control-id="guided-intake-recon-port-preset" value={form.guidedTcpPortPresetId} onChange={(event) => set("guidedTcpPortPresetId", event.target.value as IntakeFormState["guidedTcpPortPresetId"])}>{registry.data.guidedReconnaissance.tcpPortPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.label} · {preset.ports.length} ports</option>)}<option value="custom">Custom individual ports</option></TitaniumSelect></label>
                   {form.guidedTcpPortPresetId === "custom" ? <label>Custom TCP ports<input data-control-id="guided-intake-recon-custom-ports" inputMode="numeric" value={form.guidedCustomTcpPorts} onChange={(event) => set("guidedCustomTcpPorts", event.target.value)} placeholder={registry.data.guidedReconnaissance.customPorts.example} /><span>{registry.data.guidedReconnaissance.customPorts.explanation}</span></label> : <p className="os-policy-note">{registry.data.guidedReconnaissance.tcpPortPresets.find(({ id }) => id === form.guidedTcpPortPresetId)?.description} Exact normalized ports: <code>{registry.data.guidedReconnaissance.tcpPortPresets.find(({ id }) => id === form.guidedTcpPortPresetId)?.ports.join(",")}</code></p>}
                 </div>}
                 {form.guidedReconChoice !== "recommended" && selectedGuidedReconMode && <div className="os-guided-contract"><StatusPill status={selectedGuidedReconMode.readiness === "ready" ? "ready" : "unavailable"} /><div><strong>{selectedGuidedReconMode.readinessExplanation}</strong><p>{selectedGuidedReconMode.readiness === "ready" ? "Agent execution still requires one exact represented decision." : selectedGuidedReconMode.remediation}</p></div></div>}
+              </fieldset>
+              <fieldset className="os-choice-group" aria-describedby="guided-windows-identity-help">
+                <legend>Windows and identity metadata read <span>Optional</span></legend>
+                <p id="guided-windows-identity-help" className="os-policy-note">Choose one bounded read when the first target is a Windows, SMB, RPC, or LDAP host. These operations list advertised metadata only; they do not try passwords, open files, change directory objects, or execute commands.</p>
+                <label className="os-radio-card">
+                  <input
+                    data-control-id="guided-intake-identity-none"
+                    type="radio"
+                    name="guided-identity-operation"
+                    checked={!form.guidedWindowsIdentityOperation}
+                    onChange={() => {
+                      set("guidedWindowsIdentityOperation", undefined);
+                      set("guidedWindowsIdentityCredentialReference", "");
+                    }}
+                  />
+                  <span><strong>No Windows or identity override</strong><small>Use the selected reconnaissance step or the recommended target-based first action.</small></span>
+                </label>
+                {registry.data.guidedWindowsIdentity.modes.map((mode) => (
+                  <label className="os-radio-card" key={mode.id}>
+                    <input
+                      data-control-id={`guided-intake-identity-${mode.id}`}
+                      type="radio"
+                      name="guided-identity-operation"
+                      disabled={!guidedReconEligible || mode.readiness !== "ready"}
+                      checked={form.guidedWindowsIdentityOperation === mode.id}
+                      onChange={() => selectGuidedWindowsIdentityOperation(mode.id)}
+                    />
+                    <span>
+                      <strong>{mode.label}</strong>
+                      <small>{mode.description}</small>
+                      <small>{mode.readiness === "ready" ? `Ready · ${mode.readyAuthenticationModes.map((item) => item === "anonymous" ? "anonymous read" : "private credential reference").join(" or ")}` : `Unavailable · ${mode.readinessExplanation}`}</small>
+                    </span>
+                  </label>
+                ))}
+                {!guidedReconEligible && <p className="os-policy-note">Supply one IP address or hostname as the first target to choose a Windows or identity read.</p>}
+                {selectedGuidedWindowsIdentityMode && <div className="os-details-content">
+                  <p className="os-policy-note"><strong>Expected result:</strong> {selectedGuidedWindowsIdentityMode.expectedResult}</p>
+                  {selectedGuidedWindowsIdentityMode.readyAuthenticationModes.length > 1
+                    ? <label>Authentication mode
+                        <TitaniumSelect
+                          data-control-id="guided-intake-identity-authentication-mode"
+                          value={form.guidedWindowsIdentityAuthenticationMode}
+                          onChange={(event) => {
+                            const value = event.target.value as IntakeFormState["guidedWindowsIdentityAuthenticationMode"];
+                            set("guidedWindowsIdentityAuthenticationMode", value);
+                            if (value === "anonymous") set("guidedWindowsIdentityCredentialReference", "");
+                          }}
+                        >
+                          {selectedGuidedWindowsIdentityMode.readyAuthenticationModes.map((mode) => <option key={mode} value={mode}>{mode === "anonymous" ? "Anonymous metadata read" : "Private credential reference"}</option>)}
+                        </TitaniumSelect>
+                      </label>
+                    : <p className="os-policy-note">Authentication: {form.guidedWindowsIdentityAuthenticationMode === "anonymous" ? "anonymous metadata read" : "private credential reference"}.</p>}
+                  {form.guidedWindowsIdentityAuthenticationMode === "credential_reference" && <label>Credential bundle reference
+                    <input
+                      data-control-id="guided-intake-identity-credential-reference"
+                      value={form.guidedWindowsIdentityCredentialReference}
+                      onChange={(event) => set("guidedWindowsIdentityCredentialReference", event.target.value)}
+                      placeholder="lab-ad-credential"
+                      autoComplete="off"
+                    />
+                    <span>Enter only the opaque systemd credential bundle ID. Do not enter a username, password, hash, ticket, token, or key.</span>
+                  </label>}
+                  <div className="os-guided-contract"><StatusPill status={selectedGuidedWindowsIdentityMode.readiness === "ready" ? "ready" : "unavailable"} /><div><strong>{selectedGuidedWindowsIdentityMode.readinessExplanation}</strong><p>{selectedGuidedWindowsIdentityMode.remediation}</p></div></div>
+                </div>}
+              </fieldset>
+              <fieldset className="os-choice-group" aria-describedby="guided-local-exploit-help">
+                <legend>Local ExploitDB intelligence <span>Optional</span></legend>
+                <p id="guided-local-exploit-help" className="os-policy-note">
+                  Search the pinned ExploitDB catalog already installed on this system for one CVE or observed technology. This helps identify leads worth checking; it does not contact the approved target, send data to an AI provider, execute an exploit, or prove that a vulnerability applies.
+                </p>
+                <label className="os-radio-card">
+                  <input
+                    data-control-id="guided-intake-local-exploit-none"
+                    type="radio"
+                    name="guided-local-exploit-query-kind"
+                    checked={!form.guidedLocalExploitQueryKind}
+                    onChange={clearGuidedLocalExploitQuery}
+                  />
+                  <span>
+                    <strong>No local ExploitDB override</strong>
+                    <small>Use the selected reconnaissance or Windows/identity step, or retain recommended target-based behavior.</small>
+                  </span>
+                </label>
+                {registry.data.guidedLocalExploitIntelligence.queryKinds.map((queryKind) => (
+                  <label className="os-radio-card" key={queryKind.id}>
+                    <input
+                      data-control-id={`guided-intake-local-exploit-${queryKind.id}`}
+                      type="radio"
+                      name="guided-local-exploit-query-kind"
+                      disabled={registry.data!.guidedLocalExploitIntelligence.readiness !== "ready"}
+                      checked={form.guidedLocalExploitQueryKind === queryKind.id}
+                      onChange={() => selectGuidedLocalExploitQueryKind(queryKind.id)}
+                    />
+                    <span>
+                      <strong>{queryKind.label}</strong>
+                      <small>{queryKind.purpose}</small>
+                      <small>{queryKind.expectedResult}</small>
+                    </span>
+                  </label>
+                ))}
+                {form.guidedLocalExploitQueryKind && selectedGuidedLocalExploitQueryKind && <div className="os-details-content">
+                  {form.guidedLocalExploitQueryKind === "cve"
+                    ? <label>
+                        CVE ID
+                        <input
+                          data-control-id="guided-intake-local-exploit-cve-id"
+                          value={form.guidedLocalExploitCveId}
+                          onChange={(event) => set(
+                            "guidedLocalExploitCveId",
+                            event.target.value,
+                          )}
+                          placeholder={selectedGuidedLocalExploitQueryKind.example.kind === "cve"
+                            ? selectedGuidedLocalExploitQueryKind.example.cveId
+                            : "CVE-2021-44228"}
+                          autoComplete="off"
+                        />
+                        <span>Enter one canonical CVE identifier. The local result is a lead for version-aware applicability review, not evidence by itself.</span>
+                      </label>
+                    : <>
+                        <label>
+                          Product
+                          <input
+                            data-control-id="guided-intake-local-exploit-product"
+                            value={form.guidedLocalExploitProduct}
+                            onChange={(event) => set(
+                              "guidedLocalExploitProduct",
+                              event.target.value,
+                            )}
+                            placeholder={selectedGuidedLocalExploitQueryKind.example.kind === "technology"
+                              ? selectedGuidedLocalExploitQueryKind.example.product
+                              : "Apache HTTP Server"}
+                            autoComplete="off"
+                          />
+                          <span>Use the product name observed during reconnaissance, not a command or a general attack request.</span>
+                        </label>
+                        <label>
+                          Version <span>Optional</span>
+                          <input
+                            data-control-id="guided-intake-local-exploit-version"
+                            value={form.guidedLocalExploitVersion}
+                            onChange={(event) => set(
+                              "guidedLocalExploitVersion",
+                              event.target.value,
+                            )}
+                            placeholder={selectedGuidedLocalExploitQueryKind.example.kind === "technology"
+                              ? selectedGuidedLocalExploitQueryKind.example.version ?? "2.4.49"
+                              : "2.4.49"}
+                            autoComplete="off"
+                          />
+                          <span>Add an observed version when available to narrow the catalog leads.</span>
+                        </label>
+                        <label>
+                          Platform <span>Optional</span>
+                          <input
+                            data-control-id="guided-intake-local-exploit-platform"
+                            value={form.guidedLocalExploitPlatform}
+                            onChange={(event) => set(
+                              "guidedLocalExploitPlatform",
+                              event.target.value,
+                            )}
+                            placeholder={selectedGuidedLocalExploitQueryKind.example.kind === "technology"
+                              ? selectedGuidedLocalExploitQueryKind.example.platform ?? "linux"
+                              : "linux"}
+                            autoComplete="off"
+                          />
+                          <span>Use an observed platform such as Linux or Windows when it materially improves matching.</span>
+                        </label>
+                      </>}
+                  <label>
+                    Maximum catalog matches
+                    <input
+                      data-control-id="guided-intake-local-exploit-maximum-results"
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      max={100}
+                      step={1}
+                      value={form.guidedLocalExploitMaximumResults}
+                      onChange={(event) => set(
+                        "guidedLocalExploitMaximumResults",
+                        event.target.value,
+                      )}
+                    />
+                    <span>Return between 1 and 100 local entries. The default 20 keeps the represented result focused.</span>
+                  </label>
+                  <div className="os-guided-contract">
+                    <StatusPill status={registry.data.guidedLocalExploitIntelligence.readiness === "ready" ? "ready" : "unavailable"} />
+                    <div>
+                      <strong>{registry.data.guidedLocalExploitIntelligence.readinessExplanation}</strong>
+                      <p>Exact local binding: <code>{registry.data.guidedLocalExploitIntelligence.toolId}</code>. No target or provider contact. Raw output is retained in the Engagement Log and parsed matches remain unverified observations; nothing is promoted to evidence automatically.</p>
+                    </div>
+                  </div>
+                </div>}
+                {!form.guidedLocalExploitQueryKind && <div className="os-guided-contract">
+                  <StatusPill status={registry.data.guidedLocalExploitIntelligence.readiness === "ready" ? "ready" : "unavailable"} />
+                  <div>
+                    <strong>{registry.data.guidedLocalExploitIntelligence.readinessExplanation}</strong>
+                    <p>{registry.data.guidedLocalExploitIntelligence.readiness === "ready"
+                      ? "Choose one lookup above to make it the first represented Guided step."
+                      : registry.data.guidedLocalExploitIntelligence.remediation}</p>
+                  </div>
+                </div>}
               </fieldset>
             </>}
           </fieldset>}
@@ -970,7 +1492,7 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
 
           {step === reviewStep && <fieldset><legend>Review the resolved mission</legend><p className="os-field-intro">This is the exact server-normalized result. Inferred values are identified, and unsupported runtime paths remain launch blockers.</p>
             {resolved ? <>
-              <dl className="os-review-grid"><div><dt>Journey</dt><dd>{resolved.request.journey === "autonomous" ? "Autonomous" : "Guided"}</dd></div>{autonomousOutcome && <div><dt>Completion promise</dt><dd>{autonomousOutcome.label}</dd></div>}<div><dt>Mission</dt><dd>{resolved.request.title}</dd></div><div><dt>Objective</dt><dd>{resolved.request.objective}</dd></div><div><dt>Targets</dt><dd>{resolved.normalizedTargets.filter((target) => !target.excluded).map((target) => target.value).join(", ")}</dd></div>{resolved.request.journey === "autonomous" && <div><dt>Environment</dt><dd>{resolved.request.authorization.environmentClassification === "htb" ? "Hack The Box — disposable lab" : resolved.request.authorization.environmentClassification === "ctf" ? "CTF — disposable lab" : resolved.request.authorization.environmentClassification === "local_disposable_lab" ? "Local disposable lab" : resolved.request.authorization.environmentClassification === "internal" ? "Internal environment — not disposable" : "Client or public environment — not disposable"}</dd></div>}<div><dt>Template</dt><dd>{template.label} v{resolved.template.version}</dd></div><div><dt>Budget</dt><dd>{resolved.budget.label} · {resolved.budget.timeBudgetMinutes} min · {resolved.budget.toolCallBudget} tool calls</dd></div><div><dt>Evidence storage</dt><dd>{bytes(resolved.budget.evidenceStorageBudgetBytes)}</dd></div><div><dt>Artifact storage</dt><dd>{bytes(resolved.budget.artifactStorageBudgetBytes)}</dd></div><div><dt>Evidence requirements</dt><dd>{resolved.evidenceTypeIds.length}</dd></div><div><dt>Deliverables</dt><dd>{resolved.deliverableIds.length}</dd></div>{resolved.request.journey === "guided" && <div><dt>First reconnaissance step</dt><dd>{resolved.request.guidedReconnaissance?.mode === "tcp_service_scan" ? "Selected TCP service scan" : resolved.request.guidedReconnaissance?.mode === "host_liveness" ? "Selected host reachability check" : "Recommended target-based behavior"}</dd></div>}{resolved.request.journey === "guided" && resolved.request.guidedReconnaissance?.mode === "tcp_service_scan" && <><div><dt>TCP port source</dt><dd>{resolved.request.guidedReconnaissance.portSelection.source === "preset" ? `${resolvedGuidedReconPreset?.label ?? resolved.request.guidedReconnaissance.portSelection.presetId} · ${resolved.request.guidedReconnaissance.portSelection.presetId} v${resolved.request.guidedReconnaissance.portSelection.presetVersion}` : "Custom operator list"}</dd></div><div><dt>Exact normalized TCP ports</dt><dd><code>{resolved.request.guidedReconnaissance.portSelection.ports.join(",")}</code></dd></div></>}</dl>
+              <dl className="os-review-grid"><div><dt>Journey</dt><dd>{resolved.request.journey === "autonomous" ? "Autonomous" : "Guided"}</dd></div>{autonomousOutcome && <div><dt>Completion promise</dt><dd>{autonomousOutcome.label}</dd></div>}<div><dt>Mission</dt><dd>{resolved.request.title}</dd></div><div><dt>Objective</dt><dd>{resolved.request.objective}</dd></div><div><dt>Targets</dt><dd>{resolved.normalizedTargets.filter((target) => !target.excluded).map((target) => target.value).join(", ")}</dd></div>{resolved.request.journey === "autonomous" && <div><dt>Environment</dt><dd>{resolved.request.authorization.environmentClassification === "htb" ? "Hack The Box — disposable lab" : resolved.request.authorization.environmentClassification === "ctf" ? "CTF — disposable lab" : resolved.request.authorization.environmentClassification === "local_disposable_lab" ? "Local disposable lab" : resolved.request.authorization.environmentClassification === "internal" ? "Internal environment — not disposable" : "Client or public environment — not disposable"}</dd></div>}<div><dt>Template</dt><dd>{template.label} v{resolved.template.version}</dd></div><div><dt>Budget</dt><dd>{resolved.budget.label} · {resolved.budget.timeBudgetMinutes} min · {resolved.budget.toolCallBudget} tool calls</dd></div><div><dt>Evidence storage</dt><dd>{bytes(resolved.budget.evidenceStorageBudgetBytes)}</dd></div><div><dt>Artifact storage</dt><dd>{bytes(resolved.budget.artifactStorageBudgetBytes)}</dd></div><div><dt>Evidence requirements</dt><dd>{resolved.evidenceTypeIds.length}</dd></div><div><dt>Deliverables</dt><dd>{resolved.deliverableIds.length}</dd></div>{resolved.request.journey === "guided" && <div><dt>First represented step</dt><dd>{resolvedGuidedFirstStepLabel}</dd></div>}{resolved.request.journey === "guided" && resolved.request.guidedLocalExploitIntelligence && resolvedGuidedLocalExploitQuery && <><div><dt>Local catalog query</dt><dd>{resolvedGuidedLocalExploitQuery.kind === "cve" ? resolvedGuidedLocalExploitQuery.cveId : [resolvedGuidedLocalExploitQuery.product, resolvedGuidedLocalExploitQuery.version, resolvedGuidedLocalExploitQuery.platform].filter(Boolean).join(" · ")}</dd></div><div><dt>Maximum catalog matches</dt><dd>{resolvedGuidedLocalExploitQuery.maximumResults}</dd></div><div><dt>Exact local binding</dt><dd><code>{registry.data.guidedLocalExploitIntelligence.toolId}</code></dd></div></>}{resolved.request.journey === "guided" && resolved.request.guidedWindowsIdentity && <><div><dt>Authentication</dt><dd>{resolved.request.guidedWindowsIdentity.authenticationMode === "anonymous" ? "Anonymous metadata read" : "Private credential reference"}</dd></div><div><dt>Exact local binding</dt><dd><code>{resolvedGuidedWindowsIdentityMode?.toolId ?? resolved.request.guidedWindowsIdentity.operation}</code></dd></div></>}{resolved.request.journey === "guided" && resolved.request.guidedReconnaissance?.mode === "tcp_service_scan" && <><div><dt>TCP port source</dt><dd>{resolved.request.guidedReconnaissance.portSelection.source === "preset" ? `${resolvedGuidedReconPreset?.label ?? resolved.request.guidedReconnaissance.portSelection.presetId} · ${resolved.request.guidedReconnaissance.portSelection.presetId} v${resolved.request.guidedReconnaissance.portSelection.presetVersion}` : "Custom operator list"}</dd></div><div><dt>Exact normalized TCP ports</dt><dd><code>{resolved.request.guidedReconnaissance.portSelection.ports.join(",")}</code></dd></div></>}</dl>
               {autonomousOutcome && <div className="os-guided-contract"><StatusPill status={autonomousOutcome.id === "complete_engagement" ? "enforced" : "ready"} /><div><strong>{autonomousOutcome.concisePromise}</strong><p>{autonomousOutcome.completionMeaning}</p>{autonomousOutcome.requiredTerminalSuccessCriteria.length > 0 && <small>{autonomousOutcome.requiredTerminalSuccessCriteria.length} mandatory terminal proofs · {autonomousOutcome.requiredActionClassIds.length} required execution classes</small>}</div></div>}
               {resolved.request.journey === "autonomous" && preflight && <MissionAgentModelAssignmentReview
                 assignments={resolved.request.contract.agentModelAssignments}
@@ -985,6 +1507,8 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
                 )}
               />}
               {resolved.request.journey === "guided" && resolved.request.guidedReconnaissance && selectedGuidedReconMode && <div className="os-guided-contract"><StatusPill status={selectedGuidedReconMode.readiness === "ready" ? "ready" : "unavailable"} /><div><strong>{selectedGuidedReconMode.readinessExplanation}</strong><p>{selectedGuidedReconMode.readiness === "ready" ? "If you allow agent execution, Ti-Scale will create one exact decision whose target and normalized ports cannot change after approval." : `${selectedGuidedReconMode.remediation} Launching now preserves this selection as the represented manual fallback.`}</p></div></div>}
+              {resolved.request.journey === "guided" && resolved.request.guidedWindowsIdentity && resolvedGuidedWindowsIdentityMode && <div className="os-guided-contract"><StatusPill status={resolvedGuidedWindowsIdentityMode.readiness === "ready" ? "ready" : "unavailable"} /><div><strong>{resolvedGuidedWindowsIdentityMode.readinessExplanation}</strong><p>Ti-Scale will create one exact decision for this host, operation, authentication mode, and opaque reference. Any material change requires another decision. Raw output remains an Engagement Log record until explicitly promoted and verified.</p></div></div>}
+              {resolved.request.journey === "guided" && resolved.request.guidedLocalExploitIntelligence && <div className="os-guided-contract"><StatusPill status={registry.data.guidedLocalExploitIntelligence.readiness === "ready" ? "ready" : "unavailable"} /><div><strong>{registry.data.guidedLocalExploitIntelligence.readinessExplanation}</strong><p>Ti-Scale will create one exact decision for this local catalog query. The binding contacts neither the approved target nor a public provider. Raw output remains in the Engagement Log, parsed matches remain unverified observations, and no evidence or finding is created automatically.</p></div></div>}
               <h3>Inferred by recommended defaults</h3><p>{resolved.inferredFields.length > 0 ? inferredFieldLabels(resolved.inferredFields) : "No values were inferred."}</p>
               {resolvedChecklist && <section className="os-resolved-contract-checklist" aria-label="Resolved operating contract checklist">
                 <header><div><p className="os-eyebrow">Exact launch values</p><h3>Operating contract checklist</h3></div><p>These are the server-normalized values—not draft counts. Every source label identifies whether the operator changed the value.</p></header>
@@ -1029,7 +1553,7 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
           <div className="os-form-actions">{step > 0 ? <Button type="button" variant="quiet" onClick={() => { setValidation([]); setStep((current) => current - 1); }}>Back</Button> : <ButtonLink href="/missions/new" variant="quiet">Back</ButtonLink>}<span />{step < reviewStep ? <Button type="button" disabled={working} onClick={() => void advance()}>{working ? "Resolving defaults…" : "Continue"}</Button> : <Button data-control-id={isAutonomous ? "autonomous-intake-review-launch" : "guided-intake-review-launch"} type="submit" disabled={working || launchBlocked}>{working ? "Creating mission…" : isAutonomous ? autonomousOutcome?.id === "complete_engagement" ? "Launch Complete Autonomous Engagement" : "Launch Autonomous Assessment" : "Start Guided Mission"}</Button>}</div>
         </Card>
       </form>
-      <aside className="os-intake-summary" aria-label="Current mission contract summary"><p className="os-eyebrow">Contract summary</p><h2>{form.title.trim() || resolved?.request.title || template.label}</h2><dl><div><dt>Journey</dt><dd>{isAutonomous ? "Autonomous" : "Guided"}</dd></div><div><dt>Authorized targets</dt><dd>{lines(form.targets).length}</dd></div><div><dt>Template</dt><dd>{template.label}</dd></div>{!isAutonomous && <div><dt>First recon step</dt><dd>{form.guidedReconChoice === "recommended" ? "Target-based default" : form.guidedReconChoice === "host_liveness" ? "Host reachability" : "Selected TCP services"}</dd></div>}{isAutonomous && <div><dt>Planning route</dt><dd>{form.planningSelection.route === "local_deterministic" ? "Local deterministic" : `Provider advisory · ${form.planningSelection.agentId}`}</dd></div>}{isAutonomous && <div><dt>Specialist models</dt><dd>{form.agentModelAssignments?.length ? `${form.agentModelAssignments.length} mission overrides` : "Recommended or inherited"}</dd></div>}<div><dt>Action policy</dt><dd>{Object.keys(form.actionPolicyOverrides).length ? `${Object.keys(form.actionPolicyOverrides).length} overrides` : "Recommended defaults"}</dd></div><div><dt>Evidence</dt><dd>{evidenceTypeIds.length} types</dd></div><div><dt>Deliverables</dt><dd>{deliverableIds.length}</dd></div><div><dt>Safe stops</dt><dd>{registry.data.safeStops.mandatory.length} mandatory · {optionalSafeStopIds.length} optional</dd></div><div><dt>Runtime source</dt><dd>{registry.data.source.status}</dd></div></dl>{resolved?.inferredFields.length ? <p><strong>Inferred:</strong> {inferredFieldLabels(resolved.inferredFields)}</p> : <p>Use recommended defaults to resolve the full mission contract.</p>}</aside>
+      <aside className="os-intake-summary" aria-label="Current mission contract summary"><p className="os-eyebrow">Contract summary</p><h2>{form.title.trim() || resolved?.request.title || template.label}</h2><dl><div><dt>Journey</dt><dd>{isAutonomous ? "Autonomous" : "Guided"}</dd></div><div><dt>Authorized targets</dt><dd>{lines(form.targets).length}</dd></div><div><dt>Template</dt><dd>{template.label}</dd></div>{!isAutonomous && <div><dt>First represented step</dt><dd>{currentGuidedFirstStepLabel}</dd></div>}{isAutonomous && <div><dt>Planning route</dt><dd>{form.planningSelection.route === "local_deterministic" ? "Local deterministic" : `Provider advisory · ${form.planningSelection.agentId}`}</dd></div>}{isAutonomous && <div><dt>Specialist models</dt><dd>{form.agentModelAssignments?.length ? `${form.agentModelAssignments.length} mission overrides` : "Recommended or inherited"}</dd></div>}<div><dt>Action policy</dt><dd>{Object.keys(form.actionPolicyOverrides).length ? `${Object.keys(form.actionPolicyOverrides).length} overrides` : "Recommended defaults"}</dd></div><div><dt>Evidence</dt><dd>{evidenceTypeIds.length} types</dd></div><div><dt>Deliverables</dt><dd>{deliverableIds.length}</dd></div><div><dt>Safe stops</dt><dd>{registry.data.safeStops.mandatory.length} mandatory · {optionalSafeStopIds.length} optional</dd></div><div><dt>Runtime source</dt><dd>{registry.data.source.status}</dd></div></dl>{resolved?.inferredFields.length ? <p><strong>Inferred:</strong> {inferredFieldLabels(resolved.inferredFields)}</p> : <p>Use recommended defaults to resolve the full mission contract.</p>}</aside>
     </div>
   </div>;
 }

@@ -19,22 +19,23 @@ The manifest uses the existing strict
 `ti-scale.historical-source-roots.v2` schema. It is exactly the complete
 ten-root deployment manifest minus this one root:
 
-- `historical-htb-workspaces` — `/var/lib/chillspwn/workspaces/htb/boxes`
+- the primary historical engagement workspace source
 
-The remaining nine required roots retain their reviewed IDs, paths, modes,
-and order:
+The remaining nine required roots retain their reviewed IDs, modes, and order.
+Private absolute paths remain in the hash-pinned deployment configuration and
+are deliberately omitted from public documentation:
 
-| Root ID | Mode | Path |
-| --- | --- | --- |
-| `historical-engagement-workspaces` | `children` | `/var/lib/chillspwn/workspaces/engagements` |
-| `historical-home-htb-workspaces` | `children` | `/home/chillspwn/htb/boxes` |
-| `historical-runtime-state` | `history-root` | `/var/lib/chillspwn/state` |
-| `historical-hermes-runtime` | `history-root` | `/var/lib/chillspwn/hermes` |
-| `historical-service-claude-projects` | `history-root` | `/var/lib/chillspwn/claude/projects` |
-| `historical-operator-claude-projects` | `history-root` | `/root/.claude/projects` |
-| `historical-operator-grok-sessions` | `history-root` | `/root/.grok/sessions` |
-| `historical-operator-grok-logs` | `history-root` | `/root/.grok/logs` |
-| `historical-operator-codex-sessions` | `history-root` | `/root/.codex/sessions` |
+| Source class | Mode |
+| --- | --- |
+| historical engagement workspaces | `children` |
+| secondary practice workspaces | `children` |
+| application runtime state | `history-root` |
+| orchestration runtime history | `history-root` |
+| service-owned provider projects | `history-root` |
+| operator-owned provider projects | `history-root` |
+| operator-owned model sessions | `history-root` |
+| operator-owned model logs | `history-root` |
+| operator-owned coding-agent sessions | `history-root` |
 
 Required roots still fail closed when missing. The manifest cannot define
 commands, globs, parser overrides, credentials, optional roots, or file-level
@@ -58,16 +59,16 @@ All 120 unaffected versions were semantic-parser eligible:
 
 | Root ID | Ready semantic versions | Classes |
 | --- | ---: | --- |
-| `historical-runtime-state` | 56 | event JSONL, provider logs, raw model JSONL, run JSON, session JSON |
-| `historical-hermes-runtime` | 44 | conversation Markdown |
-| `historical-operator-codex-sessions` | 20 | provider-session JSONL |
+| application runtime state | 56 | event JSONL, provider logs, raw model JSONL, run JSON, session JSON |
+| orchestration runtime history | 44 | conversation Markdown |
+| operator coding-agent sessions | 20 | provider-session JSONL |
 | Other six retained roots | 0 | no delta at the reviewed boundary |
 | **Total** | **120** | **candidate-only local semantic parsing** |
 
 The unaffected delta contained zero custody-only files and zero quarantined
 files. Ten recent files were separately deferred by the settled-source
 boundary and are not part of the 120. Two non-empty SQLite sidecar conditions
-inside the heterogeneous Hermes history root remained explicit generic-source
+inside the heterogeneous orchestration history root remained explicit generic-source
 exclusions; the importer does not open or guess them. The excluded primary HTB
 workspace SQLite/WAL remains untouched for a separate quiesced-snapshot path.
 
@@ -91,10 +92,10 @@ advanced since the 120-file receipt:
 - zero quarantined versions;
 - three recent files deferred;
 - one active SQLite source explicitly excluded inside the heterogeneous
-  Hermes history root.
+  orchestration history root.
 
 The additional 24 semantic versions were 16 runtime-state records and eight
-Hermes conversation notes. No execute/import was run. The reviewed 120-file
+orchestration conversation notes. No execute/import was run. The reviewed 120-file
 receipt cannot be represented as current source bytes merely by reusing its
 old aggregate hash, so an exact 120-file execution remains closed. Review and
 approve the newer 144-file inventory, or create a separately verified

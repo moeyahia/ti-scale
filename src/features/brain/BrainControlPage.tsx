@@ -111,7 +111,12 @@ export default function BrainControlPage() {
       />
       <BrainNav />
       {query.isLoading && <LoadingPanel label="Loading canonical memory controls" />}
-      {query.error && !query.data && <ErrorPanel error={query.error} onRetry={query.refresh} />}
+      {query.error && !query.data && <ErrorPanel
+        error={query.error}
+        onRetry={query.refresh}
+        retryControlId="brain-control-read-retry"
+        retryLabel="Retry memory controls"
+      />}
       {query.data && draft && (
         <form className="brain-control-form" onSubmit={submit}>
           <Card className="brain-control-summary">
@@ -157,7 +162,12 @@ export default function BrainControlPage() {
             </Card>
           </div>
 
-          {error && <ErrorPanel title="Memory controls were not saved" error={error} onRetry={() => void retrySave()} />}
+          {error && <ErrorPanel
+            title="Memory controls were not saved"
+            error={error}
+            onRetry={() => void retrySave()}
+            retryControlId="brain-control-conflict-retry"
+          />}
           <div className="brain-control-actions" aria-live="polite">
             <div><span>Policy version {query.data.version}</span><span>Last changed {formatBrainDate(query.data.updatedAt)}</span>{saved && <strong>Controls saved</strong>}</div>
             <Button type="submit" disabled={saving}>{saving ? "Saving controls" : "Save memory controls"}</Button>

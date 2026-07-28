@@ -1133,6 +1133,12 @@ export class MissionRepository {
             ...(request.guidedWindowsIdentity === undefined
               ? {}
               : { guidedWindowsIdentity: request.guidedWindowsIdentity }),
+            ...(request.guidedLocalExploitIntelligence === undefined
+              ? {}
+              : {
+                  guidedLocalExploitIntelligence:
+                    request.guidedLocalExploitIntelligence,
+                }),
           }),
           now,
         );

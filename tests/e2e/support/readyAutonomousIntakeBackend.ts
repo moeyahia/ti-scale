@@ -21,11 +21,14 @@ import {
 import { PRODUCT_AGENT_REGISTRY } from "../../../server/agents";
 import {
   ACTION_CLASS_IDS,
+  createRuntimeAdapterAttestation,
   DELIVERABLE_IDS,
   EVIDENCE_TYPE_IDS,
   type RuntimeSourceManifests,
 } from "../../../server/domain";
 import { MissionIntakeService } from "../../../server/intake";
+import { SEARCHSPLOIT_LOCAL_TOOL_ID } from
+  "../../../server/local-exploit-intelligence";
 import {
   activeConnectedVaultBackedMemoryNodeIds,
   MemoryRepository,
@@ -35,6 +38,7 @@ import { hashCanonical } from "../../../server/missions/canonical";
 import { MissionRepository } from "../../../server/missions/MissionRepository";
 import { validateMissionCreateRequest } from "../../../server/missions/validation";
 import { createOperationsRouter } from "../../../server/operations";
+import { WindowsIdentityToolPack } from "../../../server/windows-identity-tools";
 import {
   attackKnowledgeVaultPolicyHash,
   ObsidianVaultBridge,
@@ -57,7 +61,9 @@ const MCP_ID = "e2e-ready-autonomous-mcp";
 
 export type ReadyAutonomousIntakeBackendProfile =
   | "full"
-  | "team_boundary";
+  | "team_boundary"
+  | "guided_windows_identity"
+  | "guided_local_exploit_intelligence";
 
 export interface ReadyAutonomousIntakeBackendOptions {
   readonly profile?: ReadyAutonomousIntakeBackendProfile;
@@ -101,7 +107,12 @@ function supportedActionClassIds(
   const recon = PRODUCT_AGENT_REGISTRY.find(({ id }) => id === "ReconScout");
   if (!recon) throw new Error("Canonical ReconScout product agent is unavailable");
   return Object.freeze(
-    recon.capabilities.flatMap(({ actionClassIds }) => actionClassIds),
+    [...new Set([
+      ...recon.capabilities.flatMap(({ actionClassIds }) => actionClassIds),
+      ...(profile === "guided_local_exploit_intelligence"
+        ? ["cve_intelligence_applicability_validation" as const]
+        : []),
+    ])],
   );
 }
 
@@ -111,6 +122,61 @@ function manifests(
 ): RuntimeSourceManifests {
   const actionClassIds = supportedActionClassIds(profile);
   const deliverableIds = profile === "full" ? DELIVERABLE_IDS : [];
+  const readyWindowsIdentityToolIds = new Set([
+    "kali:smbclient-share-list",
+    "kali:nxc-smb-summary",
+    "kali:ldapsearch-root-dse",
+  ]);
+  const windowsIdentityTools = (
+    profile === "guided_windows_identity"
+    || profile === "guided_local_exploit_intelligence"
+  )
+    ? new WindowsIdentityToolPack().definitions.map((definition) => ({
+        id: definition.toolId,
+        label: definition.label,
+        available: readyWindowsIdentityToolIds.has(definition.toolId),
+        locallyPolicyEnforced: true,
+        requiresModel: false,
+        executionJourneys: ["guided"] as const,
+        actionClassIds: [definition.actionClassId],
+        evidenceTypeIds: [definition.evidenceTypeId],
+        deliverableIds: [],
+        riskClassIds: ["e2e-ready-autonomous-risk"],
+      }))
+    : [];
+  const localExploitIntelligenceTools =
+    profile === "guided_local_exploit_intelligence"
+      ? [{
+          id: SEARCHSPLOIT_LOCAL_TOOL_ID,
+          label: "Search the pinned local ExploitDB catalog",
+          available: true,
+          locallyPolicyEnforced: true,
+          requiresModel: false,
+          missionSelectable: true,
+          executionJourneys: ["guided"] as const,
+          actionClassIds: [
+            "cve_intelligence_applicability_validation" as const,
+          ],
+          evidenceTypeIds: ["cve_applicability" as const],
+          deliverableIds: [],
+          riskClassIds: ["e2e-ready-autonomous-risk"],
+          runtimeAdapterAttestation: createRuntimeAdapterAttestation({
+            toolId: SEARCHSPLOIT_LOCAL_TOOL_ID,
+            executionJourneys: ["guided"],
+            binding: {
+              configurationSha256: "1".repeat(64),
+              providerReceiptSha256: "2".repeat(64),
+              localManifestSha256: "3".repeat(64),
+              componentReceiptSha256s: ["4".repeat(64)],
+            },
+            observedAt,
+            expiresAt: new Date(
+              Date.parse(observedAt) + (5 * 60_000),
+            ).toISOString(),
+          }),
+          dependencies: [],
+        }]
+      : [];
   const sourceManifests: RuntimeSourceManifests = {
     riskClasses: [{
       id: "e2e-ready-autonomous-risk",
@@ -141,7 +207,7 @@ function manifests(
       deliverableIds,
       riskClassIds: ["e2e-ready-autonomous-risk"],
       mcpServerId: MCP_ID,
-    }],
+    }, ...windowsIdentityTools, ...localExploitIntelligenceTools],
     mcpServers: [{
       id: MCP_ID,
       label: "Disposable E2E MCP boundary",
@@ -705,7 +771,12 @@ if (import.meta.main) {
   const profileArgument = process.argv.find((argument) =>
     argument.startsWith("--profile="));
   const profile = profileArgument?.slice("--profile=".length) ?? "full";
-  if (profile !== "full" && profile !== "team_boundary") {
+  if (
+    profile !== "full"
+    && profile !== "team_boundary"
+    && profile !== "guided_windows_identity"
+    && profile !== "guided_local_exploit_intelligence"
+  ) {
     throw new Error(`Unsupported Autonomous intake backend profile: ${profile}`);
   }
   const backend = await startReadyAutonomousIntakeBackend(instanceId, {

@@ -17,12 +17,22 @@ import {
   captureNoBackupPayloadInventory,
   discardFailedPreSchemaCandidateArtifacts,
   executeNoBackupPreviewPhaseSequence,
+  isStandaloneNoBackupForwardReceipt,
+  NO_BACKUP_CURRENT_DEPLOYMENT_MODE,
+  NO_BACKUP_FORWARD_RECEIPT_SCHEMA,
   NO_BACKUP_PAYLOAD_ROOTS,
+  NO_BACKUP_PREVIEW_RECEIPT_SCHEMA,
+  NO_BACKUP_STANDALONE_RELEASE_OBSERVER,
+  noBackupObserverProofDetail,
+  noBackupObserverProofSha256FromDetail,
   noBackupTargetStartMode,
   noBackupStopSnapshotFromServiceProperties,
   noBackupRecoveryDirection,
+  noBackupPreviewUsage,
   NO_BACKUP_TARGET_SCHEMA,
   parseNoBackupPreviewArguments,
+  resolveNoBackupReleaseObserverProof,
+  type NoBackupPreviewReceipt,
   verifyNoBackupTargetApplicationForCommit,
 } from "../../../scripts/release/NoBackupPreviewRelease";
 import {
@@ -165,6 +175,106 @@ afterEach(() => {
 });
 
 describe("metadata-journaled no-backup preview release", () => {
+  test("new forward receipts use a standalone observer without consulting another service", async () => {
+    const receipt = {
+      schemaVersion: NO_BACKUP_FORWARD_RECEIPT_SCHEMA,
+      deploymentMode: NO_BACKUP_CURRENT_DEPLOYMENT_MODE,
+      releaseObserver: NO_BACKUP_STANDALONE_RELEASE_OBSERVER,
+    } as unknown as NoBackupPreviewReceipt;
+    let historicalCaptureCalls = 0;
+
+    expect(isStandaloneNoBackupForwardReceipt(receipt)).toBe(true);
+    await expect(resolveNoBackupReleaseObserverProof(receipt, async () => {
+      historicalCaptureCalls += 1;
+      throw new Error("new receipt must not query a historical observer");
+    })).resolves.toEqual(NO_BACKUP_STANDALONE_RELEASE_OBSERVER);
+    expect(historicalCaptureCalls).toBe(0);
+
+    const serialized = JSON.stringify(receipt);
+    expect(serialized).not.toContain("chillspwn");
+    expect(serialized).not.toContain("3131");
+    expect(serialized).not.toContain("cutoverEligible");
+    expect(serialized).toContain('"deploymentMode":"current_service"');
+    expect(serialized).toContain('"externalServiceDependency":"none"');
+  });
+
+  test("historical v1 receipts retain their exact observer recovery path", async () => {
+    const before = {
+      activeState: "active",
+      mainPid: 3131,
+      invocationId: "a".repeat(32),
+      healthStatus: 200,
+      semanticStatus: "ok",
+    };
+    const after = {
+      ...before,
+      invocationId: "b".repeat(32),
+    };
+    const receipt = {
+      schemaVersion: NO_BACKUP_PREVIEW_RECEIPT_SCHEMA,
+      cutoverEligible: false,
+      chillspwnBefore: before,
+    } as unknown as NoBackupPreviewReceipt;
+    let historicalCaptureCalls = 0;
+
+    expect(isStandaloneNoBackupForwardReceipt(receipt)).toBe(false);
+    await expect(resolveNoBackupReleaseObserverProof(receipt, async () => {
+      historicalCaptureCalls += 1;
+      return after;
+    })).resolves.toEqual(after);
+    expect(historicalCaptureCalls).toBe(1);
+  });
+
+  test("uses the v2 observer hash while preserving the v1 journal hash field", () => {
+    const proofSha256 = "c".repeat(64);
+    const currentReceipt = {
+      schemaVersion: NO_BACKUP_FORWARD_RECEIPT_SCHEMA,
+      deploymentMode: NO_BACKUP_CURRENT_DEPLOYMENT_MODE,
+      releaseObserver: NO_BACKUP_STANDALONE_RELEASE_OBSERVER,
+    } as unknown as NoBackupPreviewReceipt;
+    const historicalReceipt = {
+      schemaVersion: NO_BACKUP_PREVIEW_RECEIPT_SCHEMA,
+      cutoverEligible: false,
+      chillspwnBefore: {
+        activeState: "active",
+        mainPid: 3131,
+        invocationId: "a".repeat(32),
+        healthStatus: 200,
+        semanticStatus: "ok",
+      },
+    } as unknown as NoBackupPreviewReceipt;
+
+    const currentDetail = noBackupObserverProofDetail(
+      currentReceipt,
+      proofSha256,
+    );
+    const historicalDetail = noBackupObserverProofDetail(
+      historicalReceipt,
+      proofSha256,
+    );
+
+    expect(currentDetail).toEqual({ observerProofSha256: proofSha256 });
+    expect(noBackupObserverProofSha256FromDetail(
+      currentDetail,
+      currentReceipt,
+    )).toBe(proofSha256);
+    expect(historicalDetail).toEqual({
+      legacyIdentitySha256: proofSha256,
+    });
+    expect(noBackupObserverProofSha256FromDetail(
+      historicalDetail,
+      historicalReceipt,
+    )).toBe(proofSha256);
+  });
+
+  test("operator help describes a current forward deployment instead of a preview", () => {
+    const usage = noBackupPreviewUsage();
+    expect(usage).toContain("no-backup forward deployment");
+    expect(usage).toContain("current");
+    expect(usage).not.toContain("preview deployment");
+    expect(usage).not.toContain("schema 48");
+  });
+
   test("re-verifies the manifest-bound target and records its complete application-tree fingerprint", async () => {
     const root = temporaryDirectory(
       "ti-scale-no-backup-target-commit-identity-",
@@ -699,6 +809,245 @@ describe("metadata-journaled no-backup preview release", () => {
       52,
       forwardSchemas.filter((version) => version !== 52),
     )).toThrow("must include every schema");
+  });
+
+  test("classifies same-schema recovery only from durable target commitment", () => {
+    expect(noBackupRecoveryDirection(60, 60, 60, [], false))
+      .toBe("restore_source");
+    expect(noBackupRecoveryDirection(60, 60, 60, [], true))
+      .toBe("complete_target");
+    expect(() => noBackupRecoveryDirection(60, 60, 60, []))
+      .toThrow("requires durable target commitment state");
+    expect(() => noBackupRecoveryDirection(60, 60, 59, [], false))
+      .toThrow("cannot classify observed schema");
+    expect(() => noBackupRecoveryDirection(60, 60, 61, [], true))
+      .toThrow("cannot classify observed schema");
+  });
+
+  test("cleanly deploys a same-schema target in deterministic phase order", async () => {
+    const calls: string[] = [];
+    let targetCommitted = false;
+    await expect(executeNoBackupForwardOnlyController({
+      command: "deploy",
+      sourceSchema: 60,
+      targetSchema: 60,
+      forwardSchemas: [],
+      operations: {
+        stop: () => {
+          calls.push("stop");
+        },
+        withMaintenance: async (operation) => {
+          calls.push("maintenance:enter");
+          const result = await operation();
+          calls.push("maintenance:exit");
+          return result;
+        },
+        migrate: () => {
+          calls.push("migration:no-op");
+        },
+        commitTarget: () => {
+          calls.push("target:commit");
+          targetCommitted = true;
+        },
+        startAndFinalize: (forceRecovery) => {
+          calls.push(`start:${String(forceRecovery)}`);
+        },
+        observedSchema: () => 60,
+        durableTargetCommitted: () => targetCommitted,
+        restoreSourceBeforeSchemaCommit: () => {
+          calls.push("restore");
+        },
+        ensureTargetCommitted: () => {
+          calls.push("ensure_target");
+        },
+      },
+    })).resolves.toEqual({
+      status: "deployed",
+      recoveryDirection: null,
+      recovered: false,
+    });
+    expect(calls).toEqual([
+      "stop",
+      "maintenance:enter",
+      "migration:no-op",
+      "target:commit",
+      "maintenance:exit",
+      "start:false",
+    ]);
+  });
+
+  test("same-schema failure restores source before durable target commitment", async () => {
+    const calls: string[] = [];
+    await expect(executeNoBackupForwardOnlyController({
+      command: "deploy",
+      sourceSchema: 60,
+      targetSchema: 60,
+      forwardSchemas: [],
+      rethrowRestoredDeployFailure: false,
+      operations: {
+        stop: () => {
+          calls.push("stop");
+        },
+        withMaintenance: async (operation) => operation(),
+        migrate: () => {
+          calls.push("migration:no-op");
+        },
+        commitTarget: () => {
+          calls.push("target:failed-before-commit");
+          throw new Error("injected pre-commit failure");
+        },
+        startAndFinalize: () => {
+          calls.push("start");
+        },
+        observedSchema: () => 60,
+        durableTargetCommitted: () => false,
+        restoreSourceBeforeSchemaCommit: () => {
+          calls.push("restore");
+        },
+        ensureTargetCommitted: () => {
+          calls.push("ensure_target");
+        },
+      },
+    })).resolves.toEqual({
+      status: "predeploy_restored",
+      recoveryDirection: "restore_source",
+      recovered: true,
+    });
+    expect(calls).toEqual([
+      "stop",
+      "migration:no-op",
+      "target:failed-before-commit",
+      "restore",
+    ]);
+  });
+
+  test("same-schema failure completes target after durable target commitment", async () => {
+    const calls: string[] = [];
+    let targetCommitted = false;
+    await expect(executeNoBackupForwardOnlyController({
+      command: "deploy",
+      sourceSchema: 60,
+      targetSchema: 60,
+      forwardSchemas: [],
+      operations: {
+        stop: () => {
+          calls.push("stop");
+        },
+        withMaintenance: async (operation) => operation(),
+        migrate: () => {
+          calls.push("migration:no-op");
+        },
+        commitTarget: () => {
+          calls.push("target:committed");
+          targetCommitted = true;
+          throw new Error("injected post-commit failure");
+        },
+        startAndFinalize: (forceRecovery) => {
+          calls.push(`start:${String(forceRecovery)}`);
+        },
+        observedSchema: () => 60,
+        durableTargetCommitted: () => targetCommitted,
+        restoreSourceBeforeSchemaCommit: () => {
+          calls.push("restore");
+        },
+        ensureTargetCommitted: () => {
+          calls.push("ensure_target");
+        },
+      },
+    })).resolves.toEqual({
+      status: "deployed",
+      recoveryDirection: "complete_target",
+      recovered: true,
+    });
+    expect(calls).toEqual([
+      "stop",
+      "migration:no-op",
+      "target:committed",
+      "ensure_target",
+      "start:true",
+    ]);
+  });
+
+  test("same-schema recovery applies cancellation only before target commitment", async () => {
+    const sourceCalls: string[] = [];
+    await expect(executeNoBackupForwardOnlyController({
+      command: "recover",
+      sourceSchema: 60,
+      targetSchema: 60,
+      forwardSchemas: [],
+      recoveryInterruption: {
+        throwIfAborted: () => {
+          sourceCalls.push("abort_checked");
+          throw new Error("cancelled before target commitment");
+        },
+      },
+      operations: {
+        stop: () => {
+          sourceCalls.push("stop");
+        },
+        withMaintenance: async (operation) => operation(),
+        migrate: () => {
+          sourceCalls.push("migrate");
+        },
+        commitTarget: () => {
+          sourceCalls.push("commit");
+        },
+        startAndFinalize: () => {
+          sourceCalls.push("start");
+        },
+        observedSchema: () => 60,
+        durableTargetCommitted: () => false,
+        restoreSourceBeforeSchemaCommit: () => {
+          sourceCalls.push("restore");
+        },
+        ensureTargetCommitted: () => {
+          sourceCalls.push("ensure_target");
+        },
+      },
+    })).rejects.toThrow("cancelled before target commitment");
+    expect(sourceCalls).toEqual(["abort_checked"]);
+
+    const targetCalls: string[] = [];
+    await expect(executeNoBackupForwardOnlyController({
+      command: "recover",
+      sourceSchema: 60,
+      targetSchema: 60,
+      forwardSchemas: [],
+      recoveryInterruption: {
+        throwIfAborted: () => {
+          targetCalls.push("unexpected_abort_check");
+          throw new Error("must be ignored after target commitment");
+        },
+      },
+      operations: {
+        stop: () => {
+          targetCalls.push("stop");
+        },
+        withMaintenance: async (operation) => operation(),
+        migrate: () => {
+          targetCalls.push("migrate");
+        },
+        commitTarget: () => {
+          targetCalls.push("commit");
+        },
+        startAndFinalize: (forceRecovery) => {
+          targetCalls.push(`start:${String(forceRecovery)}`);
+        },
+        observedSchema: () => 60,
+        durableTargetCommitted: () => true,
+        restoreSourceBeforeSchemaCommit: () => {
+          targetCalls.push("restore");
+        },
+        ensureTargetCommitted: () => {
+          targetCalls.push("ensure_target");
+        },
+      },
+    })).resolves.toMatchObject({
+      status: "deployed",
+      recoveryDirection: "complete_target",
+      recovered: true,
+    });
+    expect(targetCalls).toEqual(["ensure_target", "start:true"]);
   });
 
   test("cancellation aborts source recovery before mutation but cannot interrupt target completion", async () => {

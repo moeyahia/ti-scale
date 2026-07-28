@@ -1,0 +1,4 @@
+# These byte-attested runtime descriptors intentionally retain one blank line
+# after the JSON document so their reviewed SHA-256 matches the installed copy.
+deployment/runtime-config/bubblewrap-probe-sandbox.v1.json whitespace=-blank-at-eof
+deployment/runtime-config/engagement-workspace-mappings.v1.json whitespace=-blank-at-eof

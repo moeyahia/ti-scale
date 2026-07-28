@@ -8,6 +8,7 @@ import {
   type BrainNodeLifecycleFixture,
 } from "./support/brainNodeLifecycleFixtureController";
 import { canonicalFixtureNamespace } from "./support/fixtureNamespace";
+import { waitForInteractiveApplication } from "./support/applicationReadiness";
 import { selectTitaniumOption } from "./support/titaniumSelect";
 import { validateInteractionManifest } from "../interaction-manifest/schema";
 import type {
@@ -18,6 +19,8 @@ import type {
 const TEST_IDS = {
   lifecycle: "e2e.brain-node.lifecycle-controls",
   conflictForget: "e2e.brain-node.conflict-forget",
+  readRecovery: "e2e.brain-node.read-recovery",
+  navigation: "e2e.brain-node.navigation-and-vault-controls",
 } as const;
 const manifest = validateInteractionManifest(
   JSON.parse(readFileSync(new URL("../interaction-manifest.json", import.meta.url), "utf8")) as unknown,
@@ -151,6 +154,337 @@ async function strictAudit(audit: BrowserAudit, testInfo: TestInfo): Promise<voi
   await audit.assertClean(testInfo);
 }
 
+function readFailure(humanMessage: string, remediation: string, traceId: string) {
+  return {
+    error: {
+      code: "brain_node_fixture_temporarily_unavailable",
+      message: "Second Brain fixture temporarily unavailable",
+      humanMessage,
+      retryable: true,
+      category: "dependency",
+      remediation,
+      traceId,
+      timestamp: "2099-07-16T12:00:00.000Z",
+    },
+  };
+}
+
+test(`${TEST_IDS.readRecovery} distinguishes record, Vault, and Context Pack retries`, async ({
+  page,
+  browserAudit,
+  interactionActivation,
+}) => {
+  const nodePath = `/api/v2/brain/nodes/${fixture.nodeId}`;
+  const vaultPath = "/api/v2/brain/vault";
+  const contextPath = `/api/v2/brain/context-packs/${fixture.contextPackId}`;
+  for (const expectation of [
+    {
+      id: "brain.node.record.initial-unavailable",
+      pathname: nodePath,
+      reason: "Exercise the canonical memory-record retry.",
+    },
+    {
+      id: "brain.node.vault.initial-unavailable",
+      pathname: vaultPath,
+      reason: "Exercise the nested Vault connection retry.",
+    },
+    {
+      id: "brain.node.context.initial-unavailable",
+      pathname: contextPath,
+      reason: "Exercise the node Context Pack retry.",
+    },
+  ]) {
+    browserAudit.expectHttpResponse(page, {
+      ...expectation,
+      transport: "browser",
+      method: "GET",
+      query: {},
+      status: 503,
+      occurrences: 2,
+    });
+  }
+  let failNode = false;
+  await page.route(`**${nodePath}`, async (route) => {
+    if (failNode) {
+      failNode = false;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify(readFailure(
+          "The canonical memory record could not be read.",
+          "Retry this exact memory record.",
+          "trace-brain-node-record-retry",
+        )),
+      });
+      return;
+    }
+    await route.continue();
+  });
+  let failVault = false;
+  await page.route(`**${vaultPath}`, async (route) => {
+    if (failVault) {
+      failVault = false;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify(readFailure(
+          "The configured Vault connections could not be read.",
+          "Retry only the memory Vault connection read.",
+          "trace-brain-node-vault-retry",
+        )),
+      });
+      return;
+    }
+    await route.continue();
+  });
+  let failContext = false;
+  await page.route(`**${contextPath}`, async (route) => {
+    if (failContext) {
+      failContext = false;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify(readFailure(
+          "The memory Context Pack could not be read.",
+          "Retry only this Context Pack.",
+          "trace-brain-node-context-retry",
+        )),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  for (const modality of ["pointer", "keyboard"] as const) {
+    failNode = true;
+    failVault = true;
+    failContext = true;
+    const destination = `/brain/nodes/${fixture.nodeId}`;
+    if (page.url() === "about:blank") {
+      await page.goto(destination, { waitUntil: "domcontentloaded" });
+    } else {
+      await browserAudit.withExpectedDocumentNavigationTeardown(
+        page,
+        () => page.goto(destination, { waitUntil: "domcontentloaded" }),
+      );
+    }
+    await waitForInteractiveApplication(page);
+
+    const recordRetry = page.getByRole("button", { name: "Retry memory record", exact: true });
+    await expect(recordRetry).toHaveAttribute("id", "brain-node-record-retry");
+    await expect(recordRetry).toHaveAttribute("data-testid", "brain-node-record-retry");
+    const recoveredNode = nodeRead(page);
+    await interactionActivation.activate(
+      receipt(
+        "brain.node.retry.record",
+        "Retry the exact canonical memory record",
+        modality,
+        TEST_IDS.readRecovery,
+      ),
+      () => activate(recordRetry, modality),
+    );
+    expect((await recoveredNode).status()).toBe(200);
+    await expect(page.getByRole("heading", { name: fixture.initialTitle, exact: true }).first()).toBeVisible();
+
+    const vaultRetry = page.getByRole("button", { name: "Retry memory Vault connection", exact: true });
+    await expect(vaultRetry).toHaveAttribute("id", "brain-node-vault-retry");
+    await expect(vaultRetry).toHaveAttribute("data-control-id", "brain-node-vault-retry");
+    const recoveredVault = page.waitForResponse((response) => response.request().method() === "GET"
+      && new URL(response.url()).pathname === vaultPath
+      && response.status() === 200);
+    await interactionActivation.activate(
+      receipt(
+        "brain.node.retry.vault",
+        "Retry only the node's Vault connection projection",
+        modality,
+        TEST_IDS.readRecovery,
+      ),
+      () => activate(vaultRetry, modality),
+    );
+    expect((await recoveredVault).status()).toBe(200);
+    await expect(page.getByRole("link", { name: "Open Obsidian vault controls", exact: true })).toBeVisible();
+
+    await activate(page.getByRole("button", {
+      name: /^Context Pack use: .+/u,
+    }), modality);
+    const contextRetry = page.getByRole("button", { name: "Retry memory context pack", exact: true });
+    await expect(contextRetry).toHaveAttribute("id", "brain-node-context-pack-retry");
+    const recoveredContext = page.waitForResponse((response) => response.request().method() === "GET"
+      && new URL(response.url()).pathname === contextPath
+      && response.status() === 200);
+    await interactionActivation.activate(
+      receipt(
+        "brain.node.retry.context-pack",
+        "Retry only the expanded Context Pack",
+        modality,
+        TEST_IDS.readRecovery,
+      ),
+      () => activate(contextRetry, modality),
+    );
+    expect((await recoveredContext).status()).toBe(200);
+    await expect(page.getByRole("link", { name: "Show memory path", exact: true })).toBeVisible();
+  }
+
+  await page.unroute(`**${nodePath}`);
+  await page.unroute(`**${vaultPath}`);
+  await page.unroute(`**${contextPath}`);
+});
+
+test(`${TEST_IDS.navigation} traverses node navigation, relationship, Context Pack, and Vault-control links`, async ({
+  page,
+  browserAudit,
+  interactionActivation,
+}) => {
+  test.setTimeout(120_000);
+  await page.goto(`/brain/nodes/${fixture.nodeId}`, { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: fixture.initialTitle, exact: true }).first()).toBeVisible();
+  await browserAudit.waitForPageApiSettlement(page, { quietMs: 500 });
+  const destinations = [
+    { name: "Home", href: "/brain", heading: "Second Brain" },
+    { name: "Graph", href: "/brain/graph", heading: "Memory Graph" },
+    { name: "Operator Preferences", href: "/brain/preferences", heading: "Operator Preferences" },
+    { name: "Memory Inbox", href: "/brain/inbox", heading: "Memory Inbox" },
+    { name: "Controls", href: "/brain/control", heading: "Memory Control Center" },
+    { name: "Obsidian Vault", href: "/brain/vault", heading: "Obsidian Vault" },
+  ] as const;
+
+  for (const modality of ["pointer", "keyboard"] as const) {
+    for (const destination of destinations) {
+      const navigation = page.getByRole("navigation", { name: "Second Brain", exact: true });
+      const link = navigation.getByRole("link", { name: destination.name, exact: true });
+      await expect(link).toHaveAttribute("href", destination.href);
+      await interactionActivation.activate(
+        receipt("brain.node.navigation", destination.name, modality, TEST_IDS.navigation),
+        () => activate(link, modality),
+      );
+      await expect(page).toHaveURL(destination.href);
+      await expect(page.getByRole("heading", { level: 1, name: destination.heading, exact: true })).toBeVisible();
+      await expect(page.locator("html")).toHaveAttribute("data-route-transition", "idle");
+      await browserAudit.waitForPageApiSettlement(page, { quietMs: 500 });
+      await browserAudit.withExpectedHistoryTraversal(page, () => page.goBack({ waitUntil: "domcontentloaded" }));
+      await expect(page).toHaveURL(`/brain/nodes/${fixture.nodeId}`);
+      await expect(page.getByRole("heading", { name: fixture.initialTitle, exact: true }).first()).toBeVisible();
+      await expect(page.locator("html")).toHaveAttribute("data-route-transition", "idle");
+      await browserAudit.waitForPageApiSettlement(page, { quietMs: 500 });
+    }
+  }
+
+  for (const modality of ["pointer", "keyboard"] as const) {
+    const relatedMemory = page.getByRole("link", {
+      name: "Open related memory Influenced evidence presentation",
+      exact: true,
+    });
+    await expect(relatedMemory).toHaveAttribute("href", `/brain/nodes/${fixture.relatedNodeId}`);
+    await interactionActivation.activate(
+      receipt(
+        "brain.node.relationship-link",
+        "Open each exact related memory node",
+        modality,
+        TEST_IDS.navigation,
+      ),
+      () => activate(relatedMemory, modality),
+    );
+    await expect(page).toHaveURL(`/brain/nodes/${fixture.relatedNodeId}`);
+    await expect(page.getByRole("heading", {
+      level: 1,
+      name: `Attributable evidence ${fixture.namespace}`,
+      exact: true,
+    })).toBeVisible();
+    await browserAudit.withExpectedHistoryTraversal(page, () => page.goBack({ waitUntil: "domcontentloaded" }));
+    await expect(page).toHaveURL(`/brain/nodes/${fixture.nodeId}`);
+    await browserAudit.waitForPageApiSettlement(page, { quietMs: 500 });
+  }
+
+  const contextUse = page.getByRole("button", { name: /^Context Pack use: .+/u });
+  await interactionActivation.activate(
+    receipt(
+      "brain.node.context-use",
+      "Expand exact Context Pack use",
+      "keyboard",
+      TEST_IDS.navigation,
+    ),
+    () => activate(contextUse, "keyboard"),
+  );
+  await expect(page.getByRole("link", {
+    name: `Open memory node ${fixture.initialTitle}`,
+    exact: true,
+  })).toBeVisible();
+
+  for (const modality of ["pointer", "keyboard"] as const) {
+    const contextNode = page.getByRole("link", {
+      name: `Open memory node ${fixture.initialTitle}`,
+      exact: true,
+    });
+    await expect(contextNode).toHaveAttribute("href", `/brain/nodes/${fixture.nodeId}`);
+    await interactionActivation.activate(
+      receipt(
+        "brain.node.context.node-link",
+        "Open each exact Context Pack memory node",
+        modality,
+        TEST_IDS.navigation,
+      ),
+      () => activate(contextNode, modality),
+    );
+    await expect(page).toHaveURL(`/brain/nodes/${fixture.nodeId}`);
+    await expect(page.getByRole("heading", { name: fixture.initialTitle, exact: true }).first()).toBeVisible();
+    if (await page.getByRole("link", {
+      name: `Open memory node ${fixture.initialTitle}`,
+      exact: true,
+    }).count() === 0) {
+      await activate(page.getByRole("button", { name: /^Context Pack use: .+/u }), modality);
+      await expect(page.getByRole("link", {
+        name: `Open memory node ${fixture.initialTitle}`,
+        exact: true,
+      })).toBeVisible();
+    }
+  }
+
+  for (const modality of ["pointer", "keyboard"] as const) {
+    if (await page.getByRole("link", { name: "Show memory path", exact: true }).count() === 0) {
+      await activate(page.getByRole("button", { name: /^Context Pack use: .+/u }), modality);
+    }
+    const memoryPath = page.getByRole("link", { name: "Show memory path", exact: true });
+    await interactionActivation.activate(
+      receipt(
+        "brain.node.context.path-link",
+        "Open the local graph for the exact persisted Context Pack path",
+        modality,
+        TEST_IDS.navigation,
+      ),
+      () => activate(memoryPath, modality),
+    );
+    await expect(page).toHaveURL(new RegExp(
+      `/brain/graph\\?view=local&root=${fixture.nodeId}&selected=${fixture.nodeId}`,
+    ));
+    await expect(page.getByRole("heading", { level: 1, name: "Memory Graph", exact: true })).toBeVisible();
+    await browserAudit.withExpectedHistoryTraversal(page, () => page.goBack({ waitUntil: "domcontentloaded" }));
+    await expect(page).toHaveURL(`/brain/nodes/${fixture.nodeId}`);
+    await browserAudit.waitForPageApiSettlement(page, { quietMs: 500 });
+  }
+
+  for (const modality of ["pointer", "keyboard"] as const) {
+    const vaultControls = page.getByRole("link", { name: "Open Obsidian vault controls", exact: true });
+    await expect(vaultControls).toHaveAttribute("id", "brain-node-open-vault-controls");
+    await expect(vaultControls).toHaveAttribute("data-testid", "brain-node-open-vault-controls");
+    await expect(vaultControls).toHaveAttribute("data-control-id", "brain-node-open-vault-controls");
+    await interactionActivation.activate(
+      receipt(
+        "brain.node.open-vault-controls",
+        "Open the real Vault connection and synchronization controls",
+        modality,
+        TEST_IDS.navigation,
+      ),
+      () => activate(vaultControls, modality),
+    );
+    await expect(page).toHaveURL("/brain/vault");
+    await expect(page.getByRole("heading", { level: 1, name: "Obsidian Vault", exact: true })).toBeVisible();
+    await browserAudit.waitForPageApiSettlement(page, { quietMs: 500 });
+    await browserAudit.withExpectedHistoryTraversal(page, () => page.goBack({ waitUntil: "domcontentloaded" }));
+    await expect(page).toHaveURL(`/brain/nodes/${fixture.nodeId}`);
+    await browserAudit.waitForPageApiSettlement(page, { quietMs: 500 });
+  }
+});
+
 test(`${TEST_IDS.lifecycle} versions correction, pinning, retention, dispute, and Context Pack use`, async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   const initialRead = nodeRead(page);
@@ -163,7 +497,7 @@ test(`${TEST_IDS.lifecycle} versions correction, pinning, retention, dispute, an
   const contextRead = page.waitForResponse((response) => response.request().method() === "GET"
     && new URL(response.url()).pathname === `/api/v2/brain/context-packs/${fixture.contextPackId}`
     && response.status() === 200);
-  await activate(page.getByRole("button", { name: /^Explain why evidence appears before technique detail/u }), "keyboard");
+  await activate(page.getByRole("button", { name: /^Context Pack use: .+/u }), "keyboard");
   expect((await contextRead).status()).toBe(200);
   await expect(page.getByRole("heading", { name: "Explain why evidence appears before technique detail", exact: true })).toBeVisible();
   await expect(page.getByText("Attributable evidence is presented before technical attack detail.", { exact: true })).toBeVisible();
@@ -442,7 +776,7 @@ test(`${TEST_IDS.lifecycle} and ${TEST_IDS.conflictForget} record both modalitie
     await expect(versionValue(page)).toHaveText("1");
 
     const contextControl = page.getByRole("button", {
-      name: /^Explain why evidence appears before technique detail .+ used$/u,
+      name: /^Context Pack use: .+/u,
     });
     const contextRead = page.waitForResponse((response) => response.request().method() === "GET"
       && new URL(response.url()).pathname === `/api/v2/brain/context-packs/${targetFixture.contextPackId}`
@@ -561,10 +895,20 @@ test(`${TEST_IDS.lifecycle} and ${TEST_IDS.conflictForget} record both modalitie
     );
 
     await interactionActivation.activate(
-      receipt("brain.node.pin", "Refresh and retry current version", modality, TEST_IDS.conflictForget),
-      async () => {
+      receipt(
+        "brain.node.retry.mutation-reconcile",
+        "Refresh authoritative node state without replaying the failed mutation",
+        modality,
+        TEST_IDS.conflictForget,
+      ),
+      () => interactionActivation.activate(
+        receipt("brain.node.pin", "Refresh and retry current version", modality, TEST_IDS.conflictForget),
+        async () => {
         const refreshed = nodeRead(page, conflictFixture);
-        await activate(page.getByRole("button", { name: "Try again", exact: true }), modality);
+        await activate(page.getByRole("button", {
+          name: "Refresh memory after failed change",
+          exact: true,
+        }), modality);
         expect((await refreshed).status()).toBe(200);
         await expect(page.getByRole("alert")).toHaveCount(0);
         await expect(versionValue(page)).toHaveText("2");
@@ -575,7 +919,8 @@ test(`${TEST_IDS.lifecycle} and ${TEST_IDS.conflictForget} record both modalitie
         expect((await retried).status()).toBe(200);
         await expect(versionValue(page)).toHaveText("3");
         expect(readBrainNodeLifecycleState(conflictFixture)).toMatchObject({ pinned: false, version: 3 });
-      },
+        },
+      ),
     );
   }
 
@@ -616,7 +961,10 @@ test(`${TEST_IDS.conflictForget} reconciles a stale mutation and permanently era
   await expect(page.getByRole("alert")).toContainText(`Trace ${error.error.traceId}`);
 
   const refreshed = nodeRead(page);
-  await activate(page.getByRole("button", { name: "Try again", exact: true }), "keyboard");
+  await activate(page.getByRole("button", {
+    name: "Refresh memory after failed change",
+    exact: true,
+  }), "keyboard");
   expect((await refreshed).status()).toBe(200);
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(versionValue(page)).toHaveText("7");

@@ -14,7 +14,11 @@ import type {
   RuntimeCapabilityProjection,
   SafeStopDefinition,
 } from "../domain";
-import type { MissionCreateRequest, MissionEnvironmentClassification } from "../missions";
+import type {
+  GuidedMissionRequest,
+  MissionCreateRequest,
+  MissionEnvironmentClassification,
+} from "../missions";
 import type {
   GuidedReconnaissanceSelection,
   GuidedTcpPortPresetId,
@@ -26,6 +30,9 @@ import type {
   AgentModelAssignmentSelection,
   AutonomousPlanningSelection,
 } from "../model-config";
+import type {
+  GuidedLocalExploitIntelligenceSelection,
+} from "../local-exploit-intelligence/types";
 
 export interface IntakeFieldDefinition {
   readonly id: string;
@@ -62,6 +69,8 @@ export interface MissionIntakeRequest {
   readonly explanationDepth?: "concise" | "balanced" | "deep";
   readonly executionPreference?: "manual" | "single_step_agent";
   readonly guidedReconnaissance?: GuidedReconnaissanceSelection;
+  readonly guidedWindowsIdentity?: GuidedMissionRequest["guidedWindowsIdentity"];
+  readonly guidedLocalExploitIntelligence?: GuidedLocalExploitIntelligenceSelection;
   readonly specialistAgentIds?: readonly string[];
   /**
    * Partial mission-local overrides. Missing selected agents are materialized
@@ -119,6 +128,65 @@ export interface IntakeRegistrySnapshot {
       readonly example: string;
       readonly explanation: string;
     };
+  };
+  readonly guidedWindowsIdentity: {
+    readonly registryVersion: 1;
+    readonly sourceOfTruth: "reviewed-windows-identity-tool-pack";
+    readonly modes: readonly {
+      readonly id: NonNullable<GuidedMissionRequest["guidedWindowsIdentity"]>["operation"];
+      readonly label: string;
+      readonly description: string;
+      readonly expectedResult: string;
+      readonly toolId: string;
+      readonly authenticationModes: readonly (
+        NonNullable<GuidedMissionRequest["guidedWindowsIdentity"]>["authenticationMode"]
+      )[];
+      readonly readyAuthenticationModes: readonly (
+        NonNullable<GuidedMissionRequest["guidedWindowsIdentity"]>["authenticationMode"]
+      )[];
+      readonly readiness: "ready" | "unavailable";
+      readonly readinessExplanation: string;
+      readonly remediation: string;
+      readonly requiresSingleStepAgent: true;
+    }[];
+  };
+  readonly guidedLocalExploitIntelligence: {
+    readonly registryVersion: 1;
+    readonly sourceOfTruth: "pinned-local-exploitdb-tool-pack";
+    readonly toolId: string;
+    readonly readiness: "ready" | "unavailable";
+    readonly readinessExplanation: string;
+    readonly remediation: string;
+    readonly providerContact: false;
+    readonly targetContact: false;
+    readonly evidencePromotion: "none";
+    readonly requiresSingleStepAgent: true;
+    readonly queryKinds: readonly [
+      Readonly<{
+        readonly id: "cve";
+        readonly label: string;
+        readonly purpose: string;
+        readonly expectedResult: string;
+        readonly example: Readonly<{
+          readonly kind: "cve";
+          readonly cveId: string;
+          readonly maximumResults: number;
+        }>;
+      }>,
+      Readonly<{
+        readonly id: "technology";
+        readonly label: string;
+        readonly purpose: string;
+        readonly expectedResult: string;
+        readonly example: Readonly<{
+          readonly kind: "technology";
+          readonly product: string;
+          readonly version: string | null;
+          readonly platform: string | null;
+          readonly maximumResults: number;
+        }>;
+      }>,
+    ];
   };
 }
 

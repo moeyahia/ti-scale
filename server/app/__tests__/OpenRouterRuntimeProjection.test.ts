@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { OpenRouterReadinessRuntimeSnapshot } from "../../providers/openrouter";
-import { PRODUCT_AGENT_REGISTRY } from "../../agents";
+import { COMMANDER_AGENT_ID } from "../../agents";
 import {
   OPENROUTER_RUNTIME_PROVIDER_ID,
   projectOpenRouterRuntime,
@@ -105,7 +105,7 @@ describe("OpenRouter runtime projection", () => {
     })]);
     expect(projection.agents).toEqual([]);
     expect(projection.capabilityManifests?.agents.map(({ id }) => id)).toEqual(
-      PRODUCT_AGENT_REGISTRY.map(({ id }) => id),
+      [COMMANDER_AGENT_ID],
     );
     expect(projection.capabilityManifests?.agents.every((agent) =>
       agent.available === false
@@ -162,6 +162,32 @@ describe("OpenRouter runtime projection", () => {
         }],
       },
     }, snapshot(true))).toThrow("runtime readiness provider stable ID collision");
+  });
+
+  test("rejects a Commander manifest that carries specialist execution authority", () => {
+    const existing = baseline();
+    expect(() => projectOpenRouterRuntime({
+      ...existing,
+      capabilityManifests: {
+        riskClasses: [],
+        evidenceKinds: [],
+        capabilities: [],
+        tools: [],
+        mcpServers: [],
+        providers: [],
+        agents: [{
+          id: "Commander",
+          label: "Commander",
+          available: true,
+          capabilityIds: ["specialist-execution"],
+          actionClassIds: ["active_host_discovery"],
+          toolIds: ["nmap"],
+          modelRefs: [],
+        }],
+      },
+    }, snapshot(true))).toThrow(
+      "Commander manifest collides with executable specialist authority",
+    );
   });
 
   test("rejects a runtime row that cannot be tied to a real registry observation", () => {

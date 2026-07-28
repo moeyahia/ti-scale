@@ -1,7 +1,9 @@
-import type { Locator, Page, TestInfo } from "@playwright/test";
 import {
   expect,
   test,
+  type Locator,
+  type Page,
+  type TestInfo,
 } from "./support/playwright";
 import type { BrowserAuditController } from "./support/browserAudit";
 import type {
@@ -375,7 +377,10 @@ test(`${TEST_ID} proves missing, local, provider, expired, detail, and retry sta
     "Provider proof before direct browser refresh",
     "pointer",
   );
-  await page.reload({ waitUntil: "domcontentloaded" });
+  await browserAudit.withExpectedDocumentNavigationTeardown(
+    page,
+    () => page.reload({ waitUntil: "domcontentloaded" }),
+  );
   await expect(page).toHaveURL(new RegExp(
     `activationReceipt=${encodeURIComponent(provider.receiptId)}`,
     "u",

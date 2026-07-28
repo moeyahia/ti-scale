@@ -28,6 +28,11 @@ export {
   type WindowsIdentityGuidedPlannerOptions,
 } from "./WindowsIdentityGuidedRuntime";
 export {
+  LocalExploitIntelligenceGuidedPlanner,
+  createProductionGuidedLocalExploitIntelligenceRuntime,
+  type LocalExploitIntelligenceGuidedPlannerOptions,
+} from "./LocalExploitIntelligenceGuidedRuntime";
+export {
   RuntimeContinuationRepository,
   RUNTIME_CONTINUATION_KINDS,
 } from "./RuntimeContinuationRepository";

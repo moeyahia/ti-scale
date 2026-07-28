@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { expect, test, type Locator, type Page, type TestInfo } from "./support/playwright";
+import { expect, test, type Locator, type Page, type Route, type TestInfo } from "./support/playwright";
 import { BrowserAudit } from "./support/browserAudit";
 import {
   correctBrainVaultCanonicalNode,
@@ -30,6 +30,7 @@ const TEST_IDS = {
   conflicts: "e2e.brain-vault.conflict-resolution",
   degradedRecovery: "e2e.brain-vault.degraded-recovery",
   recovery: "e2e.brain-vault.repair-reindex-recovery",
+  operationRetries: "e2e.brain-vault.operation-retries",
 } as const;
 const manifest = validateInteractionManifest(
   JSON.parse(readFileSync(new URL("../interaction-manifest.json", import.meta.url), "utf8")) as unknown,
@@ -114,6 +115,82 @@ async function activateButton(control: Locator, modality: "pointer" | "keyboard"
   else {
     await control.focus();
     await control.press("Enter");
+  }
+}
+
+type VaultRetryScenario =
+  | "preset-health"
+  | "custom-health"
+  | "connect"
+  | "reindex"
+  | "reconcile";
+
+interface VaultRetryRequest {
+  readonly method: string;
+  readonly pathname: string;
+  readonly body: unknown;
+  readonly idempotencyKey: string | null;
+}
+
+interface ActiveVaultRetryScenario {
+  readonly kind: VaultRetryScenario;
+  failPending: boolean;
+  reconcileArmed: boolean;
+  mutationRequests: number;
+  readonly requests: VaultRetryRequest[];
+}
+
+function retryRequestSnapshot(request: {
+  method(): string;
+  url(): string;
+  postDataJSON(): unknown;
+  headerValue(name: string): Promise<string | null>;
+}): Promise<VaultRetryRequest> {
+  return request.headerValue("idempotency-key").then((idempotencyKey) => ({
+    method: request.method(),
+    pathname: new URL(request.url()).pathname,
+    body: request.postDataJSON(),
+    idempotencyKey,
+  }));
+}
+
+function retryFailureEnvelope(kind: VaultRetryScenario): string {
+  return JSON.stringify({
+    error: {
+      code: `e2e_${kind.replaceAll("-", "_")}_retry_once`,
+      message: `Disposable ${kind} request failed once`,
+      humanMessage: `The disposable ${kind.replaceAll("-", " ")} request was interrupted once.`,
+      retryable: true,
+      category: "dependency_unavailable",
+      remediation: "Retry the same represented operation.",
+      traceId: `trace-e2e-${kind}`,
+      timestamp: "2099-07-16T22:00:00.000Z",
+    },
+  });
+}
+
+function expectExactRetryPair(
+  scenario: ActiveVaultRetryScenario,
+  expected: {
+    readonly method: string;
+    readonly pathname: string;
+    readonly preserveIdempotencyKey?: boolean;
+  },
+): void {
+  expect(scenario.requests).toHaveLength(2);
+  const [failed, retried] = scenario.requests;
+  expect(failed).toMatchObject({
+    method: expected.method,
+    pathname: expected.pathname,
+  });
+  expect(retried).toMatchObject({
+    method: expected.method,
+    pathname: expected.pathname,
+  });
+  expect(retried.body).toEqual(failed.body);
+  if (expected.preserveIdempotencyKey) {
+    expect(failed.idempotencyKey).toMatch(/^[0-9a-f-]{20,}$/u);
+    expect(retried.idempotencyKey).toBe(failed.idempotencyKey);
   }
 }
 
@@ -867,6 +944,32 @@ test(`${TEST_IDS.recovery} and ${TEST_IDS.degradedRecovery} record both modaliti
     await expect(repairReceipt).toContainText("Conflicts preserved");
     await expect(repairReceipt).toContainText("Quarantined");
     await expect(repairReceipt).toContainText("Missing");
+    const recoveryDetails = repairReceipt.locator("details").filter({
+      has: page.getByText("Recovery details", { exact: true }),
+    });
+    await expect(recoveryDetails).toHaveCount(1);
+    const recoverySummary = recoveryDetails.locator("summary");
+    await expect(recoverySummary).toHaveAttribute("id", "brain-vault-recovery-details");
+    await expect(recoverySummary).toHaveAttribute("data-testid", "brain-vault-recovery-details");
+    await recordActivation(
+      interactionActivation,
+      "brain.vault.recovery-details",
+      "Open issue details",
+      modality,
+      TEST_IDS.recovery,
+      () => activateButton(recoverySummary, modality),
+    );
+    await expect(recoveryDetails).toHaveJSProperty("open", true);
+    await expect(recoveryDetails.getByRole("listitem").first()).toBeVisible();
+    await recordActivation(
+      interactionActivation,
+      "brain.vault.recovery-details",
+      "Close issue details",
+      modality,
+      TEST_IDS.recovery,
+      () => activateButton(recoverySummary, modality),
+    );
+    await expect(recoveryDetails).toHaveJSProperty("open", false);
     let state = readBrainVaultOperationsState(fixture);
     expect(state.connection.status).toBe("degraded");
     expect(state.conflicts.filter((item) => item.status === "open")).toHaveLength(1);
@@ -931,6 +1034,7 @@ test(`${TEST_IDS.recovery} and ${TEST_IDS.degradedRecovery} record both modaliti
     );
 
     const offline = takeBrainVaultOffline(fixture);
+    let restoredForRetry = false;
     try {
       const rejected = page.waitForResponse((response) => response.request().method() === "POST"
         && new URL(response.url()).pathname === "/api/v2/brain/vault/repair"
@@ -951,8 +1055,26 @@ test(`${TEST_IDS.recovery} and ${TEST_IDS.degradedRecovery} record both modaliti
           expect(existsSync(offline.detachedPath)).toBe(true);
         },
       );
-    } finally {
+      const retryRepair = page.getByRole("button", { name: "Retry Vault repair", exact: true });
+      await expect(retryRepair).toHaveAttribute("id", "brain-vault-repair-retry");
+      await expect(retryRepair).toHaveAttribute("data-control-id", "brain-vault-repair-retry");
       restoreBrainVaultOnline(offline);
+      restoredForRetry = true;
+      const retried = page.waitForResponse((response) => response.request().method() === "POST"
+        && new URL(response.url()).pathname === "/api/v2/brain/vault/repair"
+        && response.status() === 200);
+      await recordActivation(
+        interactionActivation,
+        "brain.vault.retry.repair",
+        "Retry the same version-pinned repair after the path is restored",
+        modality,
+        TEST_IDS.recovery,
+        () => activateButton(retryRepair, modality),
+      );
+      expect((await retried).status()).toBe(200);
+      await expect(page.getByText("Vault repair stopped safely", { exact: true })).toHaveCount(0);
+    } finally {
+      if (!restoredForRetry) restoreBrainVaultOnline(offline);
     }
   }
 
@@ -960,6 +1082,291 @@ test(`${TEST_IDS.recovery} and ${TEST_IDS.degradedRecovery} record both modaliti
   expect(audit.unexpected).toEqual([]);
   expect(audit.degradedApi).toEqual([]);
   await audit.assertClean(testInfo);
+});
+
+test(`${TEST_IDS.operationRetries} retries every named Vault operation without changing its represented request`, async ({
+  page,
+  browserAudit,
+  interactionActivation,
+}, testInfo) => {
+  test.setTimeout(240_000);
+  testInfo.annotations.push({
+    type: "interaction-test-id",
+    description: TEST_IDS.operationRetries,
+  });
+  browserAudit.expectHttpResponse(page, {
+    id: "brain.vault.operation-retries.health-failure-once",
+    transport: "browser",
+    method: "POST",
+    pathname: "/api/v2/brain/vault/health-check",
+    query: {},
+    status: 503,
+    occurrences: 4,
+    reason: "Prove preset and custom Vault health retries for pointer and keyboard activation.",
+  });
+  browserAudit.expectHttpResponse(page, {
+    id: "brain.vault.operation-retries.connect-failure-once",
+    transport: "browser",
+    method: "POST",
+    pathname: "/api/v2/brain/vault/connect",
+    query: {},
+    status: 503,
+    occurrences: 2,
+    reason: "Prove connection retries for pointer and keyboard activation.",
+  });
+  browserAudit.expectHttpResponse(page, {
+    id: "brain.vault.operation-retries.reindex-failure-once",
+    transport: "browser",
+    method: "POST",
+    pathname: "/api/v2/brain/vault/reindex",
+    query: {},
+    status: 503,
+    occurrences: 2,
+    reason: "Prove bounded reindex retries preserve their recovery attempt for pointer and keyboard activation.",
+  });
+  browserAudit.expectHttpResponse(page, {
+    id: "brain.vault.operation-retries.reconcile-failure-once",
+    transport: "browser",
+    method: "GET",
+    pathname: "/api/v2/brain/vault",
+    query: {},
+    status: 503,
+    occurrences: 2,
+    reason: "Prove status refresh retries reconcile committed operations without replaying them.",
+  });
+
+  const runtimeErrors: string[] = [];
+  page.on("pageerror", (error) => runtimeErrors.push(error.message));
+  page.on("console", (message) => {
+    if (
+      message.type() === "error"
+      && message.text() !== "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+    ) {
+      runtimeErrors.push(message.text());
+    }
+  });
+
+  let activeScenario: ActiveVaultRetryScenario | undefined;
+  const startScenario = (kind: VaultRetryScenario): ActiveVaultRetryScenario => {
+    const scenario: ActiveVaultRetryScenario = {
+      kind,
+      failPending: true,
+      reconcileArmed: false,
+      mutationRequests: 0,
+      requests: [],
+    };
+    activeScenario = scenario;
+    return scenario;
+  };
+  const finishScenario = (scenario: ActiveVaultRetryScenario): void => {
+    expect(activeScenario).toBe(scenario);
+    expect(scenario.failPending).toBe(false);
+    activeScenario = undefined;
+  };
+
+  await page.route(/\/api\/v2\/brain\/vault(?:\/[^?#]*)?(?:\?[^#]*)?$/u, async (route: Route) => {
+    const scenario = activeScenario;
+    if (!scenario) {
+      await route.fallback();
+      return;
+    }
+    const request = route.request();
+    const method = request.method();
+    const pathname = new URL(request.url()).pathname;
+    const isReindexMutation = method === "POST" && pathname === "/api/v2/brain/vault/reindex";
+    if (scenario.kind === "reconcile" && isReindexMutation) {
+      scenario.mutationRequests += 1;
+      scenario.reconcileArmed = true;
+      await route.fallback();
+      return;
+    }
+    const expectedPath = scenario.kind === "preset-health" || scenario.kind === "custom-health"
+      ? "/api/v2/brain/vault/health-check"
+      : scenario.kind === "connect"
+        ? "/api/v2/brain/vault/connect"
+        : scenario.kind === "reindex"
+          ? "/api/v2/brain/vault/reindex"
+          : "/api/v2/brain/vault";
+    const expectedMethod = scenario.kind === "reconcile" ? "GET" : "POST";
+    if (
+      method !== expectedMethod
+      || pathname !== expectedPath
+      || (scenario.kind === "reconcile" && !scenario.reconcileArmed)
+    ) {
+      await route.fallback();
+      return;
+    }
+    scenario.requests.push(await retryRequestSnapshot(request));
+    if (scenario.failPending) {
+      scenario.failPending = false;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        headers: { "x-request-id": `trace-e2e-${scenario.kind}` },
+        body: retryFailureEnvelope(scenario.kind),
+      });
+      return;
+    }
+    await route.fallback();
+  });
+
+  for (const modality of ["pointer", "keyboard"] as const) {
+    const fixture = createBrainVaultOperationsFixture(
+      canonicalFixtureNamespace(testInfo, `${modality}-brain-vault-operation-retries`),
+    );
+    if (page.url() === "about:blank") {
+      await page.goto("/brain/vault", { waitUntil: "domcontentloaded" });
+    } else {
+      await browserAudit.withExpectedDocumentNavigationTeardown(
+        page,
+        () => page.goto("/brain/vault", { waitUntil: "domcontentloaded" }),
+      );
+    }
+    await expect(page.getByRole("heading", { level: 1, name: "Obsidian Vault", exact: true })).toBeVisible();
+
+    const presetCard = page.locator(".brain-attack-vault-preset");
+    const presetPermission = presetCard.getByLabel("Grant Attack Knowledge Vault filesystem permission", { exact: true });
+    const testPresetPath = presetCard.getByRole("button", { name: "Test preset path", exact: true });
+    await expect(testPresetPath).toBeVisible();
+    await presetPermission.check();
+    const presetHealthScenario = startScenario("preset-health");
+    await activateButton(testPresetPath, modality);
+    const presetHealthRetry = page.getByRole("button", { name: "Retry preset path health check", exact: true });
+    await expect(presetHealthRetry).toHaveAttribute("id", "brain-vault-preset-health-retry");
+    await expect(presetHealthRetry).toHaveAttribute("data-control-id", "brain-vault-preset-health-retry");
+    await recordActivation(
+      interactionActivation,
+      "brain.vault.preset-health-retry",
+      "Retry preset path health check",
+      modality,
+      TEST_IDS.operationRetries,
+      () => activateButton(presetHealthRetry, modality),
+    );
+    await expect(presetCard.getByText("Preset path round-trip verified", { exact: true })).toBeVisible();
+    expectExactRetryPair(presetHealthScenario, {
+      method: "POST",
+      pathname: "/api/v2/brain/vault/health-check",
+    });
+    finishScenario(presetHealthScenario);
+
+    const displayName = page.getByLabel("Display name", { exact: true });
+    const relativePath = page.getByLabel("Path inside the allowed root", { exact: true });
+    const customPermission = page.getByLabel("Grant explicit filesystem permission", { exact: true });
+    await displayName.fill(fixture.displayName);
+    await relativePath.fill(fixture.relativePath);
+    await customPermission.check();
+    const customHealthScenario = startScenario("custom-health");
+    await activateButton(
+      page.getByRole("button", { name: "Test write, read, rename, and delete", exact: true }),
+      modality,
+    );
+    const customHealthRetry = page.getByRole("button", {
+      name: "Retry custom Vault path health check",
+      exact: true,
+    });
+    await expect(customHealthRetry).toHaveAttribute("id", "brain-vault-custom-health-retry");
+    await expect(customHealthRetry).toHaveAttribute("data-control-id", "brain-vault-custom-health-retry");
+    await recordActivation(
+      interactionActivation,
+      "brain.vault.custom-health-retry",
+      "Retry custom Vault path health check",
+      modality,
+      TEST_IDS.operationRetries,
+      () => activateButton(customHealthRetry, modality),
+    );
+    await expect(page.getByText("Round-trip verified", { exact: true })).toBeVisible();
+    expectExactRetryPair(customHealthScenario, {
+      method: "POST",
+      pathname: "/api/v2/brain/vault/health-check",
+    });
+    finishScenario(customHealthScenario);
+
+    const connectScenario = startScenario("connect");
+    await activateButton(page.getByRole("button", { name: "Connect verified vault", exact: true }), modality);
+    const connectRetry = page.getByRole("button", { name: "Retry Vault connection", exact: true });
+    await expect(connectRetry).toHaveAttribute("id", "brain-vault-connect-retry");
+    await expect(connectRetry).toHaveAttribute("data-control-id", "brain-vault-connect-retry");
+    await recordActivation(
+      interactionActivation,
+      "brain.vault.connect-retry",
+      "Retry Vault connection",
+      modality,
+      TEST_IDS.operationRetries,
+      () => activateButton(connectRetry, modality),
+    );
+    const connectionHeading = page.getByRole("heading", { level: 2, name: fixture.relativePath, exact: true });
+    await expect(connectionHeading).toBeVisible();
+    expectExactRetryPair(connectScenario, {
+      method: "POST",
+      pathname: "/api/v2/brain/vault/connect",
+    });
+    finishScenario(connectScenario);
+
+    scopeBrainVaultConnection(fixture);
+    await browserAudit.withExpectedDocumentNavigationTeardown(
+      page,
+      () => page.reload({ waitUntil: "domcontentloaded" }),
+    );
+    const connectionCard = page.locator("section").filter({
+      has: page.getByRole("heading", { level: 2, name: fixture.relativePath, exact: true }),
+    });
+    await expect(connectionCard).toBeVisible();
+    await connectionCard.getByRole("button", { name: "Export canonical notes", exact: true }).click();
+    await expect(page.getByRole("status").filter({
+      hasText: "Exported 3 accessible canonical notes",
+    })).toBeVisible();
+
+    const reindexScenario = startScenario("reindex");
+    await activateButton(connectionCard.getByRole("button", { name: "Reindex vault", exact: true }), modality);
+    const reindexRetry = page.getByRole("button", { name: "Retry Vault reindex", exact: true });
+    await expect(reindexRetry).toHaveAttribute("id", "brain-vault-reindex-retry");
+    await expect(reindexRetry).toHaveAttribute("data-control-id", "brain-vault-reindex-retry");
+    await recordActivation(
+      interactionActivation,
+      "brain.vault.reindex-retry",
+      "Retry Vault reindex",
+      modality,
+      TEST_IDS.operationRetries,
+      () => activateButton(reindexRetry, modality),
+    );
+    await expect(page.getByRole("heading", { level: 2, name: "Vault reindex", exact: true })).toBeVisible();
+    await expect(page.getByText("Vault reindex stopped safely", { exact: true })).toHaveCount(0);
+    expectExactRetryPair(reindexScenario, {
+      method: "POST",
+      pathname: "/api/v2/brain/vault/reindex",
+      preserveIdempotencyKey: true,
+    });
+    finishScenario(reindexScenario);
+
+    const reconcileScenario = startScenario("reconcile");
+    await activateButton(connectionCard.getByRole("button", { name: "Reindex vault", exact: true }), modality);
+    await expect(page.getByText("Operation committed; status refresh failed", { exact: true })).toBeVisible();
+    const reconcileRetry = page.getByRole("button", { name: "Retry Vault status refresh", exact: true });
+    await expect(reconcileRetry).toHaveAttribute("id", "brain-vault-reconcile-retry");
+    await expect(reconcileRetry).toHaveAttribute("data-control-id", "brain-vault-reconcile-retry");
+    expect(reconcileScenario.mutationRequests).toBe(1);
+    await recordActivation(
+      interactionActivation,
+      "brain.vault.reconcile-retry",
+      "Retry Vault status refresh",
+      modality,
+      TEST_IDS.operationRetries,
+      () => activateButton(reconcileRetry, modality),
+    );
+    await expect(page.getByText("Operation committed; status refresh failed", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { level: 2, name: "Vault reindex", exact: true })).toBeVisible();
+    expect(reconcileScenario.mutationRequests).toBe(1);
+    expectExactRetryPair(reconcileScenario, {
+      method: "GET",
+      pathname: "/api/v2/brain/vault",
+    });
+    finishScenario(reconcileScenario);
+    expect(readBrainVaultOperationsState(fixture).connection.status).not.toBe("error");
+  }
+
+  expect(activeScenario).toBeUndefined();
+  expect(runtimeErrors).toEqual([]);
+  await browserAudit.waitForPageApiSettlement(page, { quietMs: 1_000 });
 });
 
 test("connects only after a real round-trip and preserves canonical health on reload", async ({ page }, testInfo) => {

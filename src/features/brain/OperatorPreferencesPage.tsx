@@ -77,7 +77,12 @@ export default function OperatorPreferencesPage() {
         <p>Operator Preferences are kept separate from reusable attack knowledge. They enter the Attack Knowledge Vault only through the separate, explicit Operator Profile consent on the Vault page; targets and operational records remain excluded. Preferences can never weaken scope, evidence, disclosure, or safety policy.</p>
       </Card>
       {preferences.isLoading && <LoadingPanel label="Loading confirmed operator preferences" />}
-      {preferences.error && !preferences.data && <ErrorPanel error={preferences.error} onRetry={preferences.refresh} />}
+      {preferences.error && !preferences.data && <ErrorPanel
+        error={preferences.error}
+        onRetry={preferences.refresh}
+        retryControlId="brain-preferences-read-retry"
+        retryLabel="Retry Operator Preferences"
+      />}
       {preferences.data && preferences.data.items.length === 0 && <BrainEmpty
         title="No confirmed operator preferences yet"
         description="Explicitly confirmed collaboration, presentation, accessibility, and workflow preferences will appear here with their source and confirmation time."

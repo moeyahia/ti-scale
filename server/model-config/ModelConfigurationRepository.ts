@@ -461,6 +461,22 @@ export class ModelConfigurationRepository {
     return row ? assignment(row) : null;
   }
 
+  listPinnedAssignmentsForRun(runId: string): PinnedModelAssignment[] {
+    if (!this.database.prepare("SELECT 1 FROM runs WHERE id = ?").get(runId)) {
+      throw modelConfigurationNotFound(
+        "model_configuration_run_not_found",
+        `Run was not found: ${runId}`,
+        "Use a canonical run ID from the selected mission.",
+      );
+    }
+    const rows = this.database.prepare(`
+      ${ASSIGNMENT_SELECT}
+      WHERE run_id = ? AND pinned = 1
+      ORDER BY assignment_purpose, agent_id, step_id, created_at, id
+    `).all(runId) as AssignmentRow[];
+    return rows.map(assignment);
+  }
+
   createPinnedAssignment(
     input: PinModelAssignmentInput,
     preferenceValue: ModelAssignmentPreference,

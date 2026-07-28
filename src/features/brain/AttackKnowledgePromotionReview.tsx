@@ -220,7 +220,12 @@ export default function AttackKnowledgePromotionReview({ candidateRevision = 0 }
         </header>
         <p>Review the generalized bundle, select only its compiler-bound canonical evidence, inspect the exact hash, then deliberately promote. Nothing is promoted automatically.</p>
         {bundles.isLoading && <LoadingPanel label="Loading staged attack knowledge" />}
-        {bundles.error && !bundles.data && <ErrorPanel error={bundles.error} onRetry={bundles.refresh} />}
+        {bundles.error && !bundles.data && <ErrorPanel
+          error={bundles.error}
+          onRetry={bundles.refresh}
+          retryControlId="brain-inbox-promotion-queue-retry"
+          retryLabel="Retry promotion queue"
+        />}
         {bundles.data?.items.length === 0 && <p className="brain-mutation-note">No staged or recently promoted attack-knowledge bundles are available.</p>}
         {bundles.data && bundles.data.items.length > 0 && <div className="attack-promotion-bundle-list">
           {bundles.data.items.map((bundle) => <BundleSummary
@@ -235,7 +240,12 @@ export default function AttackKnowledgePromotionReview({ candidateRevision = 0 }
           <header><div><p className="os-eyebrow">Private review input</p><h3>Bundle-linked verified evidence</h3></div><span>{selectedEvidenceIds.length} selected</span></header>
           <p>Only evidence immutably linked by the local compiler is offered here. Raw command output and unrelated evidence cannot be selected.</p>
           {evidence.isLoading && <LoadingPanel label="Loading bound canonical evidence" />}
-          {evidence.error && !evidence.data && <ErrorPanel error={evidence.error} onRetry={evidence.refresh} />}
+          {evidence.error && !evidence.data && <ErrorPanel
+            error={evidence.error}
+            onRetry={evidence.refresh}
+            retryControlId="brain-inbox-promotion-evidence-retry"
+            retryLabel="Retry promotion evidence"
+          />}
           {evidence.data?.items.length === 0 && <div className="os-validation-summary" role="status"><strong>No canonical evidence is bound to this bundle</strong><p>The bundle remains visibly blocked. Re-run trusted local compilation with its canonical evidence lineage; this review surface cannot create or repair bindings.</p></div>}
           {evidence.data && evidence.data.items.length > 0 && <fieldset>
             <legend>Select evidence for this exact review</legend>
@@ -263,7 +273,16 @@ export default function AttackKnowledgePromotionReview({ candidateRevision = 0 }
             {mutation.busy ? "Committing verified memory…" : "Promote verified attack knowledge"}
           </Button>
         </section>}
-        {mutation.error && <ErrorPanel error={mutation.error} onRetry={preview?.ready && acknowledged ? promote : createPreview} />}
+        {mutation.error && <ErrorPanel
+          error={mutation.error}
+          onRetry={preview?.ready && acknowledged ? promote : createPreview}
+          retryControlId={preview?.ready && acknowledged
+            ? "brain-inbox-promotion-commit-retry"
+            : "brain-inbox-promotion-preview-retry"}
+          retryLabel={preview?.ready && acknowledged
+            ? "Retry promotion commit"
+            : "Retry promotion preview"}
+        />}
         {receipt && <ImmutableReceipt receipt={receipt} />}
       </section>
     </Card>

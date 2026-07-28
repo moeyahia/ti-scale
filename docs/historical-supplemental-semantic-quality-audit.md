@@ -69,10 +69,10 @@ Accepted generic semantic source paths were limited to the product runtime:
 
 | Root and source class | Accepted paths | Accepted source bytes |
 | --- | ---: | ---: |
-| `/var/lib/chillspwn/state` raw runtime JSONL | 408 | 195,198,433 |
-| `/var/lib/chillspwn/state` structured session JSON | 125 | 8,818,989 |
-| `/var/lib/chillspwn/hermes` raw runtime JSONL | 34 | 13,089,757 |
-| `/var/lib/chillspwn/hermes` completed provider/tool JSONL | 2 | 832,764 |
+| application runtime raw JSONL | 408 | 195,198,433 |
+| application runtime structured session JSON | 125 | 8,818,989 |
+| orchestration runtime raw JSONL | 34 | 13,089,757 |
+| orchestration runtime completed provider/tool JSONL | 2 | 832,764 |
 
 These byte totals identify hash-bound source objects containing at least one
 accepted record. They are not claims that every byte is reusable knowledge.

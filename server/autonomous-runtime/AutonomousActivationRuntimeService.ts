@@ -12,7 +12,10 @@ import {
   isMcpAttestationFresh,
 } from "../mcp";
 import type { JsonValue } from "../events";
-import { agentAssignmentBindsRuntimeAgent } from "../agents";
+import {
+  agentAssignmentBindsRuntimeAgent,
+  productAgentIdForActionClass,
+} from "../agents";
 import type { AutonomousPlanningSelection } from "../model-config";
 import {
   ModelConfigurationRepository,
@@ -1257,12 +1260,16 @@ implements AutonomousActivationRuntimePort {
         );
       }
       const selectedBinding = selectedBindings[0]!;
+      const productAgentId = productAgentIdForActionClass(actionClassId);
       const selectedAssignments = assignments.filter(({ agent_id }) =>
         agent_id === selectedBinding.agentId
-        || agentAssignmentBindsRuntimeAgent(
-          this.database,
-          agent_id,
-          selectedBinding.agentId,
+        || (
+          agent_id === productAgentId
+          && agentAssignmentBindsRuntimeAgent(
+            this.database,
+            agent_id,
+            selectedBinding.agentId,
+          )
         ));
       if (selectedAssignments.length !== 1) {
         throw activationFailure(

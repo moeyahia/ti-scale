@@ -1,13 +1,24 @@
-import { expect, test, type Page } from "./support/playwright";
+import { readFileSync } from "node:fs";
+import { expect, test, type Locator, type Page, type Route } from "./support/playwright";
 import {
   createAttackKnowledgePromotionFixture,
   readAttackKnowledgePromotionSnapshot,
   type AttackKnowledgePromotionFixture,
 } from "./support/attackKnowledgePromotionFixture";
 import { canonicalFixtureNamespace } from "./support/fixtureNamespace";
+import { waitForInteractiveApplication } from "./support/applicationReadiness";
+import {
+  type InteractionActivationInput,
+  type InteractionActivationRecorder,
+} from "./support/interactionActivationFixture";
+import { validateInteractionManifest } from "../interaction-manifest/schema";
 
 const TEST_ID = "e2e.brain-inbox.attack-promotion";
+const RETRY_TEST_ID = "e2e.brain-inbox.attack-promotion-retries";
 let fixture: AttackKnowledgePromotionFixture;
+const manifest = validateInteractionManifest(
+  JSON.parse(readFileSync(new URL("../interaction-manifest.json", import.meta.url), "utf8")) as unknown,
+);
 
 test.describe.configure({ mode: "serial" });
 test.beforeAll(({}, testInfo) => {
@@ -24,6 +35,78 @@ function bundleButton(page: Page, fingerprint: string) {
   return page.getByRole("button", {
     name: `Review operational hazard bundle ${shortFingerprint(fingerprint)}`,
     exact: true,
+  });
+}
+
+function activation(
+  manifestEntryId: string,
+  option: string,
+  modality: "pointer" | "keyboard",
+): InteractionActivationInput {
+  const entry = manifest.entries.find((candidate) => candidate.id === manifestEntryId);
+  if (!entry) throw new Error(`Attack Knowledge manifest entry ${manifestEntryId} is missing`);
+  if (!entry.options.includes(option)) {
+    throw new Error(`Attack Knowledge manifest entry ${manifestEntryId} does not declare ${option}`);
+  }
+  if (!entry.testIds.includes(RETRY_TEST_ID)) {
+    throw new Error(`Attack Knowledge manifest entry ${manifestEntryId} does not declare ${RETRY_TEST_ID}`);
+  }
+  return {
+    manifestEntryId,
+    controlId: entry.controlId,
+    option,
+    materialState: entry.requiredState,
+    modality,
+    testId: RETRY_TEST_ID,
+  };
+}
+
+async function recordActivation<T>(
+  recorder: InteractionActivationRecorder,
+  manifestEntryId: string,
+  option: string,
+  modality: "pointer" | "keyboard",
+  action: () => Promise<T>,
+): Promise<T> {
+  return recorder.activate(activation(manifestEntryId, option, modality), action);
+}
+
+async function activateButton(control: Locator, modality: "pointer" | "keyboard"): Promise<void> {
+  if (modality === "pointer") await control.click();
+  else {
+    await control.focus();
+    await control.press("Enter");
+  }
+}
+
+function retryFailure(traceId: string) {
+  return {
+    error: {
+      code: "attack_knowledge_fixture_temporarily_unavailable",
+      message: "Attack Knowledge fixture temporarily unavailable",
+      humanMessage: "This exact promotion operation could not complete.",
+      retryable: true,
+      category: "dependency",
+      remediation: "Retry only this represented promotion operation.",
+      traceId,
+      timestamp: "2099-07-20T20:00:00.000Z",
+    },
+  };
+}
+
+async function failOnce(page: Page, pattern: string, traceId: string): Promise<void> {
+  let failed = false;
+  await page.route(pattern, async (route: Route) => {
+    if (!failed) {
+      failed = true;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify(retryFailure(traceId)),
+      });
+      return;
+    }
+    await route.continue();
   });
 }
 
@@ -196,4 +279,136 @@ test(`${TEST_ID} reviews only compiler-bound evidence and commits one immutable 
   const persistedBundle = bundleButton(page, fixture.bundleFingerprint).locator("xpath=..");
   await expect(persistedBundle.getByRole("region", { name: "Immutable promotion receipt summary", exact: true })).toContainText(receipt.receiptId);
   await expect(persistedBundle).toContainText(previewPayload.reviewHash);
+});
+
+test(`${RETRY_TEST_ID} keeps queue, evidence, preview, and commit recovery distinct`, async ({
+  page,
+  browserAudit,
+  interactionActivation,
+}, testInfo) => {
+  test.setTimeout(120_000);
+  const bundlesPath = "/api/v2/brain/attack-knowledge/bundles";
+  browserAudit.expectHttpResponse(page, {
+    id: "brain.promotion.queue.initial-unavailable",
+    transport: "browser",
+    method: "GET",
+    pathname: bundlesPath,
+    query: { status: "all" },
+    status: 503,
+    occurrences: 2,
+    reason: "Exercise both physical modalities through the exact queue retry control.",
+  });
+
+  for (const modality of ["pointer", "keyboard"] as const) {
+    const retryFixture = createAttackKnowledgePromotionFixture(
+      canonicalFixtureNamespace(testInfo, `attack-knowledge-promotion-retries-${modality}`),
+    );
+    const endpoints = {
+      evidence: `/api/v2/brain/attack-knowledge/bundles/${retryFixture.bundleFingerprint}/evidence`,
+      preview: `/api/v2/brain/attack-knowledge/bundles/${retryFixture.bundleFingerprint}/preview`,
+      promote: `/api/v2/brain/attack-knowledge/bundles/${retryFixture.bundleFingerprint}/promote`,
+    } as const;
+    for (const expectation of [
+      { id: `brain.promotion.evidence.initial-unavailable.${modality}`, method: "GET" as const, pathname: endpoints.evidence },
+      { id: `brain.promotion.preview.initial-unavailable.${modality}`, method: "POST" as const, pathname: endpoints.preview },
+      { id: `brain.promotion.commit.initial-unavailable.${modality}`, method: "POST" as const, pathname: endpoints.promote },
+    ]) {
+      browserAudit.expectHttpResponse(page, {
+        ...expectation,
+        transport: "browser",
+        query: {},
+        status: 503,
+        occurrences: 1,
+        reason: `Exercise ${expectation.id} through its exact retry control.`,
+      });
+    }
+
+    await failOnce(page, "**/api/v2/brain/attack-knowledge/bundles?*", `trace-promotion-queue-retry-${modality}`);
+    await failOnce(page, `**${endpoints.evidence}`, `trace-promotion-evidence-retry-${modality}`);
+    await failOnce(page, `**${endpoints.preview}`, `trace-promotion-preview-retry-${modality}`);
+    await failOnce(page, `**${endpoints.promote}`, `trace-promotion-commit-retry-${modality}`);
+    try {
+      await page.goto("/brain/inbox", { waitUntil: "domcontentloaded" });
+      await waitForInteractiveApplication(page);
+
+      const queueRetry = page.getByRole("button", { name: "Retry promotion queue", exact: true });
+      await expect(queueRetry).toHaveAttribute("id", "brain-inbox-promotion-queue-retry");
+      const queueRecovered = page.waitForResponse((response) => response.request().method() === "GET"
+        && new URL(response.url()).pathname === bundlesPath
+        && response.status() === 200);
+      await recordActivation(
+        interactionActivation,
+        "brain.inbox.promotion.retry.queue",
+        "Retry only the bounded promotion queue",
+        modality,
+        () => activateButton(queueRetry, modality),
+      );
+      expect((await queueRecovered).status()).toBe(200);
+
+      await bundleButton(page, retryFixture.bundleFingerprint).click();
+      const evidenceRetry = page.getByRole("button", { name: "Retry promotion evidence", exact: true });
+      await expect(evidenceRetry).toHaveAttribute("id", "brain-inbox-promotion-evidence-retry");
+      const evidenceRecovered = page.waitForResponse((response) => response.request().method() === "GET"
+        && new URL(response.url()).pathname === endpoints.evidence
+        && response.status() === 200);
+      await recordActivation(
+        interactionActivation,
+        "brain.inbox.promotion.retry.evidence",
+        "Retry only the selected bundle's evidence lineage",
+        modality,
+        () => activateButton(evidenceRetry, modality),
+      );
+      expect((await evidenceRecovered).status()).toBe(200);
+      for (const evidenceId of retryFixture.evidenceIds) {
+        await page.getByRole("checkbox", { name: new RegExp(`^Use verified evidence ${evidenceId}`) }).check();
+      }
+
+      const previewFailure = page.waitForResponse((response) => response.request().method() === "POST"
+        && new URL(response.url()).pathname === endpoints.preview
+        && response.status() === 503);
+      await page.getByRole("button", { name: "Preview exact promotion", exact: true }).click();
+      await previewFailure;
+      const previewRetry = page.getByRole("button", { name: "Retry promotion preview", exact: true });
+      await expect(previewRetry).toHaveAttribute("id", "brain-inbox-promotion-preview-retry");
+      const previewRecovered = page.waitForResponse((response) => response.request().method() === "POST"
+        && new URL(response.url()).pathname === endpoints.preview
+        && response.status() === 200);
+      await recordActivation(
+        interactionActivation,
+        "brain.inbox.promotion.retry.preview",
+        "Retry the exact selected-bundle and evidence preview",
+        modality,
+        () => activateButton(previewRetry, modality),
+      );
+      expect((await previewRecovered).status()).toBe(200);
+
+      await page.getByRole("checkbox", {
+        name: /^I reviewed this exact diff and evidence set/u,
+      }).check();
+      const commitFailure = page.waitForResponse((response) => response.request().method() === "POST"
+        && new URL(response.url()).pathname === endpoints.promote
+        && response.status() === 503);
+      await page.getByRole("button", { name: "Promote verified attack knowledge", exact: true }).click();
+      await commitFailure;
+      const commitRetry = page.getByRole("button", { name: "Retry promotion commit", exact: true });
+      await expect(commitRetry).toHaveAttribute("id", "brain-inbox-promotion-commit-retry");
+      const commitRecovered = page.waitForResponse((response) => response.request().method() === "POST"
+        && new URL(response.url()).pathname === endpoints.promote
+        && response.status() === 200);
+      await recordActivation(
+        interactionActivation,
+        "brain.inbox.promotion.retry.commit",
+        "Retry the exact acknowledged promotion mutation idempotently",
+        modality,
+        () => activateButton(commitRetry, modality),
+      );
+      expect((await commitRecovered).status()).toBe(200);
+      await expect(page.getByRole("status").filter({ hasText: "Immutable operator receipt" })).toBeVisible();
+    } finally {
+      await page.unroute("**/api/v2/brain/attack-knowledge/bundles?*");
+      await page.unroute(`**${endpoints.evidence}`);
+      await page.unroute(`**${endpoints.preview}`);
+      await page.unroute(`**${endpoints.promote}`);
+    }
+  }
 });

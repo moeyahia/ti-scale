@@ -8,6 +8,7 @@ import {
   migrateDatabase,
   type SqliteDatabase,
 } from "../../db";
+import { COMMANDER_AGENT_ID } from "../../agents";
 import {
   autonomousActivationEvidencePolicyHash,
   AutonomousActivationReceiptIntegrityError,
@@ -42,8 +43,8 @@ const EVIDENCE_REQUIREMENTS = [
 ] as const;
 const PROVIDER_PLANNING_SELECTION = {
   route: "provider_advisory",
-  agentId: "VulnIntel",
-  primaryConfigurationId: "configuration-vulnintel-planning",
+  agentId: COMMANDER_AGENT_ID,
+  primaryConfigurationId: "configuration-commander-planning",
   fallbackConfigurationId: null,
   enforcementMode: "advisor_only",
   disclosureClass: "sanitized_internal",
@@ -120,21 +121,21 @@ function seedActivationBoundary(target: SqliteDatabase): void {
       contract_hash_bound, created_at, updated_at
     ) VALUES (?, ?, 'autonomous', 'planning', ?, 1, ?, ?, ?)
   `).run(RUN_ID, MISSION_ID, CONTRACT_ID, CONTRACT_HASH, NOW, NOW);
-  for (const [agentId, displayName] of [
-    ["VulnIntel", "Vulnerability Intelligence"],
-    ["ReconScout", "Recon Scout"],
-    ["NetworkMapper", "Network Mapper"],
+  for (const [agentId, displayName, role] of [
+    [COMMANDER_AGENT_ID, "Commander", "mission-planning"],
+    ["ReconScout", "Recon Scout", "reconnaissance"],
+    ["NetworkMapper", "Network Mapper", "reconnaissance"],
   ] as const) {
     target.prepare(`
       INSERT INTO agents (
         id, role, display_name, status, version, created_at, updated_at
-      ) VALUES (?, 'reconnaissance', ?, 'available', '1.0.0', ?, ?)
-    `).run(agentId, displayName, NOW, NOW);
+      ) VALUES (?, ?, ?, 'available', '1.0.0', ?, ?)
+    `).run(agentId, role, displayName, NOW, NOW);
   }
   for (const configuration of [
     { id: "configuration-recon-execution", mode: "enforced" },
     { id: "configuration-network-execution", mode: "enforced" },
-    { id: "configuration-vulnintel-planning", mode: "advisory_only" },
+    { id: "configuration-commander-planning", mode: "advisory_only" },
     { id: "configuration-drift", mode: "enforced" },
   ] as const) {
     target.prepare(`
@@ -165,10 +166,10 @@ function seedActivationBoundary(target: SqliteDatabase): void {
       configurationId: "configuration-recon-execution",
     },
     {
-      id: "assignment-vulnintel-planning",
-      agentId: "VulnIntel",
+      id: "assignment-commander-planning",
+      agentId: COMMANDER_AGENT_ID,
       purpose: "planning",
-      configurationId: "configuration-vulnintel-planning",
+      configurationId: "configuration-commander-planning",
     },
     {
       id: "assignment-network-execution",
@@ -254,8 +255,8 @@ function productionConfigurationManifests(): RuntimeSourceManifests {
     mcpServers: [],
     agents: [
       {
-        id: "VulnIntel",
-        label: "VulnIntel",
+        id: COMMANDER_AGENT_ID,
+        label: COMMANDER_AGENT_ID,
         available: true,
         capabilityIds: [],
         actionClassIds: [],
@@ -319,7 +320,7 @@ function issueInput(
     brainContextPackId: CONTEXT_PACK_ID,
     planning: {
       selection: PROVIDER_PLANNING_SELECTION,
-      modelAssignmentId: "assignment-vulnintel-planning",
+      modelAssignmentId: "assignment-commander-planning",
     },
     routes: routes(),
     issuedBy: "operator",
@@ -369,9 +370,9 @@ describe("AutonomousActivationReceiptRepository", () => {
     });
     expect(created.planning).toMatchObject({
       route: "provider_advisory",
-      plannerId: "VulnIntel",
-      modelAssignmentId: "assignment-vulnintel-planning",
-      primaryConfigurationId: "configuration-vulnintel-planning",
+      plannerId: COMMANDER_AGENT_ID,
+      modelAssignmentId: "assignment-commander-planning",
+      primaryConfigurationId: "configuration-commander-planning",
     });
     expect(
       created.items.every(({ agentId }) => agentId !== created.planning.plannerId),
@@ -469,7 +470,7 @@ describe("AutonomousActivationReceiptRepository", () => {
       modelId === "executor" && reasoningEffort === null)!;
     const selection = {
       route: "provider_advisory",
-      agentId: "VulnIntel",
+      agentId: COMMANDER_AGENT_ID,
       primaryConfigurationId: advisor.configurationId,
       fallbackConfigurationId: null,
       enforcementMode: "advisor_only",
@@ -512,7 +513,7 @@ describe("AutonomousActivationReceiptRepository", () => {
 
     expect(created.planning).toMatchObject({
       route: "provider_advisory",
-      plannerId: "VulnIntel",
+      plannerId: COMMANDER_AGENT_ID,
       modelAssignmentId: planningPin.id,
       primaryConfigurationId: advisor.configurationId,
     });
@@ -609,7 +610,7 @@ describe("AutonomousActivationReceiptRepository", () => {
     database.prepare(`
       UPDATE agent_model_assignments
       SET primary_configuration_id = 'configuration-drift'
-      WHERE id = 'assignment-vulnintel-planning'
+      WHERE id = 'assignment-commander-planning'
     `).run();
     expectIntegrityCode(
       () => verifier.verify(created.id),
@@ -617,8 +618,8 @@ describe("AutonomousActivationReceiptRepository", () => {
     );
     database.prepare(`
       UPDATE agent_model_assignments
-      SET primary_configuration_id = 'configuration-vulnintel-planning'
-      WHERE id = 'assignment-vulnintel-planning'
+      SET primary_configuration_id = 'configuration-commander-planning'
+      WHERE id = 'assignment-commander-planning'
     `).run();
 
     database.prepare(`

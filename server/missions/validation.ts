@@ -11,6 +11,9 @@ import {
   type AgentModelAssignmentSelection,
   type AutonomousPlanningSelection,
 } from "../model-config";
+import {
+  parseGuidedLocalExploitIntelligenceSelection,
+} from "../local-exploit-intelligence/GuidedLocalExploitIntelligence";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -827,6 +830,26 @@ function parseGuided(root: UnknownRecord, issues: string[]): GuidedMissionReques
   if (guidedWindowsIdentity && guidedReconnaissance.selection) {
     issues.push("choose either guidedReconnaissance or guidedWindowsIdentity for the first represented Guided step, not both");
   }
+  const guidedLocalExploitIntelligence =
+    parseGuidedLocalExploitIntelligenceSelection(
+      root.guidedLocalExploitIntelligence,
+    );
+  issues.push(...guidedLocalExploitIntelligence.issues);
+  if (guidedLocalExploitIntelligence.selection && !target) {
+    issues.push("guidedLocalExploitIntelligence requires one authorized mission target to correlate the local catalog observations");
+  }
+  if (
+    guidedLocalExploitIntelligence.selection
+    && executionPreference !== "single_step_agent"
+  ) {
+    issues.push("guidedLocalExploitIntelligence requires executionPreference single_step_agent");
+  }
+  if (
+    guidedLocalExploitIntelligence.selection
+    && (guidedReconnaissance.selection || guidedWindowsIdentity)
+  ) {
+    issues.push("choose exactly one of guidedReconnaissance, guidedWindowsIdentity, or guidedLocalExploitIntelligence for the first represented Guided step");
+  }
 
   return {
     journey: "guided",
@@ -849,6 +872,12 @@ function parseGuided(root: UnknownRecord, issues: string[]): GuidedMissionReques
     ),
     ...(guidedReconnaissance.selection ? { guidedReconnaissance: guidedReconnaissance.selection } : {}),
     ...(guidedWindowsIdentity ? { guidedWindowsIdentity } : {}),
+    ...(guidedLocalExploitIntelligence.selection
+      ? {
+          guidedLocalExploitIntelligence:
+            guidedLocalExploitIntelligence.selection,
+        }
+      : {}),
   };
 }
 

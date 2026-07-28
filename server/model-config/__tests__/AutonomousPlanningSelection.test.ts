@@ -23,19 +23,31 @@ function manifests(): RuntimeSourceManifests {
     capabilities: [],
     tools: [],
     mcpServers: [],
-    agents: [{
-      id: "ReconScout",
-      label: "ReconScout",
-      available: true,
-      capabilityIds: [],
-      actionClassIds: [],
-      toolIds: [],
-      modelRefs: [
+    agents: [
+      {
+        id: "Commander",
+        label: "Commander",
+        available: false,
+        capabilityIds: [],
+        actionClassIds: [],
+        toolIds: [],
+        modelRefs: [
         { providerId: "provider-planning", modelId: "advisor-primary" },
         { providerId: "provider-planning", modelId: "advisor-fallback" },
+        ],
+      },
+      {
+        id: "ReconScout",
+        label: "ReconScout",
+        available: true,
+        capabilityIds: [],
+        actionClassIds: [],
+        toolIds: [],
+        modelRefs: [
         { providerId: "provider-planning", modelId: "executor" },
-      ],
-    }],
+        ],
+      },
+    ],
     providers: [{
       id: "provider-planning",
       authenticated: true,
@@ -84,8 +96,10 @@ describe("Autonomous provider-advisory planning selection", () => {
     database.prepare(`
       INSERT INTO agents (
         id, role, display_name, status, version, created_at, updated_at
-      ) VALUES ('ReconScout', 'planning', 'ReconScout', 'available', '1.0.0', ?, ?)
-    `).run(NOW, NOW);
+      ) VALUES
+        ('Commander', 'planning', 'Commander', 'available', '1.0.0', ?, ?),
+        ('ReconScout', 'reconnaissance', 'ReconScout', 'available', '1.0.0', ?, ?)
+    `).run(NOW, NOW, NOW, NOW);
     database.prepare(`
       INSERT INTO missions (
         id, name, objective, journey, created_by, created_at, updated_at
@@ -120,7 +134,7 @@ describe("Autonomous provider-advisory planning selection", () => {
       modelId === "executor" && reasoningEffort === null)!;
     const selection = {
       route: "provider_advisory" as const,
-      agentId: "ReconScout",
+      agentId: "Commander",
       primaryConfigurationId: primary.configurationId,
       fallbackConfigurationId: fallback.configurationId,
       enforcementMode: "advisor_only" as const,
@@ -130,7 +144,7 @@ describe("Autonomous provider-advisory planning selection", () => {
 
     expect(service.validateAutonomousPlanningSelection(selection))
       .toMatchObject({
-        agentId: "ReconScout",
+        agentId: "Commander",
         ready: true,
         primary: { enforcementMode: "advisor_only" },
         fallback: { enforcementMode: "advisor_only" },
@@ -185,7 +199,7 @@ describe("Autonomous provider-advisory planning selection", () => {
     )!;
     const selection = {
       route: "provider_advisory" as const,
-      agentId: "ReconScout",
+      agentId: "Commander",
       primaryConfigurationId: executor.configurationId,
       fallbackConfigurationId: null,
       enforcementMode: "advisor_only" as const,
@@ -206,6 +220,56 @@ describe("Autonomous provider-advisory planning selection", () => {
       SELECT COUNT(*) AS count FROM agent_model_assignments
       WHERE assignment_purpose = 'planning'
     `).get()).toEqual({ count: 0 });
+  });
+
+  test("rejects a provider planning selection assigned to a specialist identity", () => {
+    const advisor = service.catalog().items.find(
+      ({ modelId, reasoningEffort }) =>
+        modelId === "advisor-primary" && reasoningEffort === null,
+    )!;
+    const selection = {
+      route: "provider_advisory" as const,
+      agentId: "ReconScout",
+      primaryConfigurationId: advisor.configurationId,
+      fallbackConfigurationId: null,
+      enforcementMode: "advisor_only" as const,
+      disclosureClass: "sanitized_internal" as const,
+      executionAuthority: "none" as const,
+    };
+    expect(service.validateAutonomousPlanningSelection(selection))
+      .toMatchObject({
+        ready: false,
+        reasons: expect.arrayContaining([
+          expect.stringContaining("canonical Commander identity"),
+        ]),
+      });
+    expect(() => service.pinExactAutonomousPlanningSelection({
+      selection,
+      missionId: MISSION_ID,
+      runId: RUN_ID,
+    })).toThrow(ModelConfigurationError);
+    expect(database.prepare(`
+      SELECT COUNT(*) AS count FROM agent_model_assignments
+      WHERE assignment_purpose = 'planning'
+    `).get()).toEqual({ count: 0 });
+  });
+
+  test("never admits Commander as an Autonomous execution specialist", () => {
+    const advisor = service.catalog().items.find(
+      ({ modelId, reasoningEffort }) =>
+        modelId === "advisor-primary" && reasoningEffort === null,
+    )!;
+    expect(() => service.resolveAutonomousAssignments({
+      specialistAgentIds: ["Commander"],
+      overrides: [{
+        agentId: "Commander",
+        primaryConfigurationId: advisor.configurationId,
+        fallbackConfigurationId: null,
+      }],
+      requiredActionClassIds: [],
+    })).toThrow(
+      "planning-only roster identities are not executable: Commander",
+    );
   });
 
   test("keeps local deterministic planning model-free", () => {

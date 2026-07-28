@@ -8,6 +8,8 @@ import type {
 export const PRODUCT_AGENT_ROSTER_VERSION =
   "ti-scale.product-agent-roster.v1" as const;
 
+export const COMMANDER_AGENT_ID = "Commander" as const;
+
 export interface ProductAgentCapabilityDefinition {
   readonly id: string;
   readonly label: string;
@@ -37,6 +39,29 @@ export interface ProductAgentDefinition {
 }
 
 export type ProductAgentId = ProductAgentDefinition["id"];
+export type ProductRosterAgentId =
+  | typeof COMMANDER_AGENT_ID
+  | ProductAgentId;
+
+export const COMMANDER_AGENT_DEFINITION = Object.freeze({
+  id: COMMANDER_AGENT_ID,
+  displayName: "Commander",
+  role: "Mission planning and orchestration",
+  domains: Object.freeze([
+    "mission planning",
+    "specialist routing",
+    "supervision",
+    "recovery coordination",
+  ]),
+  description:
+    "Plans and supervises authorized missions, routes work to canonical specialists, and explains progress without directly executing specialist tools.",
+  capabilities: Object.freeze([Object.freeze({
+    id: "commander.planning-supervision",
+    label: "Mission planning and supervision",
+    actionClassIds: Object.freeze([]),
+  })]),
+  executionAuthority: "none",
+} as const);
 
 function capability(
   id: string,
@@ -214,9 +239,16 @@ export const PRODUCT_AGENT_REGISTRY: readonly ProductAgentDefinition[] = Object.
   }),
 ]);
 
+/** Action-owning specialist identities. Commander is deliberately excluded. */
 export const PRODUCT_AGENT_IDS: ReadonlySet<string> = new Set(
   PRODUCT_AGENT_REGISTRY.map(({ id }) => id),
 );
+
+/** User-facing roster and model-configuration identities. */
+export const PRODUCT_ROSTER_AGENT_IDS: ReadonlySet<string> = new Set([
+  COMMANDER_AGENT_ID,
+  ...PRODUCT_AGENT_IDS,
+]);
 
 const ACTION_CLASS_OWNER = new Map<ActionClassId, ProductAgentId>(
   PRODUCT_AGENT_REGISTRY.flatMap((agent) =>
@@ -230,9 +262,13 @@ export function productAgentIdForActionClass(
   return ACTION_CLASS_OWNER.get(actionClassId as ActionClassId);
 }
 
-function orderedProductIds(ids: ReadonlySet<ProductAgentId>): readonly ProductAgentId[] {
-  return PRODUCT_AGENT_REGISTRY
-    .map(({ id }) => id)
+function orderedProductIds(
+  ids: ReadonlySet<ProductRosterAgentId>,
+): readonly ProductRosterAgentId[] {
+  return [
+    COMMANDER_AGENT_ID,
+    ...PRODUCT_AGENT_REGISTRY.map(({ id }) => id),
+  ]
     .filter((id) => ids.has(id));
 }
 
@@ -240,10 +276,12 @@ function productIdsFromRuntimeSignals(input: Readonly<{
   readonly runtimeAgentId: string;
   readonly actionClassIds: readonly string[];
   readonly deliverableIds?: readonly string[];
-}>): readonly ProductAgentId[] {
-  const ids = new Set<ProductAgentId>();
-  if (PRODUCT_AGENT_IDS.has(input.runtimeAgentId)) {
-    ids.add(input.runtimeAgentId as ProductAgentId);
+}>): readonly ProductRosterAgentId[] {
+  const ids = new Set<ProductRosterAgentId>();
+  if (input.runtimeAgentId === COMMANDER_AGENT_ID) {
+    ids.add(COMMANDER_AGENT_ID);
+  } else if (PRODUCT_AGENT_IDS.has(input.runtimeAgentId)) {
+    ids.add(input.runtimeAgentId as ProductRosterAgentId);
   }
   for (const actionClassId of input.actionClassIds) {
     const owner = ACTION_CLASS_OWNER.get(actionClassId as ActionClassId);
@@ -261,7 +299,7 @@ function productIdsFromRuntimeSignals(input: Readonly<{
 export function productAgentIdsForRuntimeManifestAgent(
   agent: RuntimeAgentManifest,
   manifests: Pick<RuntimeSourceManifests, "capabilities" | "tools">,
-): readonly ProductAgentId[] {
+): readonly ProductRosterAgentId[] {
   const actionClassIds = actionClassIdsForRuntimeManifestAgent(agent, manifests);
   return productIdsFromRuntimeSignals({
     runtimeAgentId: agent.id,
@@ -404,7 +442,7 @@ function capabilityActionClasses(
 function productIdsForBinding(
   agent: FleetAgentProjection,
   manifests: RuntimeSourceManifests | undefined,
-): readonly ProductAgentDefinition["id"][] {
+): readonly ProductRosterAgentId[] {
   const actionClassIds: ActionClassId[] = [];
   for (const binding of agent.capabilities) {
     for (const actionClassId of capabilityActionClasses(binding, manifests)) {
@@ -466,6 +504,7 @@ function uniqueCapabilities(
 export function projectProductAgentRoster(input: Readonly<{
   readonly agents: readonly FleetAgentProjection[];
   readonly capabilityManifests?: RuntimeSourceManifests;
+  readonly commanderReady?: boolean;
 }>): readonly FleetAgentProjection[] {
   const duplicateIds = input.agents
     .map(({ id }) => id)
@@ -480,6 +519,77 @@ export function projectProductAgentRoster(input: Readonly<{
       productIdsForBinding(agent, input.capabilityManifests),
     ] as const),
   );
+  const commanderModelBindings = input.capabilityManifests?.agents
+    .filter(({ id }) => id === COMMANDER_AGENT_ID)
+    .flatMap((agent) => agent.modelRefs.flatMap((reference) => {
+      const provider = input.capabilityManifests?.providers.find(
+        ({ id }) => id === reference.providerId,
+      );
+      const model = provider?.models.find(({ id }) => id === reference.modelId);
+      return provider?.authenticated === true
+        && provider.healthy === true
+        && model?.enforcement === "advisor_only"
+        && model.structuredOutput === true
+        ? [Object.freeze({
+            providerId: provider.id,
+            modelId: model.id,
+            catalogObservedAt: provider.catalogObservedAt,
+          })]
+        : [];
+    })) ?? [];
+  const commanderAvailable =
+    input.commanderReady === true || commanderModelBindings.length > 0;
+  const commander: FleetAgentProjection = Object.freeze({
+    id: COMMANDER_AGENT_ID,
+    role: COMMANDER_AGENT_DEFINITION.role,
+    displayName: COMMANDER_AGENT_DEFINITION.displayName,
+    status: commanderAvailable ? "available" : "offline",
+    providerPolicy: Object.freeze({
+      inheritance: "global_then_agent_then_mission_then_run",
+      purpose: "planning",
+      executionAuthority: "none",
+      modelBindings: Object.freeze(commanderModelBindings),
+    }),
+    toolPolicy: Object.freeze({
+      allowedTools: Object.freeze([]),
+      directToolExecution: false,
+      specialistDelegationRequired: true,
+    }),
+    configuration: Object.freeze({
+      schemaVersion: PRODUCT_AGENT_ROSTER_VERSION,
+      userFacing: true,
+      productAgent: true,
+      orchestrationAgent: true,
+      executionAuthority: "none",
+      domains: COMMANDER_AGENT_DEFINITION.domains,
+      description: COMMANDER_AGENT_DEFINITION.description,
+      capabilityIds: Object.freeze(
+        COMMANDER_AGENT_DEFINITION.capabilities.map(({ id }) => id),
+      ),
+      runtimeBindingAgentIds: Object.freeze([]),
+      runtimeBindingVersions: Object.freeze([]),
+      readiness: Object.freeze({
+        status: commanderAvailable ? "available" : "offline",
+        planningModelBindingCount: commanderModelBindings.length,
+        localOrchestrationReady: input.commanderReady === true,
+      }),
+    }),
+    version: PRODUCT_AGENT_ROSTER_VERSION,
+    lastHeartbeatAt: null,
+    capabilities: Object.freeze([
+      Object.freeze({
+        name: "commander.planning-supervision",
+        source: PRODUCT_AGENT_ROSTER_VERSION,
+        enabled: commanderAvailable,
+        metadata: Object.freeze({
+          label: "Mission planning and supervision",
+          productAgentId: COMMANDER_AGENT_ID,
+          executionAuthority: "none",
+          actionClassIds: Object.freeze([]),
+        }),
+      }),
+    ]),
+  });
   const productAgents = PRODUCT_AGENT_REGISTRY.map((definition): FleetAgentProjection => {
     const bindings = input.agents.filter((agent) =>
       isMountedRuntimeBinding(agent)
@@ -596,7 +706,7 @@ export function projectProductAgentRoster(input: Readonly<{
   });
 
   const internalAgents = input.agents
-    .filter(({ id }) => !PRODUCT_AGENT_IDS.has(id))
+    .filter(({ id }) => !PRODUCT_ROSTER_AGENT_IDS.has(id))
     .map((agent): FleetAgentProjection => Object.freeze({
       ...agent,
       capabilities: input.capabilityManifests
@@ -615,5 +725,5 @@ export function projectProductAgentRoster(input: Readonly<{
         ]),
       }),
     }));
-  return Object.freeze([...productAgents, ...internalAgents]);
+  return Object.freeze([commander, ...productAgents, ...internalAgents]);
 }

@@ -12,3 +12,5 @@ export type {
   ResolvedMissionIntake,
 } from "./types";
 export { validateMissionIntakeRequest } from "./validation";
+export { buildGuidedLocalExploitIntelligenceRegistry } from
+  "./GuidedLocalExploitIntelligenceRegistry";

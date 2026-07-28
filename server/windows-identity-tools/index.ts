@@ -27,6 +27,10 @@ export {
   windowsIdentityFailure,
 } from "./failureTaxonomy";
 export {
+  WINDOWS_IDENTITY_OPERATION_PRESENTATION,
+  type WindowsIdentityOperationPresentation,
+} from "./WindowsIdentityOperationRegistry";
+export {
   canonicalWindowsIdentityTarget,
   parseWindowsIdentityActionRequest,
 } from "./validation";

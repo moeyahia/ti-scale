@@ -315,6 +315,12 @@ export interface PinnedModelAssignment {
   readonly createdAt: string;
 }
 
+export interface PinnedModelAssignmentReadback {
+  readonly assignment: PinnedModelAssignment;
+  readonly primaryConfiguration: StoredModelConfiguration;
+  readonly fallbackConfiguration: StoredModelConfiguration | null;
+}
+
 export interface ModelConfigurationServiceDependencies {
   readonly readRuntimeManifests: () => RuntimeSourceManifests;
   readonly clock?: () => Date;

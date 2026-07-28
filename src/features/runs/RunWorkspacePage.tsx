@@ -25,19 +25,43 @@ export default function RunWorkspacePage({ missionId, runId }: { missionId?: str
     if (mission.error && !mission.data) return <div className="os-page"><ErrorPanel error={mission.error} onRetry={mission.refresh} /></div>;
     if (!mission.data) return <div className="os-page"><Card><EmptyState title="Mission runtime unavailable" description="The mission did not return a durable runtime projection." /></Card></div>;
     const selected = runId ? mission.data.runs.find((item) => item.id === runId) : mission.data.runs.find((item) => !["completed", "failed", "cancelled"].includes(item.status)) ?? mission.data.runs[0];
-    return <MissionFrame snapshot={mission.data} run={selected} />;
+    return <MissionFrame
+      snapshot={mission.data}
+      run={selected}
+      controlIdNamespace={runId ? "run-workspace" : "mission"}
+    />;
   }
   return runId ? <RunOnlyFrame runId={runId} /> : <div className="os-page"><Card><EmptyState title="No run selected" description="Open a run from Live Operations or a mission workspace." /></Card></div>;
 }
 
-function MissionFrame({ snapshot, run }: { snapshot: MissionRuntimeSnapshot; run?: RuntimeRun }) {
+function MissionFrame({
+  snapshot,
+  run,
+  controlIdNamespace,
+}: {
+  snapshot: MissionRuntimeSnapshot;
+  run?: RuntimeRun;
+  controlIdNamespace: "mission" | "run-workspace";
+}) {
   return <div className="os-page"><PageHeader eyebrow={`${snapshot.mission.journey === "autonomous" ? "Autonomous" : "Guided"} mission`} title={snapshot.mission.name} description={snapshot.mission.objective} actions={<><StatusPill status={snapshot.mission.authorizationStatus} /><StreamState /></>} />
     <section className="os-mission-banner"><div><span>Journey</span><strong>{snapshot.mission.journey === "autonomous" ? "Autonomous" : "Guided"}</strong></div><div><span>Authorization</span><strong>{snapshot.mission.authorizationStatus}</strong></div><div><span>Allowed targets</span><strong>{snapshot.mission.allowedTargets.length}</strong></div><div><span>Runs</span><strong>{snapshot.runs.length}</strong></div></section>
-    <MissionRuntimeWorkspace snapshot={snapshot} initialRun={run} />
+    <MissionRuntimeWorkspace
+      snapshot={snapshot}
+      initialRun={run}
+      controlIdNamespace={controlIdNamespace}
+    />
   </div>;
 }
 
-function MissionRuntimeWorkspace({ snapshot, initialRun }: { snapshot: MissionRuntimeSnapshot; initialRun?: RuntimeRun }) {
+function MissionRuntimeWorkspace({
+  snapshot,
+  initialRun,
+  controlIdNamespace,
+}: {
+  snapshot: MissionRuntimeSnapshot;
+  initialRun?: RuntimeRun;
+  controlIdNamespace: "mission" | "run-workspace";
+}) {
   const current = useQuery(`run:${initialRun?.id ?? "none"}`, (signal) => initialRun ? runtimeV2Api.run(initialRun.id, signal) : Promise.resolve(undefined), { staleTime: 0 });
   const stream = useEventStream();
   useEffect(() => { if (initialRun && stream.lastEvent?.runId === initialRun.id) current.refresh(); }, [stream.lastEvent?.id, initialRun?.id]);
@@ -49,14 +73,19 @@ function MissionRuntimeWorkspace({ snapshot, initialRun }: { snapshot: MissionRu
       {current.error && <DegradedNotice>Run refresh failed; the last validated projection remains visible.</DegradedNotice>}
       {!terminal && !["blocked", "recovering"].includes(run.status) && <RunControls run={run} onChanged={current.refresh} />}
     </>}
-    <MissionWorkspace snapshot={snapshot} run={run} liveContent={run ? <RunCockpit
+    <MissionWorkspace
+      snapshot={snapshot}
+      run={run}
+      controlIdNamespace={controlIdNamespace}
+      liveContent={run ? <RunCockpit
       run={run}
       missionSuccessCriteria={snapshot.mission.successCriteria}
       showRunChrome={false}
       initialActivationReceipt={
         current.data?.currentAutonomousActivationReceipt
       }
-    /> : undefined} />
+    /> : undefined}
+    />
   </>;
 }
 
@@ -111,8 +140,8 @@ export function RunCockpit({
       <RecoveryPanel runId={authoritative.id} onChanged={() => { current.refresh(); plans.refresh(); events.refresh(); }} />
     }
     <ReconDigitalTwinSurface missionId={authoritative.missionId} runId={authoritative.id} currentStepId={authoritative.currentStepId} />
-    <div className="os-live-layout"><section><h2>Plan and agent ownership</h2>{plans.isLoading && <LoadingPanel label="Loading versioned plan" />}{plans.error && !plans.data && <ErrorPanel error={plans.error} onRetry={plans.refresh} />}{activePlan ? <><Card className="os-plan-summary"><div className="os-card-heading"><div><p className="os-eyebrow">Plan v{activePlan.version}</p><h3>{operatorText(activePlan.strategySummary, { kind: "plan" })}</h3></div><StatusPill status={activePlan.status} /></div>{activePlan.rationaleSummary && <p>{operatorText(activePlan.rationaleSummary, { kind: "plan" })}</p>}<JsonDetails label="Technical plan wording" value={{ strategySummary: activePlan.strategySummary, rationaleSummary: activePlan.rationaleSummary }} /></Card><ol className="os-step-rail">{activePlan.steps.map((step) => <li key={step.id} className={step.id === authoritative.currentStepId ? "is-current" : undefined}><div className="os-step-index">{step.ordinal + 1}</div><article><header><div><span>{step.phase}</span><h3>{operatorText(step.title, { kind: "plan", agent: step.assignedAgentId, target: step.action.target })}</h3></div><StatusPill status={step.status} /></header><p>{operatorText(step.explanation || step.objective, { kind: "plan", agent: step.assignedAgentId, target: step.action.target })}</p><KeyValueGrid items={[{ label: "Owner", value: step.assignedAgentId || "Unassigned" }, { label: "Risk", value: step.riskClass || "Not classified" }, { label: "Target", value: step.action.target }, { label: "Reversibility", value: operatorText(step.reversibility, { kind: "plan" }, "Not reported") }]} /><p className="os-intent"><strong>Intent:</strong> {operatorText(step.action.intentSummary, { kind: "action_intent", agent: step.assignedAgentId, target: step.action.target, destructive: step.action.destructive })}</p><JsonDetails label="Normalized action and original wording" value={{ action: step.action, narrative: { title: step.title, objective: step.objective, explanation: step.explanation, rationale: step.rationale, reversibility: step.reversibility } }} /></article></li>)}</ol></> : !plans.isLoading && <Card><EmptyState title="No plan available" description="The run has not persisted a versioned plan yet." /></Card>}</section>
-      <aside><h2>Meaningful activity</h2><QueryBoundary data={events.data?.items} error={events.error} isLoading={events.isLoading} onRetry={events.refresh} emptyTitle="No semantic events" emptyDescription="The run has not emitted an authorized state change yet.">{(items) => <ol className="os-timeline">{items.map((event) => <li key={event.id}><strong>{operatorText(event.summary, { kind: "event" })}</strong><span>{event.eventType} · {formatTime(event.occurredAt)}</span>{event.correlation.contextPackId && <ContextUsedDisclosure packId={event.correlation.contextPackId} />}<JsonDetails label="Technical event detail" value={{ rawSummary: event.summary, payload: event.payload, correlation: event.correlation }} /></li>)}</ol>}</QueryBoundary></aside>
+    <div className="os-live-layout"><section><h2>Plan and agent ownership</h2>{plans.isLoading && <LoadingPanel label="Loading versioned plan" />}{plans.error && !plans.data && <ErrorPanel error={plans.error} onRetry={plans.refresh} />}{activePlan ? <><Card className="os-plan-summary"><div className="os-card-heading"><div><p className="os-eyebrow">Plan v{activePlan.version}</p><h3>{operatorText(activePlan.strategySummary, { kind: "plan" })}</h3></div><StatusPill status={activePlan.status} /></div>{activePlan.rationaleSummary && <p>{operatorText(activePlan.rationaleSummary, { kind: "plan" })}</p>}<JsonDetails controlId="live-technical-plan-wording" label="Technical plan wording" value={{ strategySummary: activePlan.strategySummary, rationaleSummary: activePlan.rationaleSummary }} /></Card><ol className="os-step-rail">{activePlan.steps.map((step) => <li key={step.id} className={step.id === authoritative.currentStepId ? "is-current" : undefined}><div className="os-step-index">{step.ordinal + 1}</div><article><header><div><span>{step.phase}</span><h3>{operatorText(step.title, { kind: "plan", agent: step.assignedAgentId, target: step.action.target })}</h3></div><StatusPill status={step.status} /></header><p>{operatorText(step.explanation || step.objective, { kind: "plan", agent: step.assignedAgentId, target: step.action.target })}</p><KeyValueGrid items={[{ label: "Owner", value: step.assignedAgentId || "Unassigned" }, { label: "Risk", value: step.riskClass || "Not classified" }, { label: "Target", value: step.action.target }, { label: "Reversibility", value: operatorText(step.reversibility, { kind: "plan" }, "Not reported") }]} /><p className="os-intent"><strong>Intent:</strong> {operatorText(step.action.intentSummary, { kind: "action_intent", agent: step.assignedAgentId, target: step.action.target, destructive: step.action.destructive })}</p><JsonDetails controlId="live-normalized-action-wording" label="Normalized action and original wording" value={{ action: step.action, narrative: { title: step.title, objective: step.objective, explanation: step.explanation, rationale: step.rationale, reversibility: step.reversibility } }} /></article></li>)}</ol></> : !plans.isLoading && <Card><EmptyState title="No plan available" description="The run has not persisted a versioned plan yet." /></Card>}</section>
+      <aside><h2>Meaningful activity</h2><QueryBoundary data={events.data?.items} error={events.error} isLoading={events.isLoading} onRetry={events.refresh} emptyTitle="No semantic events" emptyDescription="The run has not emitted an authorized state change yet.">{(items) => <ol className="os-timeline">{items.map((event) => <li key={event.id}><strong>{operatorText(event.summary, { kind: "event" })}</strong><span>{event.eventType} · {formatTime(event.occurredAt)}</span>{event.correlation.contextPackId && <ContextUsedDisclosure packId={event.correlation.contextPackId} />}<JsonDetails controlId="live-technical-event-detail" label="Technical event detail" value={{ rawSummary: event.summary, payload: event.payload, correlation: event.correlation }} /></li>)}</ol>}</QueryBoundary></aside>
     </div><ActionActivity runId={authoritative.id} />
   </>;
 }

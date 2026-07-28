@@ -86,7 +86,7 @@ async function fixture() {
 }
 
 describe("product agent fleet API", () => {
-  test("returns only the twelve product agents by default and gates internal runtime components", async () => {
+  test("returns Commander plus the twelve product specialists by default and gates internal runtime components", async () => {
     const { database, url } = await fixture();
     try {
       const publicResponse = await fetch(`${url}/api/v2/agents?limit=100`);
@@ -94,10 +94,11 @@ describe("product agent fleet API", () => {
       const publicBody = await publicResponse.json() as {
         items: Array<{ id: string; configuration: Record<string, unknown> }>;
       };
-      expect(publicBody.items).toHaveLength(12);
+      expect(publicBody.items).toHaveLength(13);
       expect(publicBody.items.map(({ id }) => id).sort()).toEqual([
         "ADAttackMapper",
         "CloudSentinel",
+        "Commander",
         "CredSmith",
         "FuzzSmith",
         "OSINTSeeker",
@@ -121,6 +122,14 @@ describe("product agent fleet API", () => {
             version: "1",
           }],
         });
+      expect(publicBody.items.find(({ id }) => id === "Commander"))
+        ?.toMatchObject({
+          configuration: {
+            orchestrationAgent: true,
+            executionAuthority: "none",
+            runtimeBindingCount: 0,
+          },
+        });
       expect(JSON.stringify(publicBody)).not.toContain("internalComponent");
       expect(JSON.stringify(publicBody)).not.toContain("adapterId");
 
@@ -138,7 +147,7 @@ describe("product agent fleet API", () => {
       const internalBody = await internalResponse.json() as {
         items: Array<{ id: string; configuration: Record<string, unknown> }>;
       };
-      expect(internalBody.items).toHaveLength(13);
+      expect(internalBody.items).toHaveLength(14);
       expect(internalBody.items.find(({ id }) => id === "internal-reviewed-recon-adapter")
         ?.configuration).toMatchObject({
           userFacing: false,

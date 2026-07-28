@@ -43,6 +43,59 @@ bindings into this same manifest boundary. Its configuration installer never
 restarts the service; activation and live readiness proof remain part of the
 functional release.
 
+## Reviewed Windows and identity operations
+
+Ti-Scale also derives four Guided Windows and identity choices from the
+reviewed runtime tool pack. These choices are registry-backed and become
+selectable only while their executable, sandbox, authentication mode, output,
+cancellation, and durable exact-step route have current receipts.
+
+| Guided operation | What Ti-Scale does | Authentication |
+| --- | --- | --- |
+| SMB share list | Requests the share names and types advertised by one approved host; it does not open, write, or execute anything in a share | Anonymous or an opaque private credential reference when that mode is ready |
+| SMB identity summary | Reads bounded SMB host, domain, signing, protocol, and share metadata from one approved host | Opaque private credential reference |
+| LDAP root metadata | Reads the fixed public root-directory metadata fields from one approved LDAP endpoint; it does not enumerate users, groups, or computers | Anonymous |
+| RPC domain summary | Reads a bounded domain-role and object-count summary from one approved Windows RPC endpoint | Anonymous or an opaque private credential reference when that mode is ready |
+
+Credential references identify root-provisioned systemd credential bundles.
+The browser and mission records never contain a password, hash, ticket, cookie,
+key, or reusable credential value. Selecting one of these operations creates
+exactly one represented Guided action and Ti-Scale still waits for the
+operator's decision before dispatch.
+
+## Pinned local ExploitDB intelligence
+
+The optional `kali:searchsploit-local` binding performs one typed SearchSploit
+query against the host's pinned local ExploitDB catalog. It supports either:
+
+- one exact CVE identifier; or
+- one product name with an optional version and platform.
+
+This binding runs in a new network namespace with a read-only `/usr`, pinned
+SearchSploit configuration and catalog hashes, a disposable temporary
+filesystem, fixed direct arguments, bounded output, a ten-second execution
+limit, cooperative cancellation, and a maximum concurrency of two. It cannot
+contact the mission target or a public provider.
+
+The operator-selected query is linked to an authorized mission subject so its
+result can be correlated with the observed technology. The subject is not
+contacted by SearchSploit. Raw output is retained as one Engagement Log record;
+valid catalog matches become unverified Observations. A catalog match is a lead
+for version and applicability review, not proof that the target is vulnerable
+or that an exploit succeeded. The binding creates no Evidence Candidate,
+Verified Evidence, or Finding automatically.
+
+Activation is opt-in:
+
+```text
+TI_SCALE_LOCAL_EXPLOIT_INTELLIGENCE_ENABLED=true
+```
+
+The intake option is available only after the exact SearchSploit executable,
+bubblewrap executable, configuration, all three catalog indexes, isolated
+probe, durable Guided planner, result recorder, cancellation path, and restart
+path are all current and mounted.
+
 ## Document invariants
 
 Every tool record fixes:

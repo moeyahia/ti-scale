@@ -9,6 +9,9 @@ import type {
   AgentModelAssignmentSelection,
   AutonomousPlanningSelection,
 } from "../model-config";
+import type {
+  GuidedLocalExploitIntelligenceSelection,
+} from "../local-exploit-intelligence/types";
 
 export type { Journey };
 
@@ -242,6 +245,12 @@ export interface GuidedMissionRequest {
       readonly id: string;
     }> | null;
   }>;
+  /**
+   * One exact, operator-represented read of the pinned local ExploitDB
+   * catalog. It has no provider contact, target contact, or evidence
+   * promotion authority.
+   */
+  readonly guidedLocalExploitIntelligence?: GuidedLocalExploitIntelligenceSelection;
 }
 
 export type MissionCreateRequest =

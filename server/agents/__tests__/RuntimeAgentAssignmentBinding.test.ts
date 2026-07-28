@@ -46,6 +46,22 @@ describe("product-agent runtime assignment binding", () => {
       NOW,
       NOW,
     );
+    insert.run(
+      "Commander",
+      "planning",
+      "Commander",
+      "available",
+      JSON.stringify({
+        userFacing: true,
+        productAgent: true,
+        orchestrationAgent: true,
+        executionAuthority: "none",
+        runtimeBindingAgentIds: [],
+      }),
+      NOW,
+      NOW,
+      NOW,
+    );
   });
 
   afterEach(() => database.close());
@@ -113,5 +129,16 @@ describe("product-agent runtime assignment binding", () => {
       ...canonical,
       actionClassId: "unregistered_test_action",
     })).toBeFalse();
+    expect(canonicalProductOwnerBindsRuntimeAgent(database, {
+      ...canonical,
+      planAgentId: "Commander",
+      assignmentAgentId: "Commander",
+      signedSpecialistAgentIds: ["Commander"],
+    })).toBeFalse();
+    expect(agentAssignmentBindsRuntimeAgent(
+      database,
+      "Commander",
+      RUNTIME_AGENT_ID,
+    )).toBeFalse();
   });
 });

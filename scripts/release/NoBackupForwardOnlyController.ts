@@ -19,6 +19,12 @@ export interface NoBackupForwardOnlyPhaseOperations {
 export interface NoBackupForwardOnlyControllerOperations
   extends NoBackupForwardOnlyPhaseOperations {
   readonly observedSchema: () => number | Promise<number>;
+  /**
+   * A same-schema release cannot infer its recovery direction from SQLite.
+   * The caller must instead expose the durable target-commit record that binds
+   * the application and static pointers to the selected target release.
+   */
+  readonly durableTargetCommitted?: () => boolean | Promise<boolean>;
   readonly restoreSourceBeforeSchemaCommit: (
     cause: unknown,
   ) => void | Promise<void>;
@@ -84,7 +90,7 @@ export function assertNoBackupForwardOnlySchemaProgression(
     !Number.isSafeInteger(sourceSchema) ||
     !Number.isSafeInteger(targetSchema) ||
     sourceSchema < 0 ||
-    targetSchema <= sourceSchema
+    targetSchema < sourceSchema
   ) {
     throw new Error("No-backup recovery schema boundary is invalid");
   }
@@ -113,6 +119,7 @@ export function classifyNoBackupForwardOnlyRecovery(
   targetSchema: number,
   observedSchema: number,
   forwardSchemas?: readonly number[],
+  sameSchemaTargetCommitted?: boolean,
 ): NoBackupForwardOnlyRecoveryDirection {
   assertNoBackupForwardOnlySchemaProgression(
     sourceSchema,
@@ -121,6 +128,22 @@ export function classifyNoBackupForwardOnlyRecovery(
   );
   if (!Number.isSafeInteger(observedSchema) || observedSchema < 0) {
     throw new Error("No-backup recovery schema boundary is invalid");
+  }
+  if (sourceSchema === targetSchema) {
+    if (observedSchema !== sourceSchema) {
+      throw new Error(
+        `No-backup recovery cannot classify observed schema ${String(observedSchema)} ` +
+        `for attested progression ${String(sourceSchema)}→${String(targetSchema)}`,
+      );
+    }
+    if (sameSchemaTargetCommitted === undefined) {
+      throw new Error(
+        "Same-schema no-backup recovery requires durable target commitment state",
+      );
+    }
+    return sameSchemaTargetCommitted
+      ? "complete_target"
+      : "restore_source";
   }
   if (observedSchema === sourceSchema) return "restore_source";
   if (
@@ -165,12 +188,14 @@ export async function executeNoBackupForwardOnlyPhaseSequence(
 /**
  * Production deploy and recovery share this one forward-only state machine.
  *
- * While the database is still at the exact source schema, an interrupted
- * release restores the immutable source runtime. After any attested forward
- * migration commits, downgrade is forbidden and reconciliation resumes the
- * remaining migrations before completing the immutable target. The operations
- * own durable journal records and observed-state idempotency; this controller
- * owns the direction decision and phase ordering.
+ * While a migrating database is still at the exact source schema, an
+ * interrupted release restores the immutable source runtime. After any
+ * attested forward migration commits, downgrade is forbidden and
+ * reconciliation resumes the remaining migrations before completing the
+ * immutable target. For a same-schema release, the durable target-commit
+ * record—not the ambiguous unchanged schema—is the recovery boundary. The
+ * operations own durable journal records and observed-state idempotency; this
+ * controller owns the direction decision and phase ordering.
  */
 export async function executeNoBackupForwardOnlyController(
   options: NoBackupForwardOnlyControllerOptions,
@@ -180,13 +205,19 @@ export async function executeNoBackupForwardOnlyController(
     options.targetSchema,
     options.forwardSchemas,
   );
-  const direction = async (): Promise<NoBackupForwardOnlyRecoveryDirection> =>
-    classifyNoBackupForwardOnlyRecovery(
+  const direction = async (): Promise<NoBackupForwardOnlyRecoveryDirection> => {
+    const sameSchemaTargetCommitted =
+      options.sourceSchema === options.targetSchema
+        ? await options.operations.durableTargetCommitted?.()
+        : undefined;
+    return classifyNoBackupForwardOnlyRecovery(
       options.sourceSchema,
       options.targetSchema,
       await options.operations.observedSchema(),
       options.forwardSchemas,
+      sameSchemaTargetCommitted,
     );
+  };
 
   const finishTarget = async (
     primaryFailure?: unknown,
@@ -207,7 +238,7 @@ export async function executeNoBackupForwardOnlyController(
         );
         throw new AggregateError(
           [primaryFailure, recoveryFailure],
-          "No-backup preview failed after schema commit and forward recovery is still required",
+          "No-backup forward deployment failed after schema commit and forward recovery is still required",
         );
       }
       throw recoveryFailure;
@@ -223,7 +254,7 @@ export async function executeNoBackupForwardOnlyController(
       );
       await options.operations.restoreSourceBeforeSchemaCommit(
         options.interruptedRecoveryCause ??
-          new Error("Recovered an interrupted no-backup preview before schema commit"),
+          new Error("Recovered an interrupted no-backup forward deployment before schema commit"),
       );
       return {
         status: "predeploy_restored",

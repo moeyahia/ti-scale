@@ -144,6 +144,24 @@ Neither command creates a database copy, source archive, prior static release
 copy, Vault snapshot, or rollback payload. The candidate itself is the
 hash-bound target release, not a retained copy of the previous state.
 
+New deployments write
+`ti-scale.no-backup-forward-release-receipt.v2` with
+`deploymentMode: current_service`. Its release observer is explicitly
+standalone and Ti-Scale-only: it neither queries nor requires any unrelated
+service. Receipt and journal commitments use `observerProofSha256`.
+Interrupted historical
+`ti-scale.no-backup-preview-release-receipt.v1` transactions remain readable
+and recoverable with their original `legacyIdentitySha256` commitment; that
+compatibility path is never used when creating a new release.
+
+The active deployment path accepts the canonical schema-60 database and can
+activate a new schema-60 application/static release without manufacturing a
+database migration. That database phase is an integrity-checked, attested
+no-op. Because an unchanged schema cannot identify which release owns the
+application and static pointers, recovery uses the durable target-commit
+record: an interruption before that record restores the prior pointers, while
+an interruption after it completes the exact committed target forward.
+
 ## Environment
 
 Example server settings:

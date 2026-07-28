@@ -19,6 +19,7 @@ import {
 } from "../../server/intelligence-v24/validation";
 import {
   appendFunctionalReleaseTransactionRecord,
+  isSupportedNoBackupDeploymentIdentity,
   readFunctionalReleaseTransactionJournal,
 } from "./DurableReleaseTransaction";
 import { currentActiveReleaseLockDescriptor } from "./ReleaseLockContext";
@@ -378,7 +379,7 @@ export class OrphanedNoBackupMaintenanceLeaseReconciler {
       journal.terminal ||
       journal.binding.operation !== "deploy" ||
       journal.binding.releaseId !== releaseId ||
-      identity.deploymentKind !== "no_backup_preview_v1" ||
+      !isSupportedNoBackupDeploymentIdentity(identity) ||
       identity.backupPolicy !== "none"
     ) {
       throw new Error(

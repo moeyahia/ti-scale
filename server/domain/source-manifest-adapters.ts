@@ -229,6 +229,17 @@ export interface RuntimeToolManifest {
   readonly locallyPolicyEnforced: boolean;
   readonly requiresModel?: boolean;
   /**
+   * Whether a mission planner may select this exact binding. `available`
+   * remains the runtime/dependency health fact used by self-tests and fleet
+   * diagnostics; a healthy adapter can deliberately remain non-selectable
+   * until its durable planning and result-persistence path is mounted.
+   *
+   * Missing preserves compatibility for existing reviewed bindings.
+   */
+  readonly missionSelectable?: boolean;
+  /** Required operator-readable explanation when missionSelectable is false. */
+  readonly missionSelectionReason?: string;
+  /**
    * Journeys for which this exact mounted binding may grant execution.
    * Missing preserves the compatibility behavior of older reviewed runtime
    * manifests; new exact-step local adapters must declare this explicitly.
@@ -512,6 +523,16 @@ function validateCrossReferences(manifests: RuntimeSourceManifests): void {
         errors.push(`tool:${tool.id}.riskClassIds:${riskId}`);
       }
     }
+    if (tool.missionSelectable === false
+      && (typeof tool.missionSelectionReason !== "string"
+        || tool.missionSelectionReason.trim().length < 20
+        || tool.missionSelectionReason.trim().length > 500)) {
+      errors.push(`tool:${tool.id}.missionSelectionReason:invalid`);
+    }
+    if (tool.missionSelectable !== false
+      && tool.missionSelectionReason !== undefined) {
+      errors.push(`tool:${tool.id}.missionSelectionReason:unexpected`);
+    }
     if (tool.constituentToolIds !== undefined) {
       if (tool.mcpServerId !== undefined
         || tool.constituentToolIds.length < 1
@@ -700,6 +721,7 @@ export function buildRuntimeCapabilityProjection(
           tool.mcpServerId === undefined || mcpById.get(tool.mcpServerId)?.status === "healthy";
         const adapterFreshness = runtimeAdapterFreshness(tool, now);
         return tool.available
+          && tool.missionSelectable !== false
           && dependenciesReady
           && mcpReady
           && (adapterFreshness === "not_applicable" || adapterFreshness === "fresh");
@@ -764,6 +786,11 @@ export function buildRuntimeCapabilityProjection(
           } else if (!tool.available && mcp?.status === "healthy") {
             readinessReasons.push(
               `${tool.id} is absent or unavailable in the current closed inventory for MCP server ${tool.mcpServerId}; repeat that server's tools/list attestation.`,
+            );
+          }
+          if (tool.available && tool.missionSelectable === false) {
+            readinessReasons.push(
+              `${tool.id} is healthy for runtime inspection but is not mission-selectable: ${tool.missionSelectionReason}.`,
             );
           }
           if (adapterFreshness === "future") {

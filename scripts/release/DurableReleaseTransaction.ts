@@ -45,6 +45,19 @@ const SOURCE_RUNTIME_COMMIT_PREREQUISITES = [
   "source_state_verification",
   "service_start",
 ] as const;
+const NO_BACKUP_PREVIEW_DEPLOYMENT_KIND = "no_backup_preview_v1";
+const NO_BACKUP_FORWARD_DEPLOYMENT_KIND = "no_backup_forward_v2";
+const NO_BACKUP_FORWARD_RECEIPT_SCHEMA =
+  "ti-scale.no-backup-forward-release-receipt.v2";
+const NO_BACKUP_CURRENT_DEPLOYMENT_MODE = "current_service";
+const NO_BACKUP_STANDALONE_OBSERVER = Object.freeze({
+  schemaVersion: "ti-scale.release-observer.v1",
+  mode: "standalone",
+  scope: "ti_scale_only",
+  externalServiceDependency: "none",
+});
+
+type NoBackupJournalMode = "legacy_v1" | "forward_v2";
 
 export const FUNCTIONAL_RELEASE_TRANSACTION_SCHEMA =
   "ti-scale.functional-release-transaction.v2" as const;
@@ -195,6 +208,34 @@ export function releaseTransactionSha256(value: unknown): string {
   ).digest("hex");
 }
 
+function noBackupJournalMode(
+  identity: Readonly<Record<string, unknown>>,
+): NoBackupJournalMode | undefined {
+  if (identity.deploymentKind === NO_BACKUP_PREVIEW_DEPLOYMENT_KIND) {
+    return "legacy_v1";
+  }
+  if (identity.deploymentKind !== NO_BACKUP_FORWARD_DEPLOYMENT_KIND) {
+    return undefined;
+  }
+  if (
+    identity.deploymentMode !== NO_BACKUP_CURRENT_DEPLOYMENT_MODE ||
+    identity.backupPolicy !== "none" ||
+    releaseTransactionSha256(identity.releaseObserver ?? null) !==
+      releaseTransactionSha256(NO_BACKUP_STANDALONE_OBSERVER)
+  ) {
+    throw new Error(
+      "No-backup forward journal lacks its standalone current-service identity",
+    );
+  }
+  return "forward_v2";
+}
+
+export function isSupportedNoBackupDeploymentIdentity(
+  identity: Readonly<Record<string, unknown>>,
+): boolean {
+  return noBackupJournalMode(identity) !== undefined;
+}
+
 function safeIdentity(value: string, label: string): string {
   if (!SAFE_ID.test(value) || value === "." || value === "..") {
     throw new Error(`${label} is not a safe release transaction identifier`);
@@ -288,11 +329,10 @@ function validateRecordSemantics(
   records: readonly FunctionalReleaseTransactionRecord[],
 ): void {
   const bindingSha256 = releaseTransactionSha256(binding);
+  const identity = binding.identity as Record<string, unknown>;
   const sourceRuntimeProtocolEnabled =
-    (binding.identity as Record<string, unknown>).releaseStartupProtocol === "source_runtime_commit_v1";
-  const noBackupPreviewEnabled =
-    (binding.identity as Record<string, unknown>).deploymentKind ===
-      "no_backup_preview_v1";
+    identity.releaseStartupProtocol === "source_runtime_commit_v1";
+  const noBackupMode = noBackupJournalMode(identity);
   const prepared = new Set<string>();
   const completed = new Set<string>();
   const preparedRecords = new Map<string, FunctionalReleaseTransactionRecord>();
@@ -414,7 +454,7 @@ function validateRecordSemantics(
           ) throw new Error("Source-runtime commitment does not match the immutable source identity");
         }
         if (
-          noBackupPreviewEnabled &&
+          noBackupMode &&
           (
             record.mutation === "deployment_receipt_commit" ||
             record.mutation === "terminal_receipt_commit" ||
@@ -423,18 +463,49 @@ function validateRecordSemantics(
         ) {
           const receiptPath = record.detail?.receiptPath;
           const receiptSha256 = record.detail?.receiptSha256;
-          const legacyIdentitySha256 =
-            record.detail?.legacyIdentitySha256;
+          const proofField = noBackupMode === "forward_v2"
+            ? "observerProofSha256"
+            : "legacyIdentitySha256";
+          const proofSha256 = record.detail?.[proofField];
           const receipt = record.detail?.receipt;
-          const embeddedLegacy = (
+          const embeddedProof = (
             receipt && typeof receipt === "object" &&
               !Array.isArray(receipt)
               ? (
-                (receipt as Record<string, unknown>).chillspwnAfter ??
-                (receipt as Record<string, unknown>).legacyAfter
+                noBackupMode === "forward_v2"
+                  ? (receipt as Record<string, unknown>).releaseObserver
+                  : (
+                    (receipt as Record<string, unknown>).chillspwnAfter ??
+                    (receipt as Record<string, unknown>).legacyAfter
+                  )
               )
               : undefined
           );
+          const forwardReceiptIdentityValid =
+            noBackupMode !== "forward_v2" ||
+            (
+              receipt &&
+              typeof receipt === "object" &&
+              !Array.isArray(receipt) &&
+              (receipt as Record<string, unknown>).schemaVersion ===
+                NO_BACKUP_FORWARD_RECEIPT_SCHEMA &&
+              (receipt as Record<string, unknown>).deploymentMode ===
+                NO_BACKUP_CURRENT_DEPLOYMENT_MODE &&
+              releaseTransactionSha256(
+                (receipt as Record<string, unknown>).releaseObserver ?? null,
+              ) === releaseTransactionSha256(NO_BACKUP_STANDALONE_OBSERVER) &&
+              (receipt as Record<string, unknown>).cutoverEligible ===
+                undefined &&
+              (receipt as Record<string, unknown>).chillspwnBefore ===
+                undefined &&
+              (receipt as Record<string, unknown>).chillspwnAfter ===
+                undefined &&
+              (receipt as Record<string, unknown>).chillspwnRecoveryBaseline ===
+                undefined &&
+              (
+                receipt as Record<string, unknown>
+              ).chillspwnIdentityChangedBeforeRecovery === undefined
+            );
           const canonicalReceiptSha256 =
             receipt && typeof receipt === "object" &&
               !Array.isArray(receipt)
@@ -446,8 +517,16 @@ function validateRecordSemantics(
             receiptPath !== binding.receiptPath ||
             typeof receiptSha256 !== "string" ||
             !SHA256.test(receiptSha256) ||
-            typeof legacyIdentitySha256 !== "string" ||
-            !SHA256.test(legacyIdentitySha256) ||
+            typeof proofSha256 !== "string" ||
+            !SHA256.test(proofSha256) ||
+            (
+              noBackupMode === "forward_v2" &&
+              (
+                record.detail?.legacyIdentitySha256 !== undefined ||
+                proofSha256 !==
+                  releaseTransactionSha256(NO_BACKUP_STANDALONE_OBSERVER)
+              )
+            ) ||
             (
               record.mutation !== "deployment_receipt_restore" &&
               (
@@ -455,11 +534,11 @@ function validateRecordSemantics(
                 typeof receipt !== "object" ||
                 Array.isArray(receipt) ||
                 canonicalReceiptSha256 !== receiptSha256 ||
-                !embeddedLegacy ||
-                typeof embeddedLegacy !== "object" ||
-                Array.isArray(embeddedLegacy) ||
-                releaseTransactionSha256(embeddedLegacy) !==
-                  legacyIdentitySha256
+                !forwardReceiptIdentityValid ||
+                !embeddedProof ||
+                typeof embeddedProof !== "object" ||
+                Array.isArray(embeddedProof) ||
+                releaseTransactionSha256(embeddedProof) !== proofSha256
               )
             )
           ) {
@@ -475,7 +554,7 @@ function validateRecordSemantics(
           throw new Error(`Release transaction mutation completion is ambiguous: ${key}`);
         }
         if (
-          noBackupPreviewEnabled &&
+          noBackupMode &&
           (
             record.mutation === "deployment_receipt_commit" ||
             record.mutation === "terminal_receipt_commit" ||
@@ -483,13 +562,20 @@ function validateRecordSemantics(
           )
         ) {
           const preparation = preparedRecords.get(key);
+          const proofField = noBackupMode === "forward_v2"
+            ? "observerProofSha256"
+            : "legacyIdentitySha256";
           if (
             !preparation ||
             record.detail?.receiptPath !== binding.receiptPath ||
             record.detail?.receiptSha256 !==
               preparation.detail?.receiptSha256 ||
-            record.detail?.legacyIdentitySha256 !==
-              preparation.detail?.legacyIdentitySha256
+            record.detail?.[proofField] !==
+              preparation.detail?.[proofField] ||
+            (
+              noBackupMode === "forward_v2" &&
+              record.detail?.legacyIdentitySha256 !== undefined
+            )
           ) {
             throw new Error(
               `No-backup receipt completion differs from its prepared intent: ${key}`,
@@ -533,29 +619,52 @@ function validateRecordSemantics(
           );
         }
       }
-      if (noBackupPreviewEnabled) {
+      if (noBackupMode) {
         const terminalDetail = record.detail;
+        const proofField = noBackupMode === "forward_v2"
+          ? "observerProofSha256"
+          : "legacyIdentitySha256";
         const assertTerminalReceiptBinding = (
           receiptCompletion: FunctionalReleaseTransactionRecord | undefined,
           label: string,
         ): void => {
+          const committedProof = receiptCompletion?.detail?.[proofField];
+          const exactProofFields = noBackupMode === "forward_v2"
+            ? (
+              terminalDetail?.observerProofSha256 === committedProof &&
+              terminalDetail?.receiptObserverProofSha256 === committedProof &&
+              typeof terminalDetail?.reconciliationObserverProofSha256 ===
+                "string" &&
+              SHA256.test(
+                terminalDetail.reconciliationObserverProofSha256,
+              ) &&
+              terminalDetail.reconciliationObserverProofSha256 ===
+                committedProof &&
+              terminalDetail?.deploymentMode ===
+                NO_BACKUP_CURRENT_DEPLOYMENT_MODE &&
+              terminalDetail?.legacyIdentitySha256 === undefined &&
+              terminalDetail?.receiptLegacyIdentitySha256 === undefined &&
+              terminalDetail?.reconciliationLegacyIdentitySha256 ===
+                undefined
+            )
+            : (
+              terminalDetail?.legacyIdentitySha256 === committedProof &&
+              terminalDetail?.receiptLegacyIdentitySha256 === committedProof &&
+              typeof terminalDetail?.reconciliationLegacyIdentitySha256 ===
+                "string" &&
+              SHA256.test(
+                terminalDetail.reconciliationLegacyIdentitySha256,
+              )
+            );
           if (
             !receiptCompletion ||
             terminalDetail?.receiptPath !== binding.receiptPath ||
             terminalDetail?.receiptSha256 !==
               receiptCompletion.detail?.receiptSha256 ||
-            terminalDetail?.legacyIdentitySha256 !==
-              receiptCompletion.detail?.legacyIdentitySha256 ||
-            terminalDetail?.receiptLegacyIdentitySha256 !==
-              receiptCompletion.detail?.legacyIdentitySha256 ||
-            typeof terminalDetail?.reconciliationLegacyIdentitySha256 !==
-              "string" ||
-            !SHA256.test(
-              terminalDetail.reconciliationLegacyIdentitySha256,
-            )
+            !exactProofFields
           ) {
             throw new Error(
-              `No-backup ${label} terminal lacks its exact committed receipt and legacy proof`,
+              `No-backup ${label} terminal lacks its exact committed receipt and observer proof`,
             );
           }
         };
@@ -587,8 +696,18 @@ function validateRecordSemantics(
             !restoredReceipt ||
             terminalDetail?.restoredReceiptSha256 !==
               restoredReceipt.detail?.receiptSha256 ||
-            terminalDetail?.restoredLegacyIdentitySha256 !==
-              restoredReceipt.detail?.legacyIdentitySha256
+            (
+              noBackupMode === "forward_v2"
+                ? (
+                  terminalDetail?.restoredObserverProofSha256 !==
+                    restoredReceipt.detail?.observerProofSha256 ||
+                  terminalDetail?.restoredLegacyIdentitySha256 !== undefined
+                )
+                : (
+                  terminalDetail?.restoredLegacyIdentitySha256 !==
+                    restoredReceipt.detail?.legacyIdentitySha256
+                )
+            )
           ) {
             throw new Error(
               "No-backup source terminal lacks its restored receipt commitment",

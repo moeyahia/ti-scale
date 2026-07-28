@@ -161,7 +161,7 @@ function completeTargetPrerequisites(journal: string): void {
 }
 
 function sourceRuntimeProtocolFixture(
-  noBackupPreview = false,
+  noBackupMode: false | true | "forward_v2" = false,
 ): ReturnType<typeof fixture> & {
   readonly sourceState: Readonly<Record<string, unknown>>;
 } {
@@ -186,9 +186,22 @@ function sourceRuntimeProtocolFixture(
     recoveryIntent: "restore_predeploy",
     identity: {
       releaseStartupProtocol: RELEASE_SOURCE_RUNTIME_PROTOCOL,
-      ...(noBackupPreview
+      ...(noBackupMode
         ? {
-            deploymentKind: "no_backup_preview_v1",
+            deploymentKind: noBackupMode === "forward_v2"
+              ? "no_backup_forward_v2"
+              : "no_backup_preview_v1",
+            ...(noBackupMode === "forward_v2"
+              ? {
+                  deploymentMode: "current_service",
+                  releaseObserver: {
+                    schemaVersion: "ti-scale.release-observer.v1",
+                    mode: "standalone",
+                    scope: "ti_scale_only",
+                    externalServiceDependency: "none",
+                  },
+                }
+              : {}),
             backupPolicy: "none",
           }
         : {}),
@@ -853,6 +866,190 @@ describe("durable functional release transaction journal", () => {
         restoredLegacyIdentitySha256: restoredLegacySha256,
       },
     })).not.toThrow();
+  });
+
+  test("v2 rejects tampered prepared, completed, and terminal observer commitments", () => {
+    const value = sourceRuntimeProtocolFixture("forward_v2");
+    const receiptPath = join(value.workspace, "original-receipt.json");
+    const observer = {
+      schemaVersion: "ti-scale.release-observer.v1",
+      mode: "standalone",
+      scope: "ti_scale_only",
+      externalServiceDependency: "none",
+    };
+    const observerSha256 = releaseTransactionSha256(observer);
+    const receipt = {
+      schemaVersion: "ti-scale.no-backup-forward-release-receipt.v2",
+      deploymentMode: "current_service",
+      releaseObserver: observer,
+      status: "deployed",
+    };
+    const receiptSha256 = createHash("sha256").update(
+      `${JSON.stringify(
+        JSON.parse(canonicalReleaseTransactionJson(receipt)),
+        null,
+        2,
+      )}\n`,
+    ).digest("hex");
+
+    completeTargetPrerequisites(value.journal);
+    commitFunctionalReleaseTransactionTarget(value.journal, {
+      databaseSchema: 60,
+      pointers: { application: "new-app", static: "new-static" },
+    });
+    for (const mutation of [
+      "service_start",
+      "running_state_verification",
+    ] as const) {
+      prepareFunctionalReleaseMutation(
+        value.journal,
+        "forward",
+        mutation,
+      );
+      completeFunctionalReleaseMutation(
+        value.journal,
+        "forward",
+        mutation,
+      );
+    }
+
+    expect(() => prepareFunctionalReleaseMutation(
+      value.journal,
+      "forward",
+      "deployment_receipt_commit",
+      {
+        receiptPath,
+        receipt: {
+          ...receipt,
+          releaseObserver: {
+            ...observer,
+            externalServiceDependency: "tampered",
+          },
+        },
+        receiptSha256,
+        observerProofSha256: observerSha256,
+      },
+    )).toThrow("immutable prepared intent");
+    expect(() => prepareFunctionalReleaseMutation(
+      value.journal,
+      "forward",
+      "deployment_receipt_commit",
+      {
+        receiptPath,
+        receipt,
+        receiptSha256,
+        observerProofSha256: "a".repeat(64),
+      },
+    )).toThrow("immutable prepared intent");
+
+    prepareFunctionalReleaseMutation(
+      value.journal,
+      "forward",
+      "deployment_receipt_commit",
+      {
+        receiptPath,
+        receipt,
+        receiptSha256,
+        observerProofSha256: observerSha256,
+      },
+    );
+    expect(() => completeFunctionalReleaseMutation(
+      value.journal,
+      "forward",
+      "deployment_receipt_commit",
+      {
+        receiptPath,
+        receiptSha256,
+        observerProofSha256: "b".repeat(64),
+      },
+    )).toThrow("completion differs from its prepared intent");
+    completeFunctionalReleaseMutation(
+      value.journal,
+      "forward",
+      "deployment_receipt_commit",
+      {
+        receiptPath,
+        receiptSha256,
+        observerProofSha256: observerSha256,
+      },
+    );
+
+    expect(() => appendFunctionalReleaseTransactionRecord(value.journal, {
+      event: "terminal",
+      detail: {
+        outcome: "deployed",
+        deploymentMode: "current_service",
+        receiptPath,
+        receiptSha256,
+        observerProofSha256: observerSha256,
+        receiptObserverProofSha256: observerSha256,
+        reconciliationObserverProofSha256: "c".repeat(64),
+      },
+    })).toThrow("exact committed receipt and observer proof");
+    expect(() => appendFunctionalReleaseTransactionRecord(value.journal, {
+      event: "terminal",
+      detail: {
+        outcome: "deployed",
+        deploymentMode: "current_service",
+        receiptPath,
+        receiptSha256,
+        observerProofSha256: observerSha256,
+        receiptObserverProofSha256: observerSha256,
+        reconciliationObserverProofSha256: observerSha256,
+      },
+    })).not.toThrow();
+  });
+
+  test("v2 journal identity is bound to current-service standalone observation", () => {
+    const observer = {
+      schemaVersion: "ti-scale.release-observer.v1",
+      mode: "standalone",
+      scope: "ti_scale_only",
+      externalServiceDependency: "none",
+    };
+    const malformedIdentities = [
+      {
+        deploymentKind: "no_backup_forward_v2",
+        deploymentMode: "preview",
+        backupPolicy: "none",
+        releaseObserver: observer,
+      },
+      {
+        deploymentKind: "no_backup_forward_v2",
+        deploymentMode: "current_service",
+        backupPolicy: "none",
+        releaseObserver: {
+          ...observer,
+          externalServiceDependency: "port_3131",
+        },
+      },
+      {
+        deploymentKind: "no_backup_forward_v2",
+        deploymentMode: "current_service",
+        backupPolicy: "retained",
+        releaseObserver: observer,
+      },
+    ] as const;
+
+    for (const [index, identity] of malformedIdentities.entries()) {
+      const workspace = mkdtempSync(
+        join(tmpdir(), `ti-scale-v2-journal-identity-${index}-`),
+      );
+      roots.push(workspace);
+      const receiptPath = join(workspace, "receipt.json");
+      writeFileSync(receiptPath, "{}\n");
+      expect(() => createFunctionalReleaseTransactionJournal({
+        directory: join(workspace, "journal"),
+        operation: "deploy",
+        releaseId: `v2-identity-${index}`,
+        receiptPath,
+        recoveryIntent: "restore_predeploy",
+        identity,
+        transactionId: `v2-identity-transaction-${index}`,
+      })).toThrow(
+        "No-backup forward journal lacks its standalone current-service identity",
+      );
+    }
   });
 
   test("binds source commitment to immutable source state and forbids postcommit restore replay", () => {

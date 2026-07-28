@@ -115,11 +115,21 @@ import {
 
 export const NO_BACKUP_PREVIEW_RECEIPT_SCHEMA =
   "ti-scale.no-backup-preview-release-receipt.v1" as const;
+export const NO_BACKUP_FORWARD_RECEIPT_SCHEMA =
+  "ti-scale.no-backup-forward-release-receipt.v2" as const;
 export const NO_BACKUP_PREVIEW_ACKNOWLEDGEMENT_FLAG =
   "--acknowledge-no-backup-risk" as const;
 export const NO_BACKUP_PREVIEW_BACKUP_POLICY = "none" as const;
 export const NO_BACKUP_PREVIEW_ROLLBACK_CAPABILITY =
   "none_after_schema_commit" as const;
+export const NO_BACKUP_CURRENT_DEPLOYMENT_MODE =
+  "current_service" as const;
+export const NO_BACKUP_STANDALONE_RELEASE_OBSERVER = Object.freeze({
+  schemaVersion: "ti-scale.release-observer.v1" as const,
+  mode: "standalone" as const,
+  scope: "ti_scale_only" as const,
+  externalServiceDependency: "none" as const,
+});
 
 export const NO_BACKUP_APPLICATION_PATH = "/opt/ti-scale";
 export const NO_BACKUP_SERVER_RELEASE_ROOT =
@@ -137,7 +147,8 @@ const TI_SCALE_HEALTH = "http://127.0.0.1:3132/api/v2/health";
 const TI_SCALE_READINESS = "http://127.0.0.1:3132/api/v2/system/readiness";
 const CHILLSPWN_HEALTH = "http://127.0.0.1:3131/api/health";
 const BUN = "/usr/local/bin/bun";
-export const NO_BACKUP_SOURCE_SCHEMA = 47 as const;
+export const NO_BACKUP_SOURCE_SCHEMA = 60 as const;
+export const NO_BACKUP_HISTORICAL_SOURCE_SCHEMA = 47 as const;
 export const NO_BACKUP_TARGET_SCHEMA = 60 as const;
 const SOURCE_SCHEMA = NO_BACKUP_SOURCE_SCHEMA;
 const TARGET_SCHEMA = NO_BACKUP_TARGET_SCHEMA;
@@ -207,8 +218,7 @@ export interface NoBackupReleasePointer {
   readonly staticManifestSha256: string;
 }
 
-export interface NoBackupPreviewReceipt {
-  readonly schemaVersion: typeof NO_BACKUP_PREVIEW_RECEIPT_SCHEMA;
+interface NoBackupReceiptBase {
   readonly releaseId: string;
   readonly createdAt: string;
   readonly hostBootId: string;
@@ -219,7 +229,6 @@ export interface NoBackupPreviewReceipt {
     | "failed_predeploy_restored"
     | "failed_forward_recovery_required";
   readonly backupPolicy: typeof NO_BACKUP_PREVIEW_BACKUP_POLICY;
-  readonly cutoverEligible: false;
   readonly rollbackCapability: typeof NO_BACKUP_PREVIEW_ROLLBACK_CAPABILITY;
   readonly operatorAcknowledgement: "no_backup_and_no_downgrade";
   readonly serverRelease: {
@@ -238,21 +247,11 @@ export interface NoBackupPreviewReceipt {
     readonly sourceTreeSha256: string;
     readonly staticArtifactSha256: string;
   };
-  readonly database: {
-    readonly sourceSchema: typeof SOURCE_SCHEMA;
-    readonly targetSchema: typeof TARGET_SCHEMA;
-    readonly migrationAttestation: ReleaseMigrationAttestation;
-    schemaCommittedAt?: string;
-  };
   readonly previous: NoBackupReleasePointer;
   readonly target: NoBackupReleasePointer;
   readonly backupPayloadInventoryBefore: NoBackupPayloadInventory;
   backupPayloadInventoryAfter?: NoBackupPayloadInventory;
   backupPayloadInventoryUnchanged?: boolean;
-  readonly chillspwnBefore: ServiceIdentity;
-  chillspwnAfter?: ServiceIdentity;
-  chillspwnRecoveryBaseline?: ServiceIdentity;
-  chillspwnIdentityChangedBeforeRecovery?: boolean;
   recoveryHostBootId?: string;
   tiScaleBefore: ServiceIdentity;
   tiScaleAfter?: ServiceIdentity;
@@ -261,6 +260,49 @@ export interface NoBackupPreviewReceipt {
   failure?: string;
   forwardRecoveryRequired?: boolean;
 }
+
+export interface NoBackupForwardReceipt extends NoBackupReceiptBase {
+  readonly schemaVersion: typeof NO_BACKUP_FORWARD_RECEIPT_SCHEMA;
+  readonly deploymentMode: typeof NO_BACKUP_CURRENT_DEPLOYMENT_MODE;
+  readonly releaseObserver: typeof NO_BACKUP_STANDALONE_RELEASE_OBSERVER;
+  readonly cutoverEligible?: never;
+  readonly database: {
+    readonly sourceSchema: typeof NO_BACKUP_SOURCE_SCHEMA;
+    readonly targetSchema: typeof NO_BACKUP_TARGET_SCHEMA;
+    readonly migrationAttestation: ReleaseMigrationAttestation;
+    schemaCommittedAt?: string;
+  };
+  readonly chillspwnBefore?: never;
+  chillspwnAfter?: never;
+  chillspwnRecoveryBaseline?: never;
+  chillspwnIdentityChangedBeforeRecovery?: never;
+}
+
+/**
+ * Exact historical v1 shape retained solely so an interrupted transaction
+ * created by the old controller can still be recovered. No new deployment
+ * constructs this shape.
+ */
+export interface NoBackupLegacyPreviewReceipt extends NoBackupReceiptBase {
+  readonly schemaVersion: typeof NO_BACKUP_PREVIEW_RECEIPT_SCHEMA;
+  readonly cutoverEligible: false;
+  readonly deploymentMode?: never;
+  readonly releaseObserver?: never;
+  readonly database: {
+    readonly sourceSchema: typeof NO_BACKUP_HISTORICAL_SOURCE_SCHEMA;
+    readonly targetSchema: typeof NO_BACKUP_TARGET_SCHEMA;
+    readonly migrationAttestation: ReleaseMigrationAttestation;
+    schemaCommittedAt?: string;
+  };
+  readonly chillspwnBefore: ServiceIdentity;
+  chillspwnAfter?: ServiceIdentity;
+  chillspwnRecoveryBaseline?: ServiceIdentity;
+  chillspwnIdentityChangedBeforeRecovery?: boolean;
+}
+
+export type NoBackupPreviewReceipt =
+  | NoBackupForwardReceipt
+  | NoBackupLegacyPreviewReceipt;
 
 export interface NoBackupStagedCandidateBinding {
   readonly schemaVersion:
@@ -336,6 +378,95 @@ interface PreparedNoBackupPreview {
    */
   readonly server?: VerifiedServerRelease;
   readonly staticRelease?: VerifiedStaticRelease;
+}
+
+export type NoBackupReleaseObserverProof =
+  | ServiceIdentity
+  | typeof NO_BACKUP_STANDALONE_RELEASE_OBSERVER;
+
+export function isStandaloneNoBackupForwardReceipt(
+  receipt: NoBackupPreviewReceipt,
+): receipt is NoBackupForwardReceipt {
+  return (
+    receipt.schemaVersion === NO_BACKUP_FORWARD_RECEIPT_SCHEMA &&
+    receipt.deploymentMode === NO_BACKUP_CURRENT_DEPLOYMENT_MODE &&
+    releaseTransactionSha256(receipt.releaseObserver ?? null) ===
+      releaseTransactionSha256(NO_BACKUP_STANDALONE_RELEASE_OBSERVER) &&
+    receipt.cutoverEligible === undefined &&
+    receipt.chillspwnBefore === undefined &&
+    receipt.chillspwnAfter === undefined &&
+    receipt.chillspwnRecoveryBaseline === undefined &&
+    receipt.chillspwnIdentityChangedBeforeRecovery === undefined
+  );
+}
+
+function isLegacyNoBackupPreviewReceipt(
+  receipt: NoBackupPreviewReceipt,
+): receipt is NoBackupLegacyPreviewReceipt {
+  return (
+    receipt.schemaVersion === NO_BACKUP_PREVIEW_RECEIPT_SCHEMA &&
+    receipt.cutoverEligible === false &&
+    receipt.deploymentMode === undefined &&
+    receipt.releaseObserver === undefined &&
+    receipt.chillspwnBefore !== undefined
+  );
+}
+
+function receiptObserverProof(
+  receipt: NoBackupPreviewReceipt,
+  phase: "before" | "after",
+): NoBackupReleaseObserverProof {
+  if (isStandaloneNoBackupForwardReceipt(receipt)) {
+    return NO_BACKUP_STANDALONE_RELEASE_OBSERVER;
+  }
+  if (!isLegacyNoBackupPreviewReceipt(receipt)) {
+    throw new Error("No-backup receipt has no valid release observer");
+  }
+  const proof = phase === "before"
+    ? receipt.chillspwnBefore
+    : receipt.chillspwnAfter;
+  if (!proof) {
+    throw new Error(
+      `Historical no-backup receipt lacks its ${phase} compatibility proof`,
+    );
+  }
+  return proof;
+}
+
+function observerProofField(
+  receipt: NoBackupPreviewReceipt,
+): "observerProofSha256" | "legacyIdentitySha256" {
+  return isStandaloneNoBackupForwardReceipt(receipt)
+    ? "observerProofSha256"
+    : "legacyIdentitySha256";
+}
+
+export function noBackupObserverProofDetail(
+  receipt: NoBackupPreviewReceipt,
+  proofSha256: string,
+): Readonly<Record<string, string>> {
+  return { [observerProofField(receipt)]: proofSha256 };
+}
+
+export function noBackupObserverProofSha256FromDetail(
+  detail: Readonly<Record<string, unknown>> | undefined,
+  receipt: NoBackupPreviewReceipt,
+): string | undefined {
+  const value = detail?.[observerProofField(receipt)];
+  return typeof value === "string" ? value : undefined;
+}
+
+export async function resolveNoBackupReleaseObserverProof(
+  receipt: NoBackupPreviewReceipt,
+  captureHistoricalObserver: () => Promise<ServiceIdentity>,
+): Promise<NoBackupReleaseObserverProof> {
+  if (isStandaloneNoBackupForwardReceipt(receipt)) {
+    return NO_BACKUP_STANDALONE_RELEASE_OBSERVER;
+  }
+  if (!isLegacyNoBackupPreviewReceipt(receipt)) {
+    throw new Error("No-backup receipt has no valid release observer");
+  }
+  return captureHistoricalObserver();
 }
 
 function safeJsonError(error: unknown): string {
@@ -446,7 +577,7 @@ function assertHealthyService(
     identity.healthStatus !== 200 ||
     identity.semanticStatus !== semanticStatus
   ) {
-    throw new Error(`${label} is not healthy at the no-backup preview boundary`);
+    throw new Error(`${label} is not healthy at the no-backup release boundary`);
   }
 }
 
@@ -505,7 +636,7 @@ function assertCanonicalDatabase(
     metadata.gid !== serviceGid ||
     (metadata.mode & 0o777) !== 0o600
   ) {
-    throw new Error("Canonical database ownership or mode changed during preview deployment");
+    throw new Error("Canonical database ownership or mode changed during forward deployment");
   }
 }
 
@@ -603,7 +734,7 @@ function applicationTarget(): string {
   const metadata = lstatSync(APPLICATION_PATH);
   if (!metadata.isSymbolicLink()) {
     throw new Error(
-      "No-backup preview deployment requires /opt/ti-scale to already be a symbolic link",
+      "No-backup forward deployment requires /opt/ti-scale to already be a symbolic link",
     );
   }
   return realpathSync(APPLICATION_PATH);
@@ -646,7 +777,7 @@ function atomicApplicationActivation(
     `.no-backup-directory-archive-forbidden-${releaseId}`,
   );
   if (existsSync(forbiddenDirectoryArchive)) {
-    throw new Error("No-backup preview directory-archive sentinel already exists");
+    throw new Error("No-backup forward directory-archive sentinel already exists");
   }
   const result = exchangeApplicationTarget({
     applicationPath: APPLICATION_PATH,
@@ -655,10 +786,10 @@ function atomicApplicationActivation(
     swapName: `no-backup-${releaseId}`,
   });
   if (result.previousKind !== "symlink") {
-    throw new Error("No-backup preview deployment unexpectedly displaced a directory");
+    throw new Error("No-backup forward deployment unexpectedly displaced a directory");
   }
   if (existsSync(forbiddenDirectoryArchive)) {
-    throw new Error("No-backup preview deployment created a forbidden application archive");
+    throw new Error("No-backup forward deployment created a forbidden application archive");
   }
 }
 
@@ -751,7 +882,7 @@ function assertExactReleaseDirectory(path: string, label: string): void {
 
 /**
  * Irreversibly discard the two superseded immutable release trees after the
- * replacement runtime and legacy compatibility proof have both succeeded.
+ * replacement runtime and release-observer proof have both succeeded.
  *
  * Pointer identity is cleared before the old static tree is removed. A crash
  * at any later instruction therefore leaves, at worst, an unreferenced old
@@ -1166,7 +1297,7 @@ export function assertNoBackupPayloadInventoryUnchanged(
     before.inventorySha256 !== after.inventorySha256 ||
     inventoryRecord(before.entries) !== inventoryRecord(after.entries)
   ) {
-    throw new Error("No-backup preview deployment created or changed a backup payload");
+    throw new Error("No-backup forward deployment created or changed a backup payload");
   }
 }
 
@@ -1182,7 +1313,7 @@ export function assertNoBackupPayloadInventoryEmpty(
     inventory.inventorySha256 !== emptyInventorySha256
   ) {
     throw new Error(
-      "No-backup preview preflight requires every configured backup payload root to be empty",
+      "No-backup forward preflight requires every configured backup payload root to be empty",
     );
   }
 }
@@ -1192,26 +1323,30 @@ export function noBackupRecoveryDirection(
   targetSchema: number,
   observedSchema: number,
   forwardSchemas?: readonly number[],
+  sameSchemaTargetCommitted?: boolean,
 ): NoBackupRecoveryDirection {
   return classifyNoBackupForwardOnlyRecovery(
     sourceSchema,
     targetSchema,
     observedSchema,
     forwardSchemas,
+    sameSchemaTargetCommitted,
   );
 }
 
 function attestedNoBackupForwardSchemas(
   attestation: ReleaseMigrationAttestation,
+  sourceSchema: number,
+  targetSchema: number,
 ): readonly number[] {
   const forwardSchemas = attestation.migrations
     .map((migration) => migration.version)
     .filter((version) =>
-      version > SOURCE_SCHEMA && version <= TARGET_SCHEMA
+      version > sourceSchema && version <= targetSchema
     );
   assertNoBackupForwardOnlySchemaProgression(
-    SOURCE_SCHEMA,
-    TARGET_SCHEMA,
+    sourceSchema,
+    targetSchema,
     forwardSchemas,
   );
   return forwardSchemas;
@@ -1222,7 +1357,7 @@ export function parseNoBackupPreviewArguments(
 ): NoBackupPreviewArguments {
   const [commandName, ...rest] = argv;
   if (commandName !== "deploy" && commandName !== "recover") {
-    throw new Error("No-backup preview command must be deploy or recover");
+    throw new Error("No-backup forward command must be deploy or recover");
   }
   const flags = new Set<string>();
   const values = new Map<string, string>();
@@ -1234,7 +1369,7 @@ export function parseNoBackupPreviewArguments(
       continue;
     }
     if (token !== "--release-id" && token !== "--confirm") {
-      throw new Error(`Unsupported no-backup preview option: ${token}`);
+      throw new Error(`Unsupported no-backup forward option: ${token}`);
     }
     if (values.has(token)) throw new Error(`Duplicate option: ${token}`);
     const value = rest[index + 1];
@@ -1243,11 +1378,11 @@ export function parseNoBackupPreviewArguments(
     index += 1;
   }
   if (!flags.has("--execute")) {
-    throw new Error("No-backup preview deployment requires --execute");
+    throw new Error("No-backup forward deployment requires --execute");
   }
   if (!flags.has(NO_BACKUP_PREVIEW_ACKNOWLEDGEMENT_FLAG)) {
     throw new Error(
-      `No-backup preview deployment requires ${NO_BACKUP_PREVIEW_ACKNOWLEDGEMENT_FLAG}`,
+      `No-backup forward deployment requires ${NO_BACKUP_PREVIEW_ACKNOWLEDGEMENT_FLAG}`,
     );
   }
   const releaseId = values.get("--release-id")?.trim() ?? "";
@@ -1279,7 +1414,7 @@ export function mutationState(
 interface CompletedNoBackupReceiptCommit {
   readonly direction: FunctionalReleaseTransactionDirection;
   readonly receiptSha256: string;
-  readonly legacyIdentitySha256: string;
+  readonly observerProofSha256: string;
 }
 
 function noBackupReceiptPreparedRecords(
@@ -1299,7 +1434,7 @@ function noBackupReceiptPreparedRecords(
 interface PreparedNoBackupReceiptIntent {
   readonly receipt: NoBackupPreviewReceipt;
   readonly receiptSha256: string;
-  readonly legacyIdentitySha256: string;
+  readonly observerProofSha256: string;
 }
 
 function noBackupReceiptBytes(receipt: NoBackupPreviewReceipt): string {
@@ -1331,14 +1466,11 @@ function preparedNoBackupReceiptIntent(
   const intents = prepared.map((record) => {
     const receiptPath = record.detail?.receiptPath;
     const receiptSha256 = record.detail?.receiptSha256;
-    const legacyIdentitySha256 = record.detail?.legacyIdentitySha256;
     const receipt = record.detail?.receipt;
     if (
       receiptPath !== journal.binding.receiptPath ||
       typeof receiptSha256 !== "string" ||
       !/^[a-f0-9]{64}$/u.test(receiptSha256) ||
-      typeof legacyIdentitySha256 !== "string" ||
-      !/^[a-f0-9]{64}$/u.test(legacyIdentitySha256) ||
       !receipt ||
       typeof receipt !== "object" ||
       Array.isArray(receipt)
@@ -1348,11 +1480,17 @@ function preparedNoBackupReceiptIntent(
       );
     }
     const typedReceipt = receipt as unknown as NoBackupPreviewReceipt;
+    const observerProofSha256 = noBackupObserverProofSha256FromDetail(
+      record.detail,
+      typedReceipt,
+    );
     if (
       noBackupReceiptValueSha256(typedReceipt) !== receiptSha256 ||
-      !typedReceipt.chillspwnAfter ||
-      releaseTransactionSha256(typedReceipt.chillspwnAfter) !==
-        legacyIdentitySha256
+      typeof observerProofSha256 !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(observerProofSha256) ||
+      releaseTransactionSha256(
+        receiptObserverProof(typedReceipt, "after"),
+      ) !== observerProofSha256
     ) {
       throw new Error(
         "Prepared no-backup receipt commitment has a corrupt intended receipt",
@@ -1361,14 +1499,14 @@ function preparedNoBackupReceiptIntent(
     return {
       receipt: typedReceipt,
       receiptSha256,
-      legacyIdentitySha256,
+      observerProofSha256,
     };
   });
   const first = intents[0]!;
   if (
     intents.some((candidate) =>
       candidate.receiptSha256 !== first.receiptSha256 ||
-      candidate.legacyIdentitySha256 !== first.legacyIdentitySha256
+      candidate.observerProofSha256 !== first.observerProofSha256
     )
   ) {
     throw new Error(
@@ -1390,7 +1528,6 @@ function completedNoBackupReceiptMutation(
   if (completed.length === 0) return undefined;
   const parsed = completed.map((record) => {
     const receiptSha256 = record.detail?.receiptSha256;
-    const legacyIdentitySha256 = record.detail?.legacyIdentitySha256;
     const receiptPath = record.detail?.receiptPath;
     const preparation = journal.records.filter((candidate) =>
       candidate.event === "mutation_prepared" &&
@@ -1398,34 +1535,51 @@ function completedNoBackupReceiptMutation(
       candidate.mutation === mutation &&
       candidate.sequence < record.sequence
     );
+    const preparedReceipt = preparation[0]?.detail?.receipt;
     if (
       typeof receiptSha256 !== "string" ||
       !/^[a-f0-9]{64}$/u.test(receiptSha256) ||
-      typeof legacyIdentitySha256 !== "string" ||
-      !/^[a-f0-9]{64}$/u.test(legacyIdentitySha256) ||
       receiptPath !== journal.binding.receiptPath ||
       preparation.length !== 1 ||
       preparation[0]?.detail?.receiptPath !== journal.binding.receiptPath ||
       preparation[0]?.detail?.receiptSha256 !== receiptSha256 ||
-      preparation[0]?.detail?.legacyIdentitySha256 !==
-        legacyIdentitySha256 ||
+      !preparedReceipt ||
+      typeof preparedReceipt !== "object" ||
+      Array.isArray(preparedReceipt) ||
       (record.direction !== "forward" && record.direction !== "recovery")
     ) {
       throw new Error(
-        "Completed no-backup deployment receipt lacks its immutable receipt and legacy hashes",
+        "Completed no-backup deployment receipt lacks its immutable receipt and observer proof",
+      );
+    }
+    const typedReceipt = preparedReceipt as unknown as NoBackupPreviewReceipt;
+    const observerProofSha256 = noBackupObserverProofSha256FromDetail(
+      record.detail,
+      typedReceipt,
+    );
+    if (
+      typeof observerProofSha256 !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(observerProofSha256) ||
+      noBackupObserverProofSha256FromDetail(
+        preparation[0]?.detail,
+        typedReceipt,
+      ) !== observerProofSha256
+    ) {
+      throw new Error(
+        "Completed no-backup deployment receipt lacks its immutable observer proof",
       );
     }
     return {
       direction: record.direction,
       receiptSha256,
-      legacyIdentitySha256,
+      observerProofSha256,
     } as const;
   });
   const first = parsed[0]!;
   if (
     parsed.some((candidate) =>
       candidate.receiptSha256 !== first.receiptSha256 ||
-      candidate.legacyIdentitySha256 !== first.legacyIdentitySha256
+      candidate.observerProofSha256 !== first.observerProofSha256
     )
   ) {
     throw new Error(
@@ -1437,7 +1591,7 @@ function completedNoBackupReceiptMutation(
 
 interface CompletedNoBackupReceiptRestore {
   readonly receiptSha256: string;
-  readonly legacyIdentitySha256: string;
+  readonly observerProofSha256: string;
 }
 
 function preparedNoBackupReceiptRestore(
@@ -1455,19 +1609,25 @@ function preparedNoBackupReceiptRestore(
   }
   const record = prepared[0]!;
   const receiptSha256 = record.detail?.receiptSha256;
-  const legacyIdentitySha256 = record.detail?.legacyIdentitySha256;
+  const receipt = JSON.parse(
+    readFileSync(journal.binding.receiptPath, "utf8"),
+  ) as NoBackupPreviewReceipt;
+  const observerProofSha256 = noBackupObserverProofSha256FromDetail(
+    record.detail,
+    receipt,
+  );
   if (
     record.detail?.receiptPath !== journal.binding.receiptPath ||
     typeof receiptSha256 !== "string" ||
     !/^[a-f0-9]{64}$/u.test(receiptSha256) ||
-    typeof legacyIdentitySha256 !== "string" ||
-    !/^[a-f0-9]{64}$/u.test(legacyIdentitySha256)
+    typeof observerProofSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(observerProofSha256)
   ) {
     throw new Error(
-      "Prepared no-backup source receipt restoration lacks its exact receipt and legacy hashes",
+      "Prepared no-backup source receipt restoration lacks its exact receipt and observer proof",
     );
   }
-  return { receiptSha256, legacyIdentitySha256 };
+  return { receiptSha256, observerProofSha256 };
 }
 
 function completedNoBackupReceiptRestore(
@@ -1492,23 +1652,32 @@ function completedNoBackupReceiptRestore(
     candidate.sequence < record.sequence
   );
   const receiptSha256 = record.detail?.receiptSha256;
-  const legacyIdentitySha256 = record.detail?.legacyIdentitySha256;
+  const receipt = JSON.parse(
+    readFileSync(journal.binding.receiptPath, "utf8"),
+  ) as NoBackupPreviewReceipt;
+  const observerProofSha256 = noBackupObserverProofSha256FromDetail(
+    record.detail,
+    receipt,
+  );
   if (
     preparation.length !== 1 ||
     preparation[0]?.detail?.receiptPath !== journal.binding.receiptPath ||
     preparation[0]?.detail?.receiptSha256 !== receiptSha256 ||
-    preparation[0]?.detail?.legacyIdentitySha256 !== legacyIdentitySha256 ||
+    noBackupObserverProofSha256FromDetail(
+      preparation[0]?.detail,
+      receipt,
+    ) !== observerProofSha256 ||
     record.detail?.receiptPath !== journal.binding.receiptPath ||
     typeof receiptSha256 !== "string" ||
     !/^[a-f0-9]{64}$/u.test(receiptSha256) ||
-    typeof legacyIdentitySha256 !== "string" ||
-    !/^[a-f0-9]{64}$/u.test(legacyIdentitySha256)
+    typeof observerProofSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(observerProofSha256)
   ) {
     throw new Error(
-      "Completed no-backup source receipt restoration lacks its exact receipt and legacy hashes",
+      "Completed no-backup source receipt restoration lacks its exact receipt and observer proof",
     );
   }
-  return { receiptSha256, legacyIdentitySha256 };
+  return { receiptSha256, observerProofSha256 };
 }
 
 function completedNoBackupReceiptCommit(
@@ -1553,12 +1722,12 @@ function assertCompletedNoBackupReceiptCommit(
     readFileSync(prepared.receiptPath, "utf8"),
   ) as NoBackupPreviewReceipt;
   if (
-    !receipt.chillspwnAfter ||
-    releaseTransactionSha256(receipt.chillspwnAfter) !==
-      commitment.legacyIdentitySha256
+    releaseTransactionSha256(
+      receiptObserverProof(receipt, "after"),
+    ) !== commitment.observerProofSha256
   ) {
     throw new Error(
-      "Durably committed no-backup receipt no longer contains its exact legacy proof",
+      "Durably committed no-backup receipt no longer contains its exact observer proof",
     );
   }
   return receipt;
@@ -1568,7 +1737,7 @@ function receiptIntentForCommit(
   prepared: PreparedNoBackupPreview,
   journal: FunctionalReleaseTransactionJournal,
   mutation: "deployment_receipt_commit" | "terminal_receipt_commit",
-  currentLegacyProof: ServiceIdentity,
+  currentObserverProof: NoBackupReleaseObserverProof,
 ): PreparedNoBackupReceiptIntent {
   const preparedIntent = preparedNoBackupReceiptIntent(
     journal,
@@ -1577,16 +1746,29 @@ function receiptIntentForCommit(
   if (preparedIntent) {
     return preparedIntent;
   }
-  const receipt = JSON.parse(
-    JSON.stringify({
-      ...prepared.receipt,
-      chillspwnAfter: currentLegacyProof,
-    }),
-  ) as NoBackupPreviewReceipt;
+  const receipt = JSON.parse(JSON.stringify(
+    isStandaloneNoBackupForwardReceipt(prepared.receipt)
+      ? prepared.receipt
+      : {
+        ...prepared.receipt,
+        chillspwnAfter: currentObserverProof,
+      },
+  )) as NoBackupPreviewReceipt;
+  const observerProofSha256 =
+    releaseTransactionSha256(currentObserverProof);
+  if (
+    releaseTransactionSha256(
+      receiptObserverProof(receipt, "after"),
+    ) !== observerProofSha256
+  ) {
+    throw new Error(
+      "No-backup receipt observer proof differs from its deployment mode",
+    );
+  }
   return {
     receipt,
     receiptSha256: noBackupReceiptValueSha256(receipt),
-    legacyIdentitySha256: releaseTransactionSha256(currentLegacyProof),
+    observerProofSha256,
   };
 }
 
@@ -1613,7 +1795,7 @@ function assertNoBackupSourceReceiptRestoreCommit(
 
 function ensureNoBackupSourceReceiptRestoreCommit(
   prepared: PreparedNoBackupPreview,
-  legacyProof: ServiceIdentity,
+  observerProof: NoBackupReleaseObserverProof,
 ): CompletedNoBackupReceiptRestore {
   let journal = readFunctionalReleaseTransactionJournal(
     prepared.journalDirectory,
@@ -1628,7 +1810,7 @@ function ensureNoBackupSourceReceiptRestoreCommit(
   if (state === "unseen") {
     preparedIntent = {
       receiptSha256: receiptFileSha256(prepared.receiptPath),
-      legacyIdentitySha256: releaseTransactionSha256(legacyProof),
+      observerProofSha256: releaseTransactionSha256(observerProof),
     };
     prepareFunctionalReleaseMutation(
       prepared.journalDirectory,
@@ -1637,7 +1819,10 @@ function ensureNoBackupSourceReceiptRestoreCommit(
       {
         receiptPath: prepared.receiptPath,
         receiptSha256: preparedIntent.receiptSha256,
-        legacyIdentitySha256: preparedIntent.legacyIdentitySha256,
+        ...noBackupObserverProofDetail(
+          prepared.receipt,
+          preparedIntent.observerProofSha256,
+        ),
         backupPolicy: "none",
       },
     );
@@ -1665,7 +1850,10 @@ function ensureNoBackupSourceReceiptRestoreCommit(
         outcome: "already_exact",
         receiptPath: prepared.receiptPath,
         receiptSha256: preparedIntent.receiptSha256,
-        legacyIdentitySha256: preparedIntent.legacyIdentitySha256,
+        ...noBackupObserverProofDetail(
+          prepared.receipt,
+          preparedIntent.observerProofSha256,
+        ),
         backupPolicy: "none",
       },
     );
@@ -1734,7 +1922,7 @@ function assertNoIncompleteTransaction(): void {
   const incomplete = discoverIncompleteFunctionalReleaseTransactions(TRANSACTION_ROOT);
   if (incomplete.length) {
     throw new Error(
-      `No-backup preview deployment is blocked by nonterminal release ${incomplete[0]!.releaseId}`,
+      `No-backup forward deployment is blocked by nonterminal release ${incomplete[0]!.releaseId}`,
     );
   }
 }
@@ -1751,13 +1939,13 @@ async function assertStartAdmissionInstalled(): Promise<void> {
     "--value",
   ]);
   if (!serviceStartAdmissionConfigured(show("ExecStartPre"), show("ExecStartPreEx"))) {
-    throw new Error("No-backup preview requires the exact release-start admission gate");
+    throw new Error("No-backup forward deployment requires the exact release-start admission gate");
   }
   if (!serviceWrapperConfigured(show("ExecStart"), show("ExecStartEx"))) {
-    throw new Error("No-backup preview requires the exact stable service wrapper");
+    throw new Error("No-backup forward deployment requires the exact stable service wrapper");
   }
   if (!serviceStartAdmissionMountConfigured(show("RequiresMountsFor"))) {
-    throw new Error("No-backup preview requires the release transaction mount");
+    throw new Error("No-backup forward deployment requires the release transaction mount");
   }
   if (!serviceWrapperIdentityConfigured(
     show("User"),
@@ -1765,7 +1953,7 @@ async function assertStartAdmissionInstalled(): Promise<void> {
     show("WorkingDirectory"),
     show("DynamicUser"),
   )) {
-    throw new Error("No-backup preview requires the dedicated Ti-Scale service identity");
+    throw new Error("No-backup forward deployment requires the dedicated Ti-Scale service identity");
   }
   await attestInstalledReleaseServiceStartAdmission({ sourceRoot: resolve(import.meta.dir, "../..") });
   const helper = command([
@@ -1798,7 +1986,7 @@ function createMetadataDirectory(path: string): void {
     metadata.gid !== 0 ||
     (metadata.mode & 0o777) !== 0o700
   ) {
-    throw new Error("No-backup preview metadata directory is not root-owned mode 0700");
+    throw new Error("No-backup forward metadata directory is not root-owned mode 0700");
   }
   const descriptor = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY);
   try {
@@ -1810,7 +1998,6 @@ function createMetadataDirectory(path: string): void {
 
 function prepareNoBackupPreview(
   releaseId: string,
-  legacyBefore: ServiceIdentity,
   tiScaleBefore: ServiceIdentity,
   inventoryBefore: NoBackupPayloadInventory,
   candidateBinding?: NoBackupStagedCandidateBinding,
@@ -1824,17 +2011,21 @@ function prepareNoBackupPreview(
     const migrationAttestation = assertReleaseMigrationAttestationsMatch(
       sourceAttestation,
       stagedAttestation,
-      "No-backup preview staged migration attestation",
+      "No-backup forward staged migration attestation",
     );
     if (
       migrationAttestation.targetSchema !== TARGET_SCHEMA ||
       databaseSchema() !== SOURCE_SCHEMA
     ) {
       throw new Error(
-        `No-backup preview is bound to schema ${SOURCE_SCHEMA}→${TARGET_SCHEMA}`,
+        `No-backup forward deployment is bound to schema ${SOURCE_SCHEMA}→${TARGET_SCHEMA}`,
       );
     }
-    attestedNoBackupForwardSchemas(migrationAttestation);
+    attestedNoBackupForwardSchemas(
+      migrationAttestation,
+      SOURCE_SCHEMA,
+      TARGET_SCHEMA,
+    );
     const staticStore = new StaticArtifactReleaseStore({ releaseRoot: STATIC_RELEASE_ROOT });
     const staticRelease = staticStore.verifyRelease(releaseId);
     if (candidateBinding) {
@@ -1867,7 +2058,7 @@ function prepareNoBackupPreview(
           staticRelease.manifest.artifactSha256
       ) {
         throw new Error(
-          "No-backup preview candidate differs from its clean-source staging binding",
+          "No-backup forward candidate differs from its clean-source staging binding",
         );
       }
     }
@@ -1876,7 +2067,7 @@ function prepareNoBackupPreview(
     const targetApplicationTarget = realpathSync(server.releaseDirectory);
     const metadataRoot = join(TRANSACTION_ROOT, releaseId);
     if (existsSync(metadataRoot)) {
-      throw new Error(`No-backup preview metadata already exists for ${releaseId}`);
+      throw new Error(`No-backup forward metadata already exists for ${releaseId}`);
     }
     const stagingMetadataRoot = join(
       TRANSACTION_ROOT,
@@ -1894,13 +2085,14 @@ function prepareNoBackupPreview(
       "transaction-journal",
     );
     const receipt: NoBackupPreviewReceipt = {
-      schemaVersion: NO_BACKUP_PREVIEW_RECEIPT_SCHEMA,
+      schemaVersion: NO_BACKUP_FORWARD_RECEIPT_SCHEMA,
       releaseId,
       createdAt: new Date().toISOString(),
       hostBootId: currentHostBootId(),
       status: "prepared",
       backupPolicy: NO_BACKUP_PREVIEW_BACKUP_POLICY,
-      cutoverEligible: false,
+      deploymentMode: NO_BACKUP_CURRENT_DEPLOYMENT_MODE,
+      releaseObserver: NO_BACKUP_STANDALONE_RELEASE_OBSERVER,
       rollbackCapability: NO_BACKUP_PREVIEW_ROLLBACK_CAPABILITY,
       operatorAcknowledgement: "no_backup_and_no_downgrade",
       serverRelease: {
@@ -1939,7 +2131,6 @@ function prepareNoBackupPreview(
         staticManifestSha256: staticRelease.manifestSha256,
       },
       backupPayloadInventoryBefore: inventoryBefore,
-      chillspwnBefore: legacyBefore,
       tiScaleBefore,
     };
     writeReceipt(stagingReceiptPath, receipt);
@@ -1950,12 +2141,13 @@ function prepareNoBackupPreview(
       receiptPath,
       recoveryIntent: "restore_predeploy",
       identity: {
-        deploymentKind: "no_backup_preview_v1",
+        deploymentKind: "no_backup_forward_v2",
+        deploymentMode: NO_BACKUP_CURRENT_DEPLOYMENT_MODE,
         releaseStartupProtocol: RELEASE_SOURCE_RUNTIME_PROTOCOL,
         targetRuntimeCommitProtocol: RELEASE_TARGET_RUNTIME_COMMIT_PROTOCOL,
         requireRunningStateVerification: true,
         hostBootId: receipt.hostBootId,
-        chillspwnBefore: receipt.chillspwnBefore,
+        releaseObserver: receipt.releaseObserver,
         backupPayloadInventoryBefore: {
           roots: receipt.backupPayloadInventoryBefore.roots,
           inventorySha256: receipt.backupPayloadInventoryBefore.inventorySha256,
@@ -1996,21 +2188,27 @@ async function loadPreparedNoBackupPreview(
   const receiptPath = join(metadataRoot, "no-backup-preview-receipt.json");
   const journalDirectory = join(metadataRoot, "transaction-journal");
   if (!existsSync(receiptPath) || !existsSync(journalDirectory)) {
-    throw new Error(`No recoverable no-backup preview metadata exists for ${releaseId}`);
+    throw new Error(`No recoverable no-backup release metadata exists for ${releaseId}`);
   }
   const receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as NoBackupPreviewReceipt;
+  const receiptObserverShapeValid =
+    isStandaloneNoBackupForwardReceipt(receipt) ||
+    isLegacyNoBackupPreviewReceipt(receipt);
+  const expectedSourceSchema =
+    receipt.schemaVersion === NO_BACKUP_FORWARD_RECEIPT_SCHEMA
+      ? NO_BACKUP_SOURCE_SCHEMA
+      : NO_BACKUP_HISTORICAL_SOURCE_SCHEMA;
   if (
-    receipt.schemaVersion !== NO_BACKUP_PREVIEW_RECEIPT_SCHEMA ||
+    !receiptObserverShapeValid ||
     receipt.releaseId !== releaseId ||
     receipt.backupPolicy !== "none" ||
-    receipt.cutoverEligible !== false ||
     receipt.rollbackCapability !== NO_BACKUP_PREVIEW_ROLLBACK_CAPABILITY ||
     receipt.operatorAcknowledgement !== "no_backup_and_no_downgrade" ||
     typeof receipt.hostBootId !== "string" ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
       receipt.hostBootId,
     ) ||
-    receipt.database?.sourceSchema !== SOURCE_SCHEMA ||
+    receipt.database?.sourceSchema !== expectedSourceSchema ||
     receipt.database?.targetSchema !== TARGET_SCHEMA ||
     !receipt.serverRelease ||
     !receipt.staticRelease ||
@@ -2018,14 +2216,14 @@ async function loadPreparedNoBackupPreview(
     !receipt.target ||
     !receipt.backupPayloadInventoryBefore
   ) {
-    throw new Error("No-backup preview recovery receipt is malformed or policy-incompatible");
+    throw new Error("No-backup forward recovery receipt is malformed or policy-incompatible");
   }
   if (
     JSON.stringify(receipt.backupPayloadInventoryBefore.roots) !==
       JSON.stringify([...NO_BACKUP_PAYLOAD_ROOTS].sort((left, right) =>
         left.localeCompare(right, "en")))
   ) {
-    throw new Error("No-backup preview recovery receipt lacks the complete payload inventory roots");
+    throw new Error("No-backup forward recovery receipt lacks the complete payload inventory roots");
   }
   assertNoBackupPayloadInventoryEmpty(
     receipt.backupPayloadInventoryBefore,
@@ -2049,25 +2247,35 @@ async function loadPreparedNoBackupPreview(
     )
   ) {
     throw new Error(
-      "No-backup preview recovery candidate staging binding is malformed",
+      "No-backup forward recovery candidate staging binding is malformed",
     );
   }
   const journal = readFunctionalReleaseTransactionJournal(journalDirectory);
   const identity = journal.binding.identity as Record<string, unknown>;
+  const observerIdentityMatches = isStandaloneNoBackupForwardReceipt(receipt)
+    ? (
+      identity.deploymentKind === "no_backup_forward_v2" &&
+      identity.deploymentMode === NO_BACKUP_CURRENT_DEPLOYMENT_MODE &&
+      releaseTransactionSha256(identity.releaseObserver) ===
+        releaseTransactionSha256(receipt.releaseObserver)
+    )
+    : (
+      identity.deploymentKind === "no_backup_preview_v1" &&
+      releaseTransactionSha256(identity.chillspwnBefore) ===
+        releaseTransactionSha256(receipt.chillspwnBefore)
+    );
   if (
     journal.binding.operation !== "deploy" ||
     journal.binding.releaseId !== releaseId ||
     journal.binding.receiptPath !== receiptPath ||
     journal.terminal ||
-    identity.deploymentKind !== "no_backup_preview_v1" ||
+    !observerIdentityMatches ||
     identity.backupPolicy !== "none" ||
     identity.rollbackCapability !== NO_BACKUP_PREVIEW_ROLLBACK_CAPABILITY ||
     identity.releaseStartupProtocol !== RELEASE_SOURCE_RUNTIME_PROTOCOL ||
     identity.targetRuntimeCommitProtocol !== RELEASE_TARGET_RUNTIME_COMMIT_PROTOCOL ||
     identity.requireRunningStateVerification !== true ||
     identity.hostBootId !== receipt.hostBootId ||
-    releaseTransactionSha256(identity.chillspwnBefore) !==
-      releaseTransactionSha256(receipt.chillspwnBefore) ||
     releaseTransactionSha256(identity.backupPayloadInventoryBefore) !==
       releaseTransactionSha256({
         roots: receipt.backupPayloadInventoryBefore.roots,
@@ -2085,7 +2293,7 @@ async function loadPreparedNoBackupPreview(
     ) ||
     releaseTransactionSha256(identity.predeploy) !== releaseTransactionSha256({
       pointers: receipt.previous,
-      databaseSchema: SOURCE_SCHEMA,
+      databaseSchema: receipt.database.sourceSchema,
       serviceIntent: "active",
       previousInvocationId: receipt.tiScaleBefore.invocationId,
     }) ||
@@ -2095,7 +2303,7 @@ async function loadPreparedNoBackupPreview(
       migrationAttestation: receipt.database.migrationAttestation,
     })
   ) {
-    throw new Error("No-backup preview recovery journal does not match its immutable receipt");
+    throw new Error("No-backup forward recovery journal does not match its immutable receipt");
   }
   const serverDirectory = join(SERVER_RELEASE_ROOT, "releases", releaseId);
   const staticDirectory = join(STATIC_RELEASE_ROOT, "releases", releaseId);
@@ -2105,7 +2313,7 @@ async function loadPreparedNoBackupPreview(
     resolve(receipt.staticRelease.path) !== staticDirectory
   ) {
     throw new Error(
-      "No-backup preview recovery candidate paths differ from their immutable release IDs",
+      "No-backup forward recovery candidate paths differ from their immutable release IDs",
     );
   }
   const cleanupState = recoveryMutationState(
@@ -2144,7 +2352,7 @@ async function loadPreparedNoBackupPreview(
   const candidateMayBeMissing =
     cleanupState !== "unseen" &&
     cleanupIdentityMatches &&
-    databaseSchema() === SOURCE_SCHEMA &&
+    databaseSchema() === receipt.database.sourceSchema &&
     releaseSourceRuntimeCommitted(journal) &&
     completedNoBackupReceiptRestore(journal) !== null;
 
@@ -2157,16 +2365,16 @@ async function loadPreparedNoBackupPreview(
       server.manifest.treeSha256 !== receipt.serverRelease.treeSha256 ||
       realpathSync(server.releaseDirectory) !== receipt.target.applicationTarget
     ) {
-      throw new Error("No-backup preview recovery server release differs from its receipt");
+      throw new Error("No-backup forward recovery server release differs from its receipt");
     }
     assertReleaseMigrationAttestationsMatch(
       receipt.database.migrationAttestation,
       attestReleaseMigrationCeiling(server.releaseDirectory),
-      "No-backup preview recovery migration attestation",
+      "No-backup forward recovery migration attestation",
     );
   } else if (!candidateMayBeMissing) {
     throw new Error(
-      "No-backup preview recovery candidate server release is missing without a durable cleanup boundary",
+      "No-backup forward recovery candidate server release is missing without a durable cleanup boundary",
     );
   }
 
@@ -2180,11 +2388,11 @@ async function loadPreparedNoBackupPreview(
       staticRelease.manifestSha256 !== receipt.staticRelease.manifestSha256 ||
       staticRelease.manifestSha256 !== receipt.target.staticManifestSha256
     ) {
-      throw new Error("No-backup preview recovery static release differs from its receipt");
+      throw new Error("No-backup forward recovery static release differs from its receipt");
     }
   } else if (!candidateMayBeMissing) {
     throw new Error(
-      "No-backup preview recovery candidate static release is missing without a durable cleanup boundary",
+      "No-backup forward recovery candidate static release is missing without a durable cleanup boundary",
     );
   }
   if (
@@ -2286,29 +2494,34 @@ function runNoBackupMigration(prepared: PreparedNoBackupPreview): void {
     "No-backup database migration",
   );
   ensureMutation(prepared.journalDirectory, "database_migration", () => {
-    command([
-      "/usr/sbin/runuser",
-      "--user",
-      "ti-scale",
-      "--",
-      BUN,
-      "run",
-      "server/db/cli.ts",
-      "migrate",
-      "--db",
-      DATABASE_PATH,
-      "--no-backup",
-      "--acknowledge-no-backup-risk",
-    ], {
-      cwd: server.releaseDirectory,
-      env: minimalEnvironment("/var/lib/ti-scale"),
-      timeoutMs: 15 * 60_000,
-    });
+    if (
+      prepared.receipt.database.sourceSchema !==
+        prepared.receipt.database.targetSchema
+    ) {
+      command([
+        "/usr/sbin/runuser",
+        "--user",
+        "ti-scale",
+        "--",
+        BUN,
+        "run",
+        "server/db/cli.ts",
+        "migrate",
+        "--db",
+        DATABASE_PATH,
+        "--no-backup",
+        "--acknowledge-no-backup-risk",
+      ], {
+        cwd: server.releaseDirectory,
+        env: minimalEnvironment("/var/lib/ti-scale"),
+        timeoutMs: 15 * 60_000,
+      });
+    }
     assertCanonicalDatabase(TARGET_SCHEMA, { verifyIntegrity: true });
     assertReleaseMigrationAttestationsMatch(
       prepared.receipt.database.migrationAttestation,
       attestReleaseMigrationCeiling(server.releaseDirectory),
-      "No-backup preview post-migration attestation",
+      "No-backup forward post-migration attestation",
     );
     prepared.receipt.database.schemaCommittedAt = new Date().toISOString();
     writeReceipt(prepared.receiptPath, prepared.receipt);
@@ -2455,7 +2668,7 @@ async function commitTargetWhileStopped(
 
 async function startAndFinalizeTarget(
   prepared: PreparedNoBackupPreview,
-  legacyBefore: ServiceIdentity,
+  observerBefore: NoBackupReleaseObserverProof,
   forceRecovery = false,
 ): Promise<void> {
   let journal = readFunctionalReleaseTransactionJournal(prepared.journalDirectory);
@@ -2645,8 +2858,11 @@ async function startAndFinalizeTarget(
   }
   await commitNoBackupTerminalAfterCompatibilityProof({
     verifyCompatibility: () =>
-      captureAndAssertLegacyUnchanged(legacyBefore),
-    commitTerminal: (legacyProof) => {
+      captureAndAssertReleaseObserverUnchanged(
+        prepared.receipt,
+        observerBefore,
+      ),
+    commitTerminal: (observerProof) => {
       journal = readFunctionalReleaseTransactionJournal(prepared.journalDirectory);
       let receiptCommitment = completedNoBackupReceiptCommit(journal);
       if (receiptCommitment) {
@@ -2658,10 +2874,10 @@ async function startAndFinalizeTarget(
             prepared,
             journal,
             "deployment_receipt_commit",
-            legacyProof,
+            observerProof,
           );
-      const receiptLegacyIdentitySha256 = receiptCommitment
-        ?.legacyIdentitySha256 ?? receiptIntent!.legacyIdentitySha256;
+      const receiptObserverProofSha256 = receiptCommitment
+        ?.observerProofSha256 ?? receiptIntent!.observerProofSha256;
       const intendedReceiptSha256 = receiptCommitment
         ?.receiptSha256 ?? receiptIntent!.receiptSha256;
       const receiptState = useRecovery
@@ -2676,7 +2892,10 @@ async function startAndFinalizeTarget(
             receiptPath: prepared.receiptPath,
             receipt: receiptIntent!.receipt,
             receiptSha256: intendedReceiptSha256,
-            legacyIdentitySha256: receiptLegacyIdentitySha256,
+            ...noBackupObserverProofDetail(
+              prepared.receipt,
+              receiptObserverProofSha256,
+            ),
           },
         );
       }
@@ -2715,7 +2934,10 @@ async function startAndFinalizeTarget(
           {
             receiptPath: prepared.receiptPath,
             receiptSha256: intendedReceiptSha256,
-            legacyIdentitySha256: receiptLegacyIdentitySha256,
+            ...noBackupObserverProofDetail(
+              prepared.receipt,
+              receiptObserverProofSha256,
+            ),
           },
         );
       }
@@ -2754,13 +2976,30 @@ async function startAndFinalizeTarget(
             outcome: "deployed",
             receiptPath: prepared.receiptPath,
             backupPolicy: "none",
-            cutoverEligible: false,
-            legacyIdentitySha256:
-              receiptCommitment.legacyIdentitySha256,
-            receiptLegacyIdentitySha256:
-              receiptCommitment.legacyIdentitySha256,
-            reconciliationLegacyIdentitySha256:
-              releaseTransactionSha256(legacyProof),
+            deploymentMode:
+              isStandaloneNoBackupForwardReceipt(prepared.receipt)
+                ? NO_BACKUP_CURRENT_DEPLOYMENT_MODE
+                : "historical_preview",
+            ...(
+              isStandaloneNoBackupForwardReceipt(prepared.receipt)
+                ? {
+                  observerProofSha256:
+                    receiptCommitment.observerProofSha256,
+                  receiptObserverProofSha256:
+                    receiptCommitment.observerProofSha256,
+                  reconciliationObserverProofSha256:
+                    releaseTransactionSha256(observerProof),
+                }
+                : {
+                  cutoverEligible: false,
+                  legacyIdentitySha256:
+                    receiptCommitment.observerProofSha256,
+                  receiptLegacyIdentitySha256:
+                    receiptCommitment.observerProofSha256,
+                  reconciliationLegacyIdentitySha256:
+                    releaseTransactionSha256(observerProof),
+                }
+            ),
             receiptSha256: receiptCommitment.receiptSha256,
             staticPreviousIdentityCleared:
               supersededReleaseCleanup
@@ -2866,11 +3105,30 @@ async function ensureTargetCommittedUnderMaintenance(
   });
 }
 
-async function captureAndAssertLegacyUnchanged(
-  before: ServiceIdentity,
-): Promise<ServiceIdentity> {
-  const after = await captureServiceIdentity(LEGACY_SERVICE, CHILLSPWN_HEALTH);
-  return assertServiceIdentityUnchanged(before, after, "ChillsPwn on port 3131");
+async function captureAndAssertReleaseObserverUnchanged(
+  receipt: NoBackupPreviewReceipt,
+  before: NoBackupReleaseObserverProof,
+): Promise<NoBackupReleaseObserverProof> {
+  const after = await resolveNoBackupReleaseObserverProof(
+    receipt,
+    () => captureServiceIdentity(LEGACY_SERVICE, CHILLSPWN_HEALTH),
+  );
+  if (isStandaloneNoBackupForwardReceipt(receipt)) {
+    if (
+      releaseTransactionSha256(before) !==
+        releaseTransactionSha256(after)
+    ) {
+      throw new Error(
+        "Standalone Ti-Scale release observer changed during deployment",
+      );
+    }
+    return after;
+  }
+  return assertServiceIdentityUnchanged(
+    before as ServiceIdentity,
+    after as ServiceIdentity,
+    "Historical compatibility service",
+  );
 }
 
 function recoveryMutationState(
@@ -2952,7 +3210,7 @@ async function waitForJournalGuardedRuntime(
           prepared.receipt.previous,
           "Journal-guarded source",
         );
-        assertCanonicalDatabase(SOURCE_SCHEMA);
+        assertCanonicalDatabase(prepared.receipt.database.sourceSchema);
         return {
           activeState: properties.activeState,
           mainPid: properties.mainPid,
@@ -2993,14 +3251,15 @@ async function waitForRecoveredSourceRuntime(
         readiness.statusCode === 200 &&
         readiness.semanticStatus === "healthy" &&
         database?.healthy === true &&
-        Number(database.currentMigration) === SOURCE_SCHEMA
+        Number(database.currentMigration) ===
+          prepared.receipt.database.sourceSchema
       ) {
         assertPointer(
           new StaticArtifactReleaseStore({ releaseRoot: STATIC_RELEASE_ROOT }),
           prepared.receipt.previous,
           "Recovered source",
         );
-        assertCanonicalDatabase(SOURCE_SCHEMA);
+        assertCanonicalDatabase(prepared.receipt.database.sourceSchema);
         return identity;
       }
     } catch (error) {
@@ -3023,13 +3282,14 @@ function startWithJournalAuthorization(journalDirectory: string): void {
 async function recoverSourceBeforeSchemaCommit(
   prepared: PreparedNoBackupPreview,
   originalFailure: unknown,
-  legacyBefore = prepared.receipt.chillspwnBefore,
+  observerBefore: NoBackupReleaseObserverProof =
+    receiptObserverProof(prepared.receipt, "before"),
 ): Promise<void> {
-  if (databaseSchema() !== SOURCE_SCHEMA) {
+  const sourceSchema = prepared.receipt.database.sourceSchema;
+  if (databaseSchema() !== sourceSchema) {
     throw new Error("Pre-schema recovery refused because the source schema is no longer exact");
   }
   const staticStore = new StaticArtifactReleaseStore({ releaseRoot: STATIC_RELEASE_ROOT });
-  assertPointer(staticStore, prepared.receipt.previous, "Pre-schema recovery");
   let journal = readFunctionalReleaseTransactionJournal(prepared.journalDirectory);
   if (!journal.records.some((record) => record.event === "recovery_started")) {
     journal = appendFunctionalReleaseTransactionRecord(prepared.journalDirectory, {
@@ -3058,13 +3318,55 @@ async function recoverSourceBeforeSchemaCommit(
     prepared.journalDirectory,
     "source_state_verification",
     () => {
+      const observedApplication = applicationTarget();
+      if (
+        observedApplication !== prepared.receipt.previous.applicationTarget &&
+        observedApplication !== prepared.receipt.target.applicationTarget
+      ) {
+        throw new Error(
+          "Source recovery found an application pointer outside the immutable source/target pair",
+        );
+      }
+      const observedStatic = staticStore.readActivePointer();
+      const staticIsSource =
+        observedStatic.activeReleaseId ===
+          prepared.receipt.previous.staticReleaseId &&
+        observedStatic.activeManifestSha256 ===
+          prepared.receipt.previous.staticManifestSha256;
+      const staticIsTarget =
+        observedStatic.activeReleaseId ===
+          prepared.receipt.target.staticReleaseId &&
+        observedStatic.activeManifestSha256 ===
+          prepared.receipt.target.staticManifestSha256;
+      if (!staticIsSource && !staticIsTarget) {
+        throw new Error(
+          "Source recovery found a static pointer outside the immutable source/target pair",
+        );
+      }
+      let mutated = false;
+      if (
+        observedApplication !== prepared.receipt.previous.applicationTarget
+      ) {
+        atomicApplicationActivation(
+          prepared.receipt.releaseId,
+          prepared.receipt.previous.applicationTarget,
+        );
+        mutated = true;
+      }
+      if (!staticIsSource) {
+        staticStore.activateRelease(
+          prepared.receipt.previous.staticReleaseId,
+        );
+        mutated = true;
+      }
       assertPointer(staticStore, prepared.receipt.previous, "Source recovery");
-      assertCanonicalDatabase(SOURCE_SCHEMA, { verifyIntegrity: true });
-      return "already_exact";
+      assertCanonicalDatabase(sourceSchema, { verifyIntegrity: true });
+      return mutated ? "mutated" : "already_exact";
     },
     {
-      sourceSchema: SOURCE_SCHEMA,
+      sourceSchema,
       sourcePointers: prepared.receipt.previous,
+      targetPointers: prepared.receipt.target,
       backupPolicy: "none",
     },
   );
@@ -3085,7 +3387,7 @@ async function recoverSourceBeforeSchemaCommit(
     },
     {
       mode: "journal_guarded",
-      sourceSchema: SOURCE_SCHEMA,
+      sourceSchema,
       backupPolicy: "none",
     },
   );
@@ -3110,7 +3412,7 @@ async function recoverSourceBeforeSchemaCommit(
       sourceStateSha256: releaseTransactionSha256(sourceState),
     },
   );
-  ensureNoBackupSourceReceiptRestoreCommit(prepared, legacyBefore);
+  ensureNoBackupSourceReceiptRestoreCommit(prepared, observerBefore);
   await ensureRecoveryMutation(
     prepared.journalDirectory,
     "runtime_activation",
@@ -3145,7 +3447,7 @@ async function recoverSourceBeforeSchemaCommit(
       const identity = await captureServiceIdentity(SERVICE, TI_SCALE_HEALTH);
       assertHealthyService(identity, "healthy", "Recovered Ti-Scale");
       assertPointer(staticStore, prepared.receipt.previous, "Recovered source");
-      assertCanonicalDatabase(SOURCE_SCHEMA);
+      assertCanonicalDatabase(sourceSchema);
       const activeApplicationTarget = applicationTarget();
       if (
         activeApplicationTarget !==
@@ -3227,7 +3529,7 @@ async function recoverSourceBeforeSchemaCommit(
   const restoredReceiptCommitment = completedNoBackupReceiptRestore(journal);
   if (!restoredReceiptCommitment) {
     throw new Error(
-      "Source recovery lost its durable restored-receipt or legacy proof",
+      "Source recovery lost its durable restored-receipt or observer proof",
     );
   }
   const sourceReceiptCommitmentBeforeFinalization =
@@ -3257,8 +3559,11 @@ async function recoverSourceBeforeSchemaCommit(
   }
   await commitNoBackupTerminalAfterCompatibilityProof({
     verifyCompatibility: () =>
-      captureAndAssertLegacyUnchanged(legacyBefore),
-    commitTerminal: (legacyProof) => {
+      captureAndAssertReleaseObserverUnchanged(
+        prepared.receipt,
+        observerBefore,
+      ),
+    commitTerminal: (observerProof) => {
       journal = readFunctionalReleaseTransactionJournal(prepared.journalDirectory);
       let receiptCommitment = completedNoBackupSourceReceiptCommit(journal);
       if (receiptCommitment) {
@@ -3270,10 +3575,10 @@ async function recoverSourceBeforeSchemaCommit(
             prepared,
             journal,
             "terminal_receipt_commit",
-            legacyProof,
+            observerProof,
           );
-      const receiptLegacyIdentitySha256 = receiptCommitment
-        ?.legacyIdentitySha256 ?? receiptIntent!.legacyIdentitySha256;
+      const receiptObserverProofSha256 = receiptCommitment
+        ?.observerProofSha256 ?? receiptIntent!.observerProofSha256;
       const intendedReceiptSha256 = receiptCommitment
         ?.receiptSha256 ?? receiptIntent!.receiptSha256;
       let receiptState = recoveryMutationState(
@@ -3289,7 +3594,10 @@ async function recoverSourceBeforeSchemaCommit(
             receiptPath: prepared.receiptPath,
             receipt: receiptIntent!.receipt,
             receiptSha256: intendedReceiptSha256,
-            legacyIdentitySha256: receiptLegacyIdentitySha256,
+            ...noBackupObserverProofDetail(
+              prepared.receipt,
+              receiptObserverProofSha256,
+            ),
             backupPolicy: "none",
           },
         );
@@ -3315,7 +3623,10 @@ async function recoverSourceBeforeSchemaCommit(
           {
             receiptPath: prepared.receiptPath,
             receiptSha256: intendedReceiptSha256,
-            legacyIdentitySha256: receiptLegacyIdentitySha256,
+            ...noBackupObserverProofDetail(
+              prepared.receipt,
+              receiptObserverProofSha256,
+            ),
             backupPolicy: "none",
           },
         );
@@ -3340,16 +3651,42 @@ async function recoverSourceBeforeSchemaCommit(
             outcome: "predeploy_restored",
             receiptPath: prepared.receiptPath,
             backupPolicy: "none",
-            legacyIdentitySha256:
-              receiptCommitment.legacyIdentitySha256,
-            receiptLegacyIdentitySha256:
-              receiptCommitment.legacyIdentitySha256,
-            reconciliationLegacyIdentitySha256:
-              releaseTransactionSha256(legacyProof),
+            deploymentMode:
+              isStandaloneNoBackupForwardReceipt(prepared.receipt)
+                ? NO_BACKUP_CURRENT_DEPLOYMENT_MODE
+                : "historical_preview",
+            ...(
+              isStandaloneNoBackupForwardReceipt(prepared.receipt)
+                ? {
+                  observerProofSha256:
+                    receiptCommitment.observerProofSha256,
+                  receiptObserverProofSha256:
+                    receiptCommitment.observerProofSha256,
+                  reconciliationObserverProofSha256:
+                    releaseTransactionSha256(observerProof),
+                }
+                : {
+                  legacyIdentitySha256:
+                    receiptCommitment.observerProofSha256,
+                  receiptLegacyIdentitySha256:
+                    receiptCommitment.observerProofSha256,
+                  reconciliationLegacyIdentitySha256:
+                    releaseTransactionSha256(observerProof),
+                }
+            ),
             restoredReceiptSha256:
               restoredReceiptCommitment.receiptSha256,
-            restoredLegacyIdentitySha256:
-              restoredReceiptCommitment.legacyIdentitySha256,
+            ...(
+              isStandaloneNoBackupForwardReceipt(prepared.receipt)
+                ? {
+                  restoredObserverProofSha256:
+                    restoredReceiptCommitment.observerProofSha256,
+                }
+                : {
+                  restoredLegacyIdentitySha256:
+                    restoredReceiptCommitment.observerProofSha256,
+                }
+            ),
             receiptSha256: receiptCommitment.receiptSha256,
           },
         });
@@ -3365,22 +3702,31 @@ async function executePreparedNoBackupPreview(
   prepared: PreparedNoBackupPreview,
   interruption?: CooperativeReleaseInterruption,
 ): Promise<void> {
+  const observerBefore = receiptObserverProof(
+    prepared.receipt,
+    "before",
+  );
   const checkpoint = async (): Promise<void> => {
     await Bun.sleep(0);
     interruption?.throwIfAborted();
   };
   await executeNoBackupForwardOnlyController({
     command: "deploy",
-    sourceSchema: SOURCE_SCHEMA,
-    targetSchema: TARGET_SCHEMA,
+    sourceSchema: prepared.receipt.database.sourceSchema,
+    targetSchema: prepared.receipt.database.targetSchema,
     forwardSchemas: attestedNoBackupForwardSchemas(
       prepared.receipt.database.migrationAttestation,
+      prepared.receipt.database.sourceSchema,
+      prepared.receipt.database.targetSchema,
     ),
     operations: {
       stop: async () => {
         await checkpoint();
         stopTiScaleAtJournalBoundary(prepared);
-        await captureAndAssertLegacyUnchanged(prepared.receipt.chillspwnBefore);
+        await captureAndAssertReleaseObserverUnchanged(
+          prepared.receipt,
+          observerBefore,
+        );
         await checkpoint();
       },
       withMaintenance: async (operation) =>
@@ -3402,11 +3748,17 @@ async function executePreparedNoBackupPreview(
       startAndFinalize: async (forceRecovery) => {
         await startAndFinalizeTarget(
           prepared,
-          prepared.receipt.chillspwnBefore,
+          observerBefore,
           forceRecovery,
         );
       },
       observedSchema: databaseSchema,
+      durableTargetCommitted: () =>
+        Boolean(functionalReleaseTargetCommitRecord(
+          readFunctionalReleaseTransactionJournal(
+            prepared.journalDirectory,
+          ),
+        )),
       restoreSourceBeforeSchemaCommit: (error) =>
         recoverSourceBeforeSchemaCommit(prepared, error),
       ensureTargetCommitted: () =>
@@ -3433,7 +3785,7 @@ function assertTerminalNoBackupReceipt(
   );
   if (!receipt.backupPayloadInventoryAfter) {
     throw new Error(
-      "Durable no-backup preview receipt lacks its terminal payload inventory",
+      "Durable no-backup release receipt lacks its terminal payload inventory",
     );
   }
   assertNoBackupPayloadInventoryEmpty(
@@ -3446,7 +3798,10 @@ function assertTerminalNoBackupReceipt(
   if (
     receipt.status !== allowedStatus ||
     receipt.backupPolicy !== "none" ||
-    receipt.cutoverEligible !== false ||
+    !(
+      isStandaloneNoBackupForwardReceipt(receipt) ||
+      isLegacyNoBackupPreviewReceipt(receipt)
+    ) ||
     receipt.rollbackCapability !== "none_after_schema_commit" ||
     receipt.backupPayloadInventoryUnchanged !== true ||
     (
@@ -3458,7 +3813,7 @@ function assertTerminalNoBackupReceipt(
       )
     )
   ) {
-    throw new Error("Durable no-backup preview receipt failed terminal verification");
+    throw new Error("Durable no-backup release receipt failed terminal verification");
   }
   return receipt;
 }
@@ -3474,32 +3829,45 @@ async function resumeNoBackupPreview(
     incomplete[0]?.operation !== "deploy"
   ) {
     throw new Error(
-      `Recovery requires the one exact incomplete no-backup preview journal for ${releaseId}`,
+      `Recovery requires the one exact incomplete no-backup release journal for ${releaseId}`,
     );
   }
   const prepared = await loadPreparedNoBackupPreview(releaseId);
   const observedRecoverySchema = databaseSchema();
+  const recoveryJournal = readFunctionalReleaseTransactionJournal(
+    prepared.journalDirectory,
+  );
   const recoveryDirection = noBackupRecoveryDirection(
-    SOURCE_SCHEMA,
-    TARGET_SCHEMA,
+    prepared.receipt.database.sourceSchema,
+    prepared.receipt.database.targetSchema,
     observedRecoverySchema,
     attestedNoBackupForwardSchemas(
       prepared.receipt.database.migrationAttestation,
+      prepared.receipt.database.sourceSchema,
+      prepared.receipt.database.targetSchema,
     ),
+    Boolean(functionalReleaseTargetCommitRecord(recoveryJournal)),
   );
   enforceNoBackupRecoveryInterruptionPolicy(
     recoveryDirection,
     interruption,
   );
   reconcileOrphanedNoBackupMaintenance(prepared);
-  const legacyRecoveryBaseline = await captureServiceIdentity(
-    LEGACY_SERVICE,
-    CHILLSPWN_HEALTH,
-  );
-  assertHealthyService(legacyRecoveryBaseline, "ok", "ChillsPwn on port 3131");
-  const recoveryJournal = readFunctionalReleaseTransactionJournal(
-    prepared.journalDirectory,
-  );
+  const recoveryObserverBaseline =
+    await resolveNoBackupReleaseObserverProof(
+      prepared.receipt,
+      () => captureServiceIdentity(
+        LEGACY_SERVICE,
+        CHILLSPWN_HEALTH,
+      ),
+    );
+  if (isLegacyNoBackupPreviewReceipt(prepared.receipt)) {
+    assertHealthyService(
+      recoveryObserverBaseline as ServiceIdentity,
+      "ok",
+      "Historical compatibility service",
+    );
+  }
   const targetReceiptCommitment =
     completedNoBackupReceiptCommit(recoveryJournal);
   const sourceReceiptCommitment =
@@ -3535,26 +3903,41 @@ async function resumeNoBackupPreview(
       );
     }
   } else {
-    prepared.receipt.chillspwnRecoveryBaseline = legacyRecoveryBaseline;
-    prepared.receipt.chillspwnIdentityChangedBeforeRecovery =
-      prepared.receipt.chillspwnBefore.mainPid !== legacyRecoveryBaseline.mainPid ||
-      prepared.receipt.chillspwnBefore.invocationId !== legacyRecoveryBaseline.invocationId ||
-      prepared.receipt.chillspwnBefore.activeState !== legacyRecoveryBaseline.activeState ||
-      prepared.receipt.chillspwnBefore.healthStatus !== legacyRecoveryBaseline.healthStatus ||
-      prepared.receipt.chillspwnBefore.semanticStatus !== legacyRecoveryBaseline.semanticStatus;
+    if (isLegacyNoBackupPreviewReceipt(prepared.receipt)) {
+      const historicalBefore = receiptObserverProof(
+        prepared.receipt,
+        "before",
+      ) as ServiceIdentity;
+      const historicalBaseline =
+        recoveryObserverBaseline as ServiceIdentity;
+      prepared.receipt.chillspwnRecoveryBaseline =
+        historicalBaseline;
+      prepared.receipt.chillspwnIdentityChangedBeforeRecovery =
+        historicalBefore.mainPid !== historicalBaseline.mainPid ||
+        historicalBefore.invocationId !==
+          historicalBaseline.invocationId ||
+        historicalBefore.activeState !==
+          historicalBaseline.activeState ||
+        historicalBefore.healthStatus !==
+          historicalBaseline.healthStatus ||
+        historicalBefore.semanticStatus !==
+          historicalBaseline.semanticStatus;
+    }
     prepared.receipt.recoveryHostBootId = currentHostBootId();
     writeReceipt(prepared.receiptPath, prepared.receipt);
   }
-  // Once any attested schema after 47 is observed, cancellation cannot restore
-  // schema 47. The controller therefore ignores cooperative cancellation,
-  // resumes the remaining migrations, and completes the immutable schema-60
+  // The unchanged schema cannot identify which same-schema release owns the
+  // pointers. Before the durable target commitment, cancellation may restore
+  // the source. After that commitment, recovery must complete the immutable
   // target before yielding.
   const result = await executeNoBackupForwardOnlyController({
     command: "recover",
-    sourceSchema: SOURCE_SCHEMA,
-    targetSchema: TARGET_SCHEMA,
+    sourceSchema: prepared.receipt.database.sourceSchema,
+    targetSchema: prepared.receipt.database.targetSchema,
     forwardSchemas: attestedNoBackupForwardSchemas(
       prepared.receipt.database.migrationAttestation,
+      prepared.receipt.database.sourceSchema,
+      prepared.receipt.database.targetSchema,
     ),
     recoveryInterruption: interruption,
     operations: {
@@ -3571,14 +3954,24 @@ async function resumeNoBackupPreview(
         throw new Error("Recovery cannot enter the deploy commitment phase");
       },
       startAndFinalize: async () => {
-        await startAndFinalizeTarget(prepared, legacyRecoveryBaseline, true);
+        await startAndFinalizeTarget(
+          prepared,
+          recoveryObserverBaseline,
+          true,
+        );
       },
       observedSchema: () => observedRecoverySchema,
+      durableTargetCommitted: () =>
+        Boolean(functionalReleaseTargetCommitRecord(
+          readFunctionalReleaseTransactionJournal(
+            prepared.journalDirectory,
+          ),
+        )),
       restoreSourceBeforeSchemaCommit: (cause) =>
         recoverSourceBeforeSchemaCommit(
           prepared,
           cause,
-          legacyRecoveryBaseline,
+          recoveryObserverBaseline,
         ),
       ensureTargetCommitted: async () => {
         if (
@@ -3619,15 +4012,6 @@ async function executeNoBackupPreviewReleaseUnderLock(
     return resumeNoBackupPreview(args.releaseId, interruption);
   }
   assertNoIncompleteTransaction();
-  const legacyBefore = await captureServiceIdentity(
-    LEGACY_SERVICE,
-    CHILLSPWN_HEALTH,
-  );
-  assertHealthyService(
-    legacyBefore,
-    "ok",
-    "ChillsPwn on port 3131",
-  );
   const tiScaleBefore = await captureServiceIdentity(
     SERVICE,
     TI_SCALE_HEALTH,
@@ -3660,7 +4044,6 @@ async function executeNoBackupPreviewReleaseUnderLock(
     }
     const prepared = await prepareNoBackupPreview(
       args.releaseId,
-      legacyBefore,
       tiScaleBefore,
       inventoryBefore,
       candidate,
@@ -3696,7 +4079,7 @@ async function runNoBackupPreviewOperation(
 ): Promise<NoBackupPreviewReceipt> {
   const args = parseNoBackupPreviewArguments(argv);
   if (process.getuid?.() !== 0) {
-    throw new Error("No-backup preview deployment requires root");
+    throw new Error("No-backup forward deployment requires root");
   }
   return withCooperativeReleaseSignals((interruption) =>
     withSharedReleaseLock(async () => {
@@ -3730,17 +4113,25 @@ export async function runNoBackupPreviewReleaseWithCandidate(
 
 export function noBackupPreviewUsage(): string {
   return [
-    "Ti-Scale metadata-journaled no-backup preview deployment",
+    "Ti-Scale metadata-journaled no-backup forward deployment",
     "",
     "Usage:",
-    "  bun run scripts/release/no-backup-preview-release.ts deploy --execute \\",
-    "    --release-id ID --confirm ID --acknowledge-no-backup-risk",
-    "  bun run scripts/release/no-backup-preview-release.ts recover --execute \\",
-    "    --release-id ID --confirm ID --acknowledge-no-backup-risk",
+    "  bun run release:no-backup:stage-deploy -- \\",
+    "    --source-root /absolute/clean/checkout \\",
+    "    --static-build-root /absolute/clean/checkout/dist \\",
+    "    --source-commit FULL_GIT_COMMIT \\",
+    "    --source-tree-sha256 SERVER_TREE_SHA256 \\",
+    "    --static-artifact-sha256 STATIC_TREE_SHA256 \\",
+    "    --release-id ID --confirm ID --execute \\",
+    "    --acknowledge-no-backup-risk",
+    "  bun run release:no-backup:recover -- \\",
+    "    --release-id ID --confirm ID --execute \\",
+    "    --acknowledge-no-backup-risk",
     "",
     "This path creates no database, source, Vault, static-pointer, archive, snapshot,",
-    "or restore-rehearsal copy. After schema 48 first commits, downgrade is impossible;",
-    "failure recovery resumes only forward through the verified schema-60 release.",
+    "or restore-rehearsal copy. It activates the confirmed build as the current",
+    "Ti-Scale service. After an attested schema or target commitment, recovery",
+    "resumes only forward through the exact verified release.",
     "",
   ].join("\n");
 }

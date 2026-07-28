@@ -11,7 +11,7 @@ Run a dry preview first:
 
 ```bash
 bun run db:migrate:historical -- \
-  --db /path/to/command-os-v2.sqlite \
+  --db /path/to/ti-scale.sqlite \
   --source /path/to/historical-engagements \
   --output /path/to/migration-metadata \
   --source-retention verified-reference \
@@ -33,7 +33,7 @@ Use exactly the same retention, projection, source-root, database, and output ar
 
 ```bash
 bun run db:migrate:historical -- \
-  --db /path/to/command-os-v2.sqlite \
+  --db /path/to/ti-scale.sqlite \
   --source /path/to/historical-engagements \
   --output /path/to/migration-metadata \
   --source-retention verified-reference \

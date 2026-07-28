@@ -90,21 +90,27 @@ export function ButtonLink({
   variant = "primary",
   children,
   className = "",
+  id,
   "aria-label": ariaLabel,
+  "data-testid": dataTestId,
   "data-control-id": dataControlId,
 }: {
   href: string;
   variant?: "primary" | "secondary" | "danger" | "quiet";
   children: ReactNode;
   className?: string;
+  id?: string;
   "aria-label"?: string;
+  "data-testid"?: string;
   "data-control-id"?: string;
 }) {
   return (
     <AppLink
       href={href}
       className={`os-button os-button--${variant} ${className}`}
+      id={id}
       aria-label={ariaLabel}
+      data-testid={dataTestId}
       data-control-id={dataControlId}
     >
       <span className="os-button__label">{children}</span>
@@ -142,11 +148,18 @@ export function LoadingPanel({ label = "Loading current system state" }: { label
   );
 }
 
-export function ErrorPanel({ title = "Live data is unavailable", error, onRetry, retryControlId }: {
+export function ErrorPanel({
+  title = "Live data is unavailable",
+  error,
+  onRetry,
+  retryControlId,
+  retryLabel = "Try again",
+}: {
   title?: string;
   error: Error;
   onRetry?: () => void;
   retryControlId?: string;
+  retryLabel?: string;
 }) {
   const details = error as Error & { humanMessage?: string; remediation?: string; traceId?: string };
   return (
@@ -157,7 +170,15 @@ export function ErrorPanel({ title = "Live data is unavailable", error, onRetry,
         <p>{details.humanMessage ?? error.message}</p>
         {details.remediation && <p className="os-state-remediation">{details.remediation}</p>}
         {details.traceId && <p className="os-mono">Trace {details.traceId}</p>}
-        {onRetry && <Button type="button" variant="secondary" data-control-id={retryControlId} onClick={onRetry}>Try again</Button>}
+        {onRetry && <Button
+          type="button"
+          variant="secondary"
+          id={retryControlId}
+          data-testid={retryControlId}
+          data-control-id={retryControlId}
+          aria-label={retryLabel}
+          onClick={onRetry}
+        >Try again</Button>}
       </div>
     </div>
   );

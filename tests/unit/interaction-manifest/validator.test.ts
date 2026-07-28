@@ -22,7 +22,7 @@ function filesUnder(root: string): string[] {
 describe("Ti-Scale interaction manifest", () => {
   test("is schema-valid and unique while reporting the current audited state", () => {
     expect(manifest.namespace).toBe(INTERACTION_MANIFEST_NAMESPACE);
-    expect(manifest.entries).toHaveLength(743);
+    expect(manifest.entries).toHaveLength(798);
     expect(new Set(manifest.entries.map((entry) => entry.id)).size).toBe(manifest.entries.length);
     expect(new Set(manifest.entries.map((entry) => entry.controlId)).size).toBe(manifest.entries.length);
     expect(manifest.scope).toContain("shell navigation");
@@ -333,6 +333,32 @@ describe("Ti-Scale interaction manifest", () => {
       ]);
   });
 
+  test("binds every Guided local ExploitDB control to the dedicated browser proof", () => {
+    const expectedIds = [
+      "guided-intake.outcome.local-exploit-none",
+      "guided-intake.outcome.local-exploit-cve",
+      "guided-intake.outcome.local-exploit-technology",
+      "guided-intake.outcome.local-exploit-cve-id",
+      "guided-intake.outcome.local-exploit-product",
+      "guided-intake.outcome.local-exploit-version",
+      "guided-intake.outcome.local-exploit-platform",
+      "guided-intake.outcome.local-exploit-maximum-results",
+    ] as const;
+    const entries = manifest.entries.filter((entry) =>
+      expectedIds.includes(entry.id as typeof expectedIds[number])
+    );
+    expect(entries.map((entry) => entry.id)).toEqual([...expectedIds]);
+    for (const entry of entries) {
+      expect(entry.route).toBe("/missions/new/guided");
+      expect(entry.requiredState.startsWith("Fixture required:")).toBe(true);
+      expect(entry.testIds).toEqual([
+        "e2e.mission-intake.guided-local-exploit-intelligence",
+      ]);
+      expect(entry.expectedApiOrEventSideEffect).not.toContain("provider call");
+      expect(entry.screenshotsRequired).toEqual([]);
+    }
+  });
+
   test("binds every Autonomous action-class selector to exactly one canonical registry ID", () => {
     const prefix = "autonomous-intake.contract.action-policy-state.";
     const entries = manifest.entries.filter((entry) => entry.id.startsWith(prefix));
@@ -392,7 +418,7 @@ describe("Ti-Scale interaction manifest", () => {
     expect(unresolved).toHaveLength(0);
     expect(unresolved.every((entry) => entry.testIds.length === 1)).toBe(true);
     const fixtureRequiredEntryCount = manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:")).length;
-    expect(fixtureRequiredEntryCount).toBe(521);
+    expect(fixtureRequiredEntryCount).toBe(576);
     expect(manifest.scope).toContain(`All ${fixtureRequiredEntryCount} fixture-required groups`);
     expect(manifest.knownGaps.some((gap) =>
       gap.includes(`All ${fixtureRequiredEntryCount} entries`)
@@ -673,7 +699,7 @@ describe("Ti-Scale interaction manifest", () => {
     expect(findingReviewSubmission?.testIds)
       .toEqual(["e2e.intelligence.findings-list-detail-controls"]);
     expect(new Set(entries.flatMap((entry) => entry.testIds))).toEqual(allowedTestIds);
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(521);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
   });
 
   test("inventories Second Brain home, inbox, graph, and graph-return families against only their dedicated fixture sources", () => {
@@ -702,6 +728,7 @@ describe("Ti-Scale interaction manifest", () => {
       "e2e.brain-inbox.empty-navigation-retry",
       "e2e.brain-inbox.pagination",
       "e2e.brain-inbox.attack-promotion",
+      "e2e.brain-inbox.attack-promotion-retries",
       "e2e.brain-graph.error-empty-retry",
       "e2e.brain-graph.global-empty-inbox",
       "e2e.brain-graph.global-reviewed-boundary",
@@ -714,11 +741,12 @@ describe("Ti-Scale interaction manifest", () => {
       "e2e.brain-graph.visual-canvas-table",
       "e2e.brain-graph.deep-links-history",
       "e2e.brain-graph.private-source-custody",
+      "e2e.brain-graph.inspector-context-retry",
     ]);
 
     expect(home).toHaveLength(14);
-    expect(inbox).toHaveLength(23);
-    expect(graph).toHaveLength(52);
+    expect(inbox).toHaveLength(27);
+    expect(graph).toHaveLength(54);
     expect(staticHome.map((entry) => entry.id)).toEqual(["brain.home.operator-preferences"]);
     expect(staticInbox.map((entry) => entry.id)).toEqual(["brain.inbox.operator-preferences"]);
     expect(staticGraph.map((entry) => entry.id)).toEqual([
@@ -728,7 +756,7 @@ describe("Ti-Scale interaction manifest", () => {
     expect([...staticHome, ...staticInbox, ...staticGraph]
       .every((entry) => entry.testIds.includes("e2e.manifest.coverage-audit"))).toBe(true);
     expect(graphReturn).toHaveLength(1);
-    expect(entries).toHaveLength(90);
+    expect(entries).toHaveLength(96);
     expect(new Set(home.map((entry) => entry.route))).toEqual(new Set(["/brain"]));
     expect(new Set(inbox.map((entry) => entry.route))).toEqual(new Set(["/brain/inbox"]));
     expect(new Set(graph.map((entry) => entry.route))).toEqual(new Set(["/brain/graph"]));
@@ -742,7 +770,7 @@ describe("Ti-Scale interaction manifest", () => {
     expect(graph.find((entry) => entry.id === "brain.graph.canvas")?.accessible.role).toBe("application");
     expect(home.find((entry) => entry.id === "brain.home.node-links")?.accessible.name)
       .toBe("^Open memory .+ \\([A-Za-z0-9._:-]+\\)$");
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(521);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
   });
 
   test("inventories the authenticated Operator Preferences route and its populated profile links", () => {
@@ -756,16 +784,19 @@ describe("Ti-Scale interaction manifest", () => {
       "brain.preferences.memory-record",
       "brain.preferences.show-in-graph",
       "brain.preferences.empty-inbox",
+      "brain.preferences.retry.read",
     ]);
     expect(entries.every((entry) => entry.route === "/brain/preferences")).toBe(true);
     expect(populated.map((entry) => entry.id)).toEqual([
       "brain.preferences.memory-record",
       "brain.preferences.show-in-graph",
+      "brain.preferences.retry.read",
     ]);
-    expect(populated.every((entry) => (
-      entry.testIds.length === 1
-      && entry.testIds[0] === "e2e.brain-preferences.confirmed-profile"
-    ))).toBe(true);
+    expect(populated.map((entry) => entry.testIds)).toEqual([
+      ["e2e.brain-preferences.confirmed-profile"],
+      ["e2e.brain-preferences.confirmed-profile"],
+      ["e2e.brain.read-retry-accessibility"],
+    ]);
     expect(staticEntries.map((entry) => entry.id)).toEqual([
       "brain.preferences.navigation",
       "brain.preferences.operator-graph",
@@ -782,7 +813,7 @@ describe("Ti-Scale interaction manifest", () => {
       { id: "brain.node.show-in-graph", testIds: ["e2e.brain-graph.deep-links-history"] },
       { id: "brain.node.provenance-load-more", testIds: ["e2e.brain-node.provenance-pagination"] },
       { id: "brain.node.private-source-load-more", testIds: ["e2e.brain-node.provenance-pagination"] },
-      { id: "brain.node.context-use", testIds: ["e2e.brain-node.lifecycle-controls"] },
+      { id: "brain.node.context-use", testIds: ["e2e.brain-node.lifecycle-controls", "e2e.brain-node.navigation-and-vault-controls"] },
       { id: "brain.node.private-source-mission", testIds: ["e2e.brain-node.private-source-custody"] },
       { id: "brain.node.private-source-run", testIds: ["e2e.brain-node.private-source-custody"] },
       { id: "brain.node.private-source-evidence", testIds: ["e2e.brain-node.private-source-custody"] },
@@ -810,7 +841,15 @@ describe("Ti-Scale interaction manifest", () => {
       { id: "brain.node.forget-reason", testIds: ["e2e.brain-node.conflict-forget"] },
       { id: "brain.node.forget-confirmation", testIds: ["e2e.brain-node.conflict-forget"] },
       { id: "brain.node.forget", testIds: ["e2e.brain-node.conflict-forget"] },
-      { id: "brain.node.operator-preferences", testIds: ["e2e.brain-preferences.confirmed-profile"] },
+      { id: "brain.node.navigation", testIds: ["e2e.brain-node.navigation-and-vault-controls"] },
+      { id: "brain.node.retry.record", testIds: ["e2e.brain-node.read-recovery"] },
+      { id: "brain.node.retry.vault", testIds: ["e2e.brain-node.read-recovery"] },
+      { id: "brain.node.retry.context-pack", testIds: ["e2e.brain-node.read-recovery"] },
+      { id: "brain.node.retry.mutation-reconcile", testIds: ["e2e.brain-node.conflict-forget"] },
+      { id: "brain.node.open-vault-controls", testIds: ["e2e.brain-node.navigation-and-vault-controls"] },
+      { id: "brain.node.context.path-link", testIds: ["e2e.brain-node.navigation-and-vault-controls"] },
+      { id: "brain.node.context.node-link", testIds: ["e2e.brain-node.navigation-and-vault-controls"] },
+      { id: "brain.node.relationship-link", testIds: ["e2e.brain-node.navigation-and-vault-controls"] },
     ] as const;
     const allowedTestIds = new Set([
       "e2e.brain-graph.deep-links-history",
@@ -820,10 +859,11 @@ describe("Ti-Scale interaction manifest", () => {
       "e2e.brain-node.vault-export-deep-link",
       "e2e.brain-node.operational-hazard",
       "e2e.brain-node.private-source-custody",
-      "e2e.brain-preferences.confirmed-profile",
+      "e2e.brain-node.read-recovery",
+      "e2e.brain-node.navigation-and-vault-controls",
     ]);
 
-    expect(entries).toHaveLength(32);
+    expect(entries).toHaveLength(40);
     expect(staticEntries).toEqual([]);
     expect(entries.map((entry) => entry.id)).toEqual(expected.map((entry) => entry.id));
     for (const expectedEntry of expected) {
@@ -855,6 +895,7 @@ describe("Ti-Scale interaction manifest", () => {
     const controls = "e2e.brain-control.all-controls-save-reload";
     const conflict = "e2e.brain-control.version-conflict-retry";
     const invariants = "e2e.brain-control.locked-invariants";
+    const readRetries = "e2e.brain.read-retry-accessibility";
     const expected = [
       { id: "brain.control.navigation", role: "link", name: "^(?:Home|Graph|Memory Inbox|Controls|Obsidian Vault)$", options: ["Home", "Graph", "Memory Inbox", "Controls", "Obsidian Vault"], testIds: [controls] },
       { id: "brain.control.export-sync", role: "link", name: "Export or sync", options: ["Open Obsidian Vault export and synchronization"], testIds: [controls] },
@@ -869,10 +910,11 @@ describe("Ti-Scale interaction manifest", () => {
       { id: "brain.control.invariant.secrets", role: "checkbox", name: "Never retain credentials, tokens, private keys, or authentication material", options: ["Always enabled"], testIds: [controls, invariants] },
       { id: "brain.control.save", role: "button", name: "Save memory controls", options: ["Save represented changes", "Save unchanged canonical policy to sanitize unknown stored fields"], testIds: [controls, conflict, invariants] },
       { id: "brain.control.conflict-retry", role: "button", name: "Try again", options: ["Refresh canonical version and retry the unchanged represented draft once"], testIds: [conflict] },
+      { id: "brain.control.retry.read", role: "button", name: "Retry memory controls", options: ["Retry only the canonical memory controls"], testIds: [readRetries] },
     ] as const;
-    const allowedTestIds = new Set([controls, conflict, invariants]);
+    const allowedTestIds = new Set([controls, conflict, invariants, readRetries]);
 
-    expect(entries).toHaveLength(13);
+    expect(entries).toHaveLength(14);
     expect(staticEntries.map((entry) => entry.id)).toEqual(["brain.control.operator-preferences"]);
     expect(staticEntries[0]?.testIds).toEqual(["e2e.manifest.coverage-audit"]);
     expect(entries.map((entry) => entry.id)).toEqual(expected.map((entry) => entry.id));
@@ -890,7 +932,7 @@ describe("Ti-Scale interaction manifest", () => {
       expect(entry.testIds.every((testId) => allowedTestIds.has(testId)), entry.id).toBe(true);
     }
     expect(new Set(entries.flatMap((entry) => entry.testIds))).toEqual(allowedTestIds);
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(521);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
   });
 
   test("inventories the mounted Vault lifecycle against dedicated isolated fixture sources", () => {
@@ -911,6 +953,8 @@ describe("Ti-Scale interaction manifest", () => {
     const conflicts = "e2e.brain-vault.conflict-resolution";
     const degradedRecovery = "e2e.brain-vault.degraded-recovery";
     const recovery = "e2e.brain-vault.repair-reindex-recovery";
+    const readRetries = "e2e.brain.read-retry-accessibility";
+    const operationRetries = "e2e.brain-vault.operation-retries";
     const expected = [
       { id: "brain.vault.display-name", role: "textbox", name: "Display name", options: ["Disposable fixture display name"], testIds: [roundTrip] },
       { id: "brain.vault.relative-path", role: "textbox", name: "Path inside the allowed root", options: ["Valid relative path", "Traversal path rejected", "Corrected valid relative path"], testIds: [roundTrip, pathRetry] },
@@ -929,6 +973,15 @@ describe("Ti-Scale interaction manifest", () => {
       { id: "brain.vault.open-native", role: "link", name: "^(?:Open vault in Obsidian|Open .+ in Obsidian)$", options: ["Open Vault root", "Open represented projected note"], testIds: [projectionLifecycle] },
       { id: "brain.vault.conflict-keep-database", role: "button", name: "Keep database version", options: ["Select the represented canonical database version"], testIds: [conflicts] },
       { id: "brain.vault.conflict-keep-vault", role: "button", name: "Keep vault version", options: ["Select the represented operator Vault version"], testIds: [conflicts] },
+      { id: "brain.vault.retry.snapshot", role: "button", name: "Retry Vault snapshot", options: ["Retry only the canonical Vault snapshot"], testIds: [readRetries] },
+      { id: "brain.vault.retry.preset-preview", role: "button", name: "Retry Attack Knowledge Vault preview", options: ["Retry only the registry-owned preset preview"], testIds: [readRetries] },
+      { id: "brain.vault.preset-health-retry", role: "button", name: "Retry preset path health check", options: ["Retry preset path health check"], testIds: [operationRetries] },
+      { id: "brain.vault.custom-health-retry", role: "button", name: "Retry custom Vault path health check", options: ["Retry custom Vault path health check"], testIds: [operationRetries] },
+      { id: "brain.vault.connect-retry", role: "button", name: "Retry Vault connection", options: ["Retry Vault connection"], testIds: [operationRetries] },
+      { id: "brain.vault.retry.repair", role: "button", name: "Retry Vault repair", options: ["Retry the same version-pinned repair after the path is restored"], testIds: [recovery] },
+      { id: "brain.vault.reindex-retry", role: "button", name: "Retry Vault reindex", options: ["Retry Vault reindex"], testIds: [operationRetries] },
+      { id: "brain.vault.reconcile-retry", role: "button", name: "Retry Vault status refresh", options: ["Retry Vault status refresh"], testIds: [operationRetries] },
+      { id: "brain.vault.recovery-details", role: "native-summary", name: "Recovery details", options: ["Open issue details", "Close issue details"], testIds: [recovery] },
     ] as const;
     const expectedPreset = [
       { id: "brain.vault.attack-preset-categories", role: "native-summary", name: "Review projected categories and folders" },
@@ -951,9 +1004,19 @@ describe("Ti-Scale interaction manifest", () => {
       { id: "brain.vault.disconnect-cancel", role: "button", name: "Cancel" },
       { id: "brain.vault.disconnect-confirm", role: "button", name: "Disconnect Vault projection" },
     ] as const;
-    const allowedTestIds = new Set([roundTrip, pathRetry, projectionLifecycle, conflicts, degradedRecovery, recovery, disconnectTestId]);
+    const allowedTestIds = new Set([
+      roundTrip,
+      pathRetry,
+      projectionLifecycle,
+      conflicts,
+      degradedRecovery,
+      recovery,
+      disconnectTestId,
+      readRetries,
+      operationRetries,
+    ]);
 
-    expect(entries).toHaveLength(17);
+    expect(entries).toHaveLength(26);
     expect(presetEntries.map((entry) => entry.id)).toEqual(expectedPreset.map((entry) => entry.id));
     for (const expectedEntry of expectedPreset) {
       const entry = presetEntries.find((candidate) => candidate.id === expectedEntry.id);
@@ -1018,12 +1081,12 @@ describe("Ti-Scale interaction manifest", () => {
     ]);
     expect(new Set(visualEntries.flatMap((entry) => entry.screenshotsRequired)).size).toBe(6);
     const unmappedVisualEntryCount = manifest.entries.filter((entry) => entry.screenshotsRequired.length === 0).length;
-    expect(unmappedVisualEntryCount).toBe(689);
+    expect(unmappedVisualEntryCount).toBe(744);
     expect(manifest.knownGaps.some((gap) =>
       gap.includes("Nineteen deterministic Chromium 1440")
       && gap.includes(`remaining ${unmappedVisualEntryCount} entries`)
     )).toBe(true);
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(521);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
   });
 
   test("inventories System controls against only existing dedicated System fixture sources", () => {
@@ -1099,7 +1162,7 @@ describe("Ti-Scale interaction manifest", () => {
     ]);
     expect(manifest.knownGaps.some((gap) => gap.includes("health-error retry"))).toBe(false);
     expect(manifest.knownGaps.some((gap) => gap.includes("non-MCP query-retry states"))).toBe(false);
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(521);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
     expect(manifest.knownGaps.some((gap) => gap.includes("System health-metric activation"))).toBe(false);
   });
 
@@ -1196,7 +1259,7 @@ describe("Ti-Scale interaction manifest", () => {
     expect(new Set(entries.flatMap((entry) => entry.testIds))).toEqual(allowedTestIds);
     expect(new Set(entries.filter((entry) => entry.id.startsWith("overview.")).map((entry) => entry.route))).toEqual(new Set(["/"]));
     expect(new Set(entries.filter((entry) => entry.id.startsWith("mission-portfolio.")).map((entry) => entry.route))).toEqual(new Set(["/missions"]));
-    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(521);
+    expect(manifest.entries.filter((entry) => entry.requiredState.startsWith("Fixture required:"))).toHaveLength(576);
   });
 
   test("assigns every dynamic journey, agent, trace, and report family to a dedicated canonical browser path", () => {

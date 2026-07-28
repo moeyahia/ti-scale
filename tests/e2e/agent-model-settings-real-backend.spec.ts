@@ -18,6 +18,7 @@ const TEST_ID =
 const EXPECTED_PRODUCT_AGENT_IDS = [
   "ADAttackMapper",
   "CloudSentinel",
+  "Commander",
   "CredSmith",
   "FuzzSmith",
   "OSINTSeeker",

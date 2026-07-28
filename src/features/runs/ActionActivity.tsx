@@ -16,9 +16,16 @@ function elapsedSeconds(action: ActionRecord): number | null {
 type ActionActivityProps = ({ missionId: string; runId?: never } | { missionId?: never; runId: string }) & {
   title?: string;
   limit?: number;
+  controlId?: string;
 };
 
-export function ActionActivity({ missionId, runId, title = "Semantic action activity", limit = 50 }: ActionActivityProps) {
+export function ActionActivity({
+  missionId,
+  runId,
+  title = "Semantic action activity",
+  limit = 50,
+  controlId,
+}: ActionActivityProps) {
   const scope = runId ? { runId, limit } : { missionId, limit };
   const key = runId ?? missionId ?? "unscoped";
   const actions = useQuery(`actions:${key}:${limit}`, (signal) => operationsApi.actions(scope, signal), { staleTime: 0 });
@@ -54,7 +61,7 @@ export function ActionActivity({ missionId, runId, title = "Semantic action acti
           {(artifactCounts.get(action.id) ?? 0) > 0 && <ButtonLink href={`/intelligence/artifacts?runId=${encodeURIComponent(action.runId)}`} variant="quiet">View artifacts</ButtonLink>}
         </div>
         {action.contextPackId ? <ContextUsedDisclosure packId={action.contextPackId} /> : <p className="os-muted">No persisted memory context pack influenced this action.</p>}
-        <JsonDetails label="Technical action detail and original wording" value={{
+        <JsonDetails controlId={controlId ?? (runId ? "live-technical-action-detail" : "mission-technical-action-detail")} label="Technical action detail and original wording" value={{
           actionId: action.id, actionType: action.actionType, stepId: action.step?.id ?? null,
           rawIntentSummary: action.intentSummary, rawResultSummary: action.resultSummary,
           guidedDecisionId: action.guidedDecisionId, contractId: action.contractId,

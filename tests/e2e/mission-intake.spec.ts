@@ -30,6 +30,9 @@ import { assertAutonomousIntakeGuard } from "./support/autonomousIntake";
 const TEST_ID = "e2e.mission-intake";
 const TEST_AUTONOMOUS_MINIMAL = "e2e.mission-intake.autonomous-minimal";
 const TEST_GUIDED_MINIMAL = "e2e.mission-intake.guided-minimal";
+const TEST_GUIDED_WINDOWS_IDENTITY = "e2e.mission-intake.guided-windows-identity";
+const TEST_GUIDED_LOCAL_EXPLOIT_INTELLIGENCE =
+  "e2e.mission-intake.guided-local-exploit-intelligence";
 const INTERACTION_ACTIVATION_SENTINEL = "__control_activation__" as const;
 const VISUAL_PROJECT = "chromium-1440";
 const AUTONOMOUS_MINIMAL_VISUAL = {
@@ -1551,5 +1554,522 @@ test.describe(`${TEST_ID} registry-driven journey-specific intake`, () => {
     await expect(page.getByRole("region", { name: "Selected run status" })).toContainText("planning");
     await expect(page.getByRole("alert")).toHaveCount(0);
     await audit.assertClean(testInfo);
+  });
+
+  test(`${TEST_GUIDED_WINDOWS_IDENTITY} enforces ready, exclusive, exact-step Windows identity intake`, async ({
+    page,
+    browserAudit,
+    interactionActivation,
+  }, testInfo) => {
+    test.setTimeout(240_000);
+    const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
+    const backend = await startReadyAutonomousIntakeBackend(
+      testInfo.testId,
+      { profile: "guided_windows_identity" },
+    );
+    const receiptContext: IntakeReceiptContext = {
+      recorder: interactionActivation,
+      testId: TEST_GUIDED_WINDOWS_IDENTITY,
+    };
+    const target = "10.10.10.44";
+    const credentialReference = "systemd/windows/lab-reader";
+    const selectRadio = async (
+      manifestEntryId: string,
+      option: string,
+      radio: Locator,
+      modality: "pointer" | "keyboard",
+    ) => activateIf(
+      receiptContext,
+      manifestEntryId,
+      option,
+      modality,
+      async () => {
+        if (modality === "pointer") {
+          await radio.click();
+        } else {
+          await radio.focus();
+          await radio.press("Space");
+        }
+        await expect(radio).toBeChecked();
+      },
+    );
+
+    try {
+      await proxyV2ApiTo(page, backend.baseUrl);
+      for (const modality of ["pointer", "keyboard"] as const) {
+        await exerciseMinimalScope(page, "guided", target);
+        await clickContinue(page, "Outcome and collaboration");
+
+        const outcome = group(page, "Outcome and collaboration");
+        const manual = outcome.getByRole("radio", {
+          name: /^I run commands manually/u,
+        });
+        const singleStep = outcome.getByRole("radio", {
+          name: /^Allow one represented agent step/u,
+        });
+        const recommendedRecon = outcome.getByRole("radio", {
+          name: /^Use recommended target-based behavior/u,
+        });
+        const tcpRecon = outcome.getByRole("radio", {
+          name: /^Scan selected TCP services/u,
+        });
+        const noIdentity = outcome.getByRole("radio", {
+          name: /^No Windows or identity override/u,
+        });
+        const smbShares = outcome.getByRole("radio", {
+          name: /^List the SMB shares the approved host exposes/u,
+        });
+        const smbSummary = outcome.getByRole("radio", {
+          name: /^Read the approved host’s SMB identity summary/u,
+        });
+        const ldapRoot = outcome.getByRole("radio", {
+          name: /^Read the LDAP directory’s public root metadata/u,
+        });
+        const rpcDomain = outcome.getByRole("radio", {
+          name: /^Read the approved host’s RPC domain summary/u,
+        });
+
+        await expect(manual).toBeChecked();
+        await expect(noIdentity).toBeChecked();
+        await expect(smbShares).toBeEnabled();
+        await expect(smbSummary).toBeEnabled();
+        await expect(ldapRoot).toBeEnabled();
+        if (modality === "pointer") {
+          const rpcEntry = manifest.entries.find(
+            ({ id }) => id === "guided-intake.outcome.identity-rpc-domain-info",
+          );
+          if (!rpcEntry) throw new Error("RPC identity guard is missing from the interaction manifest");
+          await interactionActivation.assertGuard({
+            manifestEntryId: rpcEntry.id,
+            controlId: rpcEntry.controlId,
+            option: "Unavailable operation remains disabled",
+            materialState: rpcEntry.requiredState,
+            testId: TEST_GUIDED_WINDOWS_IDENTITY,
+          }, async () => {
+            await expect(rpcDomain).toBeDisabled();
+            await expect(rpcDomain).not.toBeChecked();
+          });
+        }
+
+        await tcpRecon.check();
+        await expect(tcpRecon).toBeChecked();
+        await selectRadio(
+          "guided-intake.outcome.identity-smb-share-list",
+          "Select bounded SMB share listing",
+          smbShares,
+          modality,
+        );
+        await expect(tcpRecon).not.toBeChecked();
+        await expect(recommendedRecon).not.toBeChecked();
+        await expect(singleStep).toBeChecked();
+        await expect(manual).toBeDisabled();
+
+        await selectRadio(
+          "guided-intake.outcome.identity-smb-summary",
+          "Select credentialed SMB identity summary",
+          smbSummary,
+          modality,
+        );
+        await expect(outcome.getByRole("textbox", {
+          name: /^Credential bundle reference/u,
+        })).toBeVisible();
+        await selectRadio(
+          "guided-intake.outcome.identity-ldap-root-dse",
+          "Select anonymous LDAP root metadata",
+          ldapRoot,
+          modality,
+        );
+        await expect(outcome.getByRole("textbox", {
+          name: /^Credential bundle reference/u,
+        })).toHaveCount(0);
+
+        await selectRadio(
+          "guided-intake.outcome.identity-none",
+          "Remove Windows or identity override",
+          noIdentity,
+          modality,
+        );
+        await expect(manual).toBeEnabled();
+        await selectRadio(
+          "guided-intake.outcome.identity-smb-share-list",
+          "Select bounded SMB share listing",
+          smbShares,
+          modality,
+        );
+
+        const authentication = titaniumSelect(
+          outcome,
+          /^Authentication mode/u,
+        );
+        expect((await titaniumOptions(authentication)).map(({ value }) => value))
+          .toEqual(["anonymous", "credential_reference"]);
+        await activateIf(
+          receiptContext,
+          "guided-intake.outcome.identity-authentication-mode",
+          "Private credential reference",
+          modality,
+          () => chooseTitaniumOption(authentication, "credential_reference", modality),
+        );
+        await activateIf(
+          receiptContext,
+          "guided-intake.outcome.identity-authentication-mode",
+          "Anonymous metadata read",
+          modality,
+          () => chooseTitaniumOption(authentication, "anonymous", modality),
+        );
+        await activateIf(
+          receiptContext,
+          "guided-intake.outcome.identity-authentication-mode",
+          "Private credential reference",
+          modality,
+          () => chooseTitaniumOption(authentication, "credential_reference", modality),
+        );
+        const credential = outcome.getByRole("textbox", {
+          name: /^Credential bundle reference/u,
+        });
+        await activateIf(
+          receiptContext,
+          "guided-intake.outcome.identity-credential-reference",
+          "Enter opaque systemd credential bundle reference",
+          modality,
+          async () => {
+            if (modality === "pointer") {
+              await credential.click();
+              await credential.fill(credentialReference);
+            } else {
+              await credential.focus();
+              await credential.pressSequentially(credentialReference);
+            }
+            await expect(credential).toHaveValue(credentialReference);
+          },
+        );
+
+        const identityResolve = await clickContinue(
+          page,
+          "Guided proposal boundaries",
+        );
+        const identityRequest = identityResolve.request().postDataJSON() as Record<string, unknown>;
+        expect(identityRequest).toMatchObject({
+          journey: "guided",
+          executionPreference: "single_step_agent",
+          guidedWindowsIdentity: {
+            operation: "smb_share_list",
+            authenticationMode: "credential_reference",
+            credentialReference: {
+              kind: "systemd_credential_bundle",
+              id: credentialReference,
+            },
+          },
+        });
+        expect(identityRequest).not.toHaveProperty("guidedReconnaissance");
+        const identityResolved = await identityResolve.json() as ResolvedMissionIntake;
+        expect(identityResolved.request).toMatchObject({
+          journey: "guided",
+          guidedWindowsIdentity: {
+            operation: "smb_share_list",
+            authenticationMode: "credential_reference",
+            credentialReference: {
+              kind: "systemd_credential_bundle",
+              id: credentialReference,
+            },
+          },
+        });
+
+        await page.getByRole("button", { name: "Back", exact: true }).click();
+        await expect(outcome).toBeVisible();
+        await tcpRecon.check();
+        await expect(noIdentity).toBeChecked();
+        await expect(smbShares).not.toBeChecked();
+        await expect(manual).toBeEnabled();
+        await manual.check();
+        const reconResolve = await clickContinue(
+          page,
+          "Guided proposal boundaries",
+        );
+        const reconRequest = reconResolve.request().postDataJSON() as Record<string, unknown>;
+        expect(reconRequest).toMatchObject({
+          journey: "guided",
+          executionPreference: "manual",
+          guidedReconnaissance: {
+            mode: "tcp_service_scan",
+          },
+        });
+        expect(reconRequest).not.toHaveProperty("guidedWindowsIdentity");
+      }
+      await audit.assertClean(testInfo);
+    } finally {
+      if (!page.isClosed()) {
+        await browserAudit.closePageBeforeDependencyShutdown(page);
+      }
+      await backend.stop();
+    }
+  });
+
+  test(`${TEST_GUIDED_LOCAL_EXPLOIT_INTELLIGENCE} submits one local-only CVE or technology lookup by pointer and keyboard`, async ({
+    page,
+    browserAudit,
+    interactionActivation,
+  }, testInfo) => {
+    test.setTimeout(240_000);
+    const audit = new BrowserAudit(page, {
+      allowEventStreamNavigationAbort: true,
+    });
+    const backend = await startReadyAutonomousIntakeBackend(
+      testInfo.testId,
+      { profile: "guided_local_exploit_intelligence" },
+    );
+    const receiptContext: IntakeReceiptContext = {
+      recorder: interactionActivation,
+      testId: TEST_GUIDED_LOCAL_EXPLOIT_INTELLIGENCE,
+    };
+    const target = "web01.lab.test";
+
+    const selectRadio = async (
+      manifestEntryId: string,
+      option: string,
+      radio: Locator,
+      modality: "pointer" | "keyboard",
+    ) => activateIf(
+      receiptContext,
+      manifestEntryId,
+      option,
+      modality,
+      async () => {
+        if (modality === "pointer") {
+          await radio.click();
+        } else {
+          await radio.focus();
+          await radio.press("Space");
+        }
+        await expect(radio).toBeChecked();
+      },
+    );
+
+    const replaceInput = async (
+      manifestEntryId: string,
+      option: string,
+      input: Locator,
+      value: string,
+      modality: "pointer" | "keyboard",
+    ) => activateIf(
+      receiptContext,
+      manifestEntryId,
+      option,
+      modality,
+      async () => {
+        if (modality === "pointer") {
+          await input.click();
+          await input.fill(value);
+        } else {
+          await input.focus();
+          await input.press("ControlOrMeta+A");
+          await input.pressSequentially(value);
+        }
+        await expect(input).toHaveValue(value);
+      },
+    );
+
+    try {
+      await proxyV2ApiTo(page, backend.baseUrl);
+      for (const modality of ["pointer", "keyboard"] as const) {
+        await exerciseMinimalScope(page, "guided", target);
+        await clickContinue(page, "Outcome and collaboration");
+
+        const outcome = group(page, "Outcome and collaboration");
+        const manual = outcome.getByRole("radio", {
+          name: /^I run commands manually/u,
+        });
+        const singleStep = outcome.getByRole("radio", {
+          name: /^Allow one represented agent step/u,
+        });
+        const tcpRecon = outcome.getByRole("radio", {
+          name: /^Scan selected TCP services/u,
+        });
+        const smbShares = outcome.getByRole("radio", {
+          name: /^List the SMB shares the approved host exposes/u,
+        });
+        const noLocalLookup = outcome.getByRole("radio", {
+          name: /^No local ExploitDB override/u,
+        });
+        const cveLookup = outcome.getByRole("radio", {
+          name: /^Look up a CVE in the local catalog/u,
+        });
+        const technologyLookup = outcome.getByRole("radio", {
+          name: /^Look up a product and version locally/u,
+        });
+
+        await expect(noLocalLookup).toBeChecked();
+        await expect(cveLookup).toBeEnabled();
+        await expect(technologyLookup).toBeEnabled();
+        await tcpRecon.check();
+        await smbShares.check();
+        await expect(tcpRecon).not.toBeChecked();
+        await selectRadio(
+          "guided-intake.outcome.local-exploit-cve",
+          "Select local CVE lookup",
+          cveLookup,
+          modality,
+        );
+        await expect(smbShares).not.toBeChecked();
+        await expect(tcpRecon).not.toBeChecked();
+        await expect(singleStep).toBeChecked();
+        await expect(manual).toBeDisabled();
+
+        const cveId = outcome.getByRole("textbox", {
+          name: /^CVE ID/u,
+        });
+        const maximumMatches = outcome.getByRole("spinbutton", {
+          name: /^Maximum catalog matches/u,
+        });
+        await replaceInput(
+          "guided-intake.outcome.local-exploit-cve-id",
+          "Enter canonical CVE identifier",
+          cveId,
+          "cve-2021-44228",
+          modality,
+        );
+        await replaceInput(
+          "guided-intake.outcome.local-exploit-maximum-results",
+          "Set bounded result limit",
+          maximumMatches,
+          "12",
+          modality,
+        );
+
+        const cveResolve = await clickContinue(
+          page,
+          "Guided proposal boundaries",
+        );
+        expect(cveResolve.request().postDataJSON()).toMatchObject({
+          journey: "guided",
+          executionPreference: "single_step_agent",
+          guidedLocalExploitIntelligence: {
+            query: {
+              kind: "cve",
+              cveId: "CVE-2021-44228",
+              maximumResults: 12,
+            },
+          },
+        });
+        const cveRequest =
+          cveResolve.request().postDataJSON() as Record<string, unknown>;
+        expect(cveRequest).not.toHaveProperty("guidedReconnaissance");
+        expect(cveRequest).not.toHaveProperty("guidedWindowsIdentity");
+
+        await page.getByRole("button", {
+          name: "Back",
+          exact: true,
+        }).click();
+        await expect(outcome).toBeVisible();
+        await selectRadio(
+          "guided-intake.outcome.local-exploit-none",
+          "Remove local ExploitDB override",
+          noLocalLookup,
+          modality,
+        );
+        await smbShares.check();
+        await expect(noLocalLookup).toBeChecked();
+        await expect(cveLookup).not.toBeChecked();
+        await tcpRecon.check();
+        await expect(noLocalLookup).toBeChecked();
+        await expect(cveLookup).not.toBeChecked();
+        await expect(smbShares).not.toBeChecked();
+        await expect(manual).toBeEnabled();
+
+        await selectRadio(
+          "guided-intake.outcome.local-exploit-technology",
+          "Select local technology lookup",
+          technologyLookup,
+          modality,
+        );
+        await expect(tcpRecon).not.toBeChecked();
+        await expect(singleStep).toBeChecked();
+        const product = outcome.getByRole("textbox", {
+          name: /^Product/u,
+        });
+        const version = outcome.getByRole("textbox", {
+          name: /^Version/u,
+        });
+        const platform = outcome.getByRole("textbox", {
+          name: /^Platform/u,
+        });
+        await replaceInput(
+          "guided-intake.outcome.local-exploit-product",
+          "Enter observed product",
+          product,
+          "Apache HTTP Server",
+          modality,
+        );
+        await replaceInput(
+          "guided-intake.outcome.local-exploit-version",
+          "Enter optional observed version",
+          version,
+          "2.4.49",
+          modality,
+        );
+        await replaceInput(
+          "guided-intake.outcome.local-exploit-platform",
+          "Enter optional observed platform",
+          platform,
+          "linux",
+          modality,
+        );
+        if (modality === "pointer") {
+          await maximumMatches.click();
+          await maximumMatches.fill("7");
+        } else {
+          await maximumMatches.focus();
+          await maximumMatches.press("ControlOrMeta+A");
+          await maximumMatches.pressSequentially("7");
+        }
+        await expect(maximumMatches).toHaveValue("7");
+
+        const technologyResolve = await clickContinue(
+          page,
+          "Guided proposal boundaries",
+        );
+        expect(technologyResolve.request().postDataJSON()).toMatchObject({
+          journey: "guided",
+          executionPreference: "single_step_agent",
+          guidedLocalExploitIntelligence: {
+            query: {
+              kind: "technology",
+              product: "Apache HTTP Server",
+              version: "2.4.49",
+              platform: "linux",
+              maximumResults: 7,
+            },
+          },
+        });
+        const technologyRequest =
+          technologyResolve.request().postDataJSON() as Record<string, unknown>;
+        expect(technologyRequest).not.toHaveProperty("guidedReconnaissance");
+        expect(technologyRequest).not.toHaveProperty(
+          "guidedWindowsIdentity",
+        );
+
+        await clickContinue(page, "Review the resolved mission");
+        const review = group(page, "Review the resolved mission");
+        await expect(review).toContainText(
+          "Look up a product and version locally",
+        );
+        await expect(review).toContainText(
+          "Apache HTTP Server · 2.4.49 · linux",
+        );
+        await expect(review).toContainText("kali:searchsploit-local");
+        await expect(review).toContainText(
+          "contacts neither the approved target nor a public provider",
+        );
+        await expect(review).toContainText(
+          "parsed matches remain unverified observations",
+        );
+      }
+      await audit.assertClean(testInfo);
+    } finally {
+      if (!page.isClosed()) {
+        await browserAudit.closePageBeforeDependencyShutdown(page);
+      }
+      await backend.stop();
+    }
   });
 });

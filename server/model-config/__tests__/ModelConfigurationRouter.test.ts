@@ -860,7 +860,7 @@ describe("model configuration control plane", () => {
     });
   });
 
-  test("pins launch-time specialist models transactionally and never rewrites an existing run", () => {
+  test("pins launch-time mission/run overrides and reads back immutable provider, model, fallback, reasoning, enforcement, and disclosure", async () => {
     const db = database();
     const modelConfigurations = new ModelConfigurationService(
       new ModelConfigurationRepository(db, () => new Date(NOW)),
@@ -962,6 +962,44 @@ describe("model configuration control plane", () => {
       primary_configuration_id: initialAgentConfig.configurationId,
       pinned: 1,
     }]);
+    const base = await server(db);
+    const readPinned = async () => {
+      const response = await fetch(
+        `${base}/api/v2/runs/${first.run.id}/model-assignments`,
+      );
+      expect(response.status).toBe(200);
+      return json(response);
+    };
+    expect(await readPinned()).toMatchObject({
+      schemaVersion: "2.4",
+      activeRunPinning: "immutable",
+      items: [{
+        assignment: {
+          agentId: "ReconScout",
+          missionId: first.mission.id,
+          runId: first.run.id,
+          stepId: null,
+          purpose: "execution",
+          primaryConfigurationId: initialAgentConfig.configurationId,
+          fallbackConfigurationId: globalConfig.configurationId,
+          pinned: true,
+        },
+        primaryConfiguration: {
+          providerId: "provider-open",
+          modelId: "model-frontier",
+          reasoningEffort: "high",
+          enforcementMode: "enforced_executor",
+          disclosureClass: "public_only",
+        },
+        fallbackConfiguration: {
+          providerId: "provider-open",
+          modelId: "model-frontier",
+          reasoningEffort: null,
+          enforcementMode: "enforced_executor",
+          disclosureClass: "public_only",
+        },
+      }],
+    });
 
     modelConfigurations.putPreference({
       scopeType: "agent",
@@ -977,6 +1015,20 @@ describe("model configuration control plane", () => {
       FROM agent_model_assignments WHERE run_id = ?
     `).get(first.run.id)).toEqual({
       primary_configuration_id: initialAgentConfig.configurationId,
+    });
+    expect(await readPinned()).toMatchObject({
+      items: [{
+        assignment: {
+          primaryConfigurationId: initialAgentConfig.configurationId,
+          fallbackConfigurationId: globalConfig.configurationId,
+        },
+        primaryConfiguration: {
+          reasoningEffort: "high",
+        },
+        fallbackConfiguration: {
+          reasoningEffort: null,
+        },
+      }],
     });
 
     const second = create("model-mission-create-0002");

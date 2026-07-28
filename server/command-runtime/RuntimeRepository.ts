@@ -29,6 +29,9 @@ import type {
   StoredPlanStep,
 } from "./types";
 import { parseGuidedReconnaissanceSelection } from "../missions/GuidedReconnaissance";
+import {
+  parseGuidedLocalExploitIntelligenceSelection,
+} from "../local-exploit-intelligence/GuidedLocalExploitIntelligence";
 import { CommandRuntimeError } from "./types";
 import { planContentFingerprint, planVersionReceiptHash } from "./PlanFingerprint";
 
@@ -769,6 +772,50 @@ export class RuntimeRepository {
       }
       guidedWindowsIdentity = structuredClone(candidate) as NonNullable<PlanningMission["guidedWindowsIdentity"]>;
     }
+    const guidedLocalExploitIntelligenceValue =
+      guidedCollaboration.guidedLocalExploitIntelligence === null
+        ? undefined
+        : guidedCollaboration.guidedLocalExploitIntelligence;
+    const storedGuidedLocalExploitIntelligence =
+      parseGuidedLocalExploitIntelligenceSelection(
+        guidedLocalExploitIntelligenceValue,
+        "stored guidedLocalExploitIntelligence",
+      );
+    if (
+      guidedLocalExploitIntelligenceValue !== undefined
+      && storedGuidedLocalExploitIntelligence.issues.length > 0
+    ) {
+      throw new CommandRuntimeError(
+        409,
+        "guided_local_exploit_intelligence_constraint_invalid",
+        "The stored local ExploitDB selection failed canonical validation",
+        {
+          category: "invalid_input",
+          humanMessage: "Ti-Scale stopped because the saved local ExploitDB query is malformed. It did not dispatch a substitute query or executable.",
+          remediation: "Create a new Guided mission with one canonical CVE or technology query.",
+          details: {
+            issues: [...storedGuidedLocalExploitIntelligence.issues],
+          },
+        },
+      );
+    }
+    const guidedLocalExploitIntelligence =
+      storedGuidedLocalExploitIntelligence.selection;
+    if (
+      guidedLocalExploitIntelligence
+      && (guidedReconnaissance || guidedWindowsIdentity)
+    ) {
+      throw new CommandRuntimeError(
+        409,
+        "guided_first_step_ambiguous",
+        "Multiple first-step Guided intents were persisted",
+        {
+          category: "data_integrity",
+          humanMessage: "Ti-Scale stopped because this mission contains more than one first Guided action. It did not choose one silently.",
+          remediation: "Create a new Guided mission with exactly one first represented action.",
+        },
+      );
+    }
     return {
       id: row.id,
       createdBy: row.created_by,
@@ -785,6 +832,9 @@ export class RuntimeRepository {
         executionPreference,
         ...(guidedReconnaissance ? { guidedReconnaissance } : {}),
         ...(guidedWindowsIdentity ? { guidedWindowsIdentity } : {}),
+        ...(guidedLocalExploitIntelligence
+          ? { guidedLocalExploitIntelligence }
+          : {}),
       } : {}),
     };
   }

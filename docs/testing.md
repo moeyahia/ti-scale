@@ -74,28 +74,50 @@ The browser audit compares rendered interactive elements with this manifest. Mis
 
 The manifest currently records explicit known gaps. Therefore, its presence and validation do not constitute 100% interaction coverage. Release requires the gap list to reach zero and every material option to be activated in every relevant state.
 
-The current source contains 715 interaction groups and nine explicit known-gap
-records. The source-bound manifest validator passes 51/51 tests with 4,815
-assertions. It verifies the manifest schema, control collections, option
-bindings, fixture references, and test mappings; it is not an exhaustive
-whole-product option-activation receipt. The earlier Chromium 1440 rendered
-control crawl predates this 715-group source and must not be presented as the
-current aggregate activation result.
+The current source contains 798 interaction groups, including 576
+fixture-required groups, and nine explicit known-gap records. The source-bound
+manifest validator passes 52/52 tests with 5,178 assertions. It verifies the
+manifest schema, control collections, option bindings, fixture references, and
+test mappings; it is not an exhaustive whole-product option-activation
+receipt. The earlier Chromium 1440 rendered-control crawl predates this
+798-group source and must not be presented as the current aggregate activation
+result.
 
-The current test-policy scan covers 532 test files: 464 unit/module files and
-68 browser files. It reports zero skipped, focused, todo, expected-failure, or
-retry-masked tests. The standalone-source boundary scans 1,212 production
+The current test-policy scan covers 561 test files: 488 unit/module files and
+73 browser files. It reports zero skipped, focused, todo, expected-failure, or
+retry-masked tests. The standalone-source boundary scans 1,271 production
 files. Application/server typecheck, E2E typecheck, and `git diff --check` all
 pass. These are source-quality gates; they do not replace browser activation,
 visual approval, soak evidence, or human release approval.
 
-The current complete unit and integration run passed 2,844/2,844 tests across
+The most recent recorded complete unit and integration run predates the current
+Windows/identity and SearchSploit expansion: it passed 2,844/2,844 tests across
 464 files with 30,016 assertions in 865.07 seconds, with zero failures and zero
-skips. The combined focused rerun for the repaired migration-56 expectations
-and Research stage-run mutation-authority inventory passed 15/15 tests with
-1,080 assertions. These clean source results do not close the nine known
-interaction gaps, four unapproved visual candidates, preview/soak period, or
-human sign-off.
+skips. The earlier focused migration-56 and Research
+mutation-authority rerun passed 15/15 tests with 1,080 assertions. Current
+source and authenticated active health are now at migration 60. These results
+do not close the nine known interaction gaps, four unapproved visual
+candidates, soak period, or human sign-off.
+
+### Current bounded local-tool intake receipts
+
+A fresh eight-file local ExploitDB/SearchSploit run passed 25/25 tests with 139
+assertions. Its scope is the frontend intake contract, Guided intake schema,
+all three local SearchSploit suites, standalone startup, runtime composition,
+and command-runtime integration. The dedicated Chromium intake path separately
+passed 1/1 without retries, exercising the control by pointer and keyboard.
+
+The focused Windows/identity source run passed 34/34 tests with 204 assertions
+across ten files covering tool-pack policy, direct process execution, result
+normalization, capability readiness, credential resolution, runtime
+composition, mission and runtime integration, Guided intake, and frontend
+contracts. Its dedicated Chromium intake path separately passed 1/1 without
+retries by pointer and keyboard.
+
+These bounded receipts prove their reviewed source and intake slices only.
+They do not prove live installation activation, exhaustive option traversal,
+the complete cross-browser matrix, visual approval, soak completion, or human
+release approval.
 
 ### Current bounded Research Lab receipt
 
@@ -134,7 +156,7 @@ receipt; it does not claim visual coverage of the earlier edit controls or
 every option state. The Evidence baseline maps Begin validation only to the
 directly visible persisted non-evidence verification form, not to candidate
 selection, rejection, demotion, or later provenance/custody disclosures. The
-remaining 661 interaction groups have no mapped visual baseline. The registry
+remaining 744 interaction groups have no mapped visual baseline. The registry
 is automated drift evidence only: cross-browser visual approval and human
 release approval remain false until the complete visual gate is reviewed.
 
@@ -235,9 +257,10 @@ INP 88 ms, and CLS 0.0019733796621257387. The local receipt is under
 A dedicated-worker teardown race found by this run was repaired only in the
 test harness; production application bytes were unchanged. This bounded
 performance result does not replace concurrent-load evidence, the 72-hour
-soak, preview acceptance, approved visuals, or human release sign-off. The
-guarded preview remains on schema 47 while reviewed source is on schema 56; no
-source candidate was deployed and cutover remains closed.
+soak, acceptance testing, approved visuals, or human release sign-off.
+Reviewed source and authenticated active health both report migration 60; that
+schema alignment does not turn the earlier performance receipt into a complete
+current release receipt.
 
 ## Release evidence
 

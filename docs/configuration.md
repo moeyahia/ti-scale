@@ -10,7 +10,7 @@ Ti-Scale reads server configuration from environment variables. Keep private val
 | `TI_SCALE_PORT` | Standalone service port | `3132` |
 | `TI_SCALE_DATABASE_PATH` | Canonical SQLite file | `./data/ti-scale.sqlite` |
 | `TI_SCALE_SCRIPT_SOURCE_ROOT` | Optional absolute, Ti-Scale-namespaced generated-script source root | Derived beside the database |
-| `TI_SCALE_PREVIEW` | Enables preview-only serving behavior | `true` during development |
+| `TI_SCALE_PREVIEW` | Allows mutable development static serving; manifest-pinned production releases do not require it | `false` in production |
 | `TI_SCALE_SERVE_STATIC` | Serves the built client from the API process | `true` for a single-process deployment |
 | `TI_SCALE_KILL_SWITCH` | Starts only the fail-closed disabled response surface | `false` |
 | `TI_SCALE_UI_ORIGIN` | Exact browser origin permitted by CORS | Development client origin |
@@ -211,6 +211,31 @@ After all seven base values load successfully, the optional
 bundle](reviewed-web-assessment-capability.md). It composes the bounded WhatWeb
 and FFUF bindings into that pinned baseline. Exact `false` leaves them out;
 any other nonempty value fails configuration loading.
+
+### Guided Windows and identity operations
+
+| Variable | Purpose |
+| --- | --- |
+| `TI_SCALE_WINDOWS_IDENTITY_ENABLED` | Enables the reviewed Windows/identity startup projection and exact-step Guided planner when set to exact lowercase `true` |
+| `TI_SCALE_WINDOWS_IDENTITY_CREDENTIAL_ROOT` | Absolute private root containing operator-provisioned opaque credential bundles for credential-backed SMB/RPC operations |
+
+The Windows/identity flag does not make every operation available by itself.
+Each operation remains selectable only when its executable and authentication
+mode have a current runtime receipt. The credential root is optional when only
+anonymous operations are used. Credential files never enter the browser,
+mission JSON, logs, or reusable memory.
+
+### Local ExploitDB intelligence
+
+| Variable | Purpose |
+| --- | --- |
+| `TI_SCALE_LOCAL_EXPLOIT_INTELLIGENCE_ENABLED` | Enables the pinned local SearchSploit readiness monitor and its one-action Guided mission route when set to exact lowercase `true` |
+
+This route has no provider or target connection. Startup pins the exact
+SearchSploit executable, bubblewrap executable, configuration, and three local
+catalog files before exposing the option. Results enter the Engagement Log and
+unverified Observation stages only. See [Local tool
+capabilities](local-tool-capabilities.md#pinned-local-exploitdb-intelligence).
 
 ## Production guidance
 

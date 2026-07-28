@@ -20,7 +20,7 @@ Ti-Scale is under active development and is not release-eligible yet.
 | Evidence semantics, failure diagnosis, run metrics, and topology records | Implemented as canonical record and review surfaces |
 | Second Brain graph, memory controls, and Context Packs | Implemented; runtime use is valid only when a persisted Context Pack exists |
 | Obsidian-compatible vault connection, projection, import, conflicts, and portable export | Implemented; no vault is bundled or automatically connected |
-| Guided exact-step runtime | Implemented behind represented operator decisions and fresh capability receipts; an unconfigured installation remains fail-closed |
+| Guided exact-step runtime | Reviewed network, web, Windows/identity, and pinned local ExploitDB operations are available behind represented operator decisions and fresh capability receipts; an unconfigured operation remains fail-closed |
 | Autonomous specialist and tool execution | Optional reviewed local executors are supported; an unconfigured installation remains unavailable and no assessment proof implies a complete engagement |
 | Research Lab | Human-owned policy and isolated synthetic execution are under active validation; no candidate can auto-promote or deploy |
 | Full cross-browser release gate, soak, and human approval | **Pending** |

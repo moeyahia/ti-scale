@@ -25,10 +25,15 @@ import type {
   ModelResolution,
   PinModelAssignmentInput,
   PinnedModelAssignment,
+  PinnedModelAssignmentReadback,
   PutModelPreferenceInput,
   StoredModelConfiguration,
 } from "./types";
-import { PRODUCT_AGENT_REGISTRY } from "../agents";
+import {
+  COMMANDER_AGENT_ID,
+  PRODUCT_AGENT_IDS,
+  PRODUCT_AGENT_REGISTRY,
+} from "../agents";
 
 export const DEFAULT_MODEL_CATALOG_MAXIMUM_AGE_MS = 15 * 60 * 1_000;
 export const DEFAULT_MODEL_CATALOG_MAXIMUM_FUTURE_SKEW_MS = 5 * 1_000;
@@ -432,6 +437,11 @@ function planningItemReadinessReasons(
   role: "primary" | "fallback",
 ): string[] {
   const reasons = [...item.unavailableReasons];
+  if (selection.agentId !== COMMANDER_AGENT_ID) {
+    reasons.push(
+      `The ${role} planning configuration is assigned to ${selection.agentId}; provider-backed planning must use the canonical ${COMMANDER_AGENT_ID} identity.`,
+    );
+  }
   if (!item.compatibleAgentIds.includes(selection.agentId)) {
     reasons.push(
       `The ${role} planning configuration is not declared compatible with ${selection.agentId}.`,
@@ -556,6 +566,14 @@ export class ModelConfigurationService {
       throw invalidModelConfiguration(
         "duplicate_specialist_agent_id",
         "Autonomous specialistAgentIds contains duplicate values",
+      );
+    }
+    const nonSpecialistIds = specialistAgentIds.filter(
+      (agentId) => !PRODUCT_AGENT_IDS.has(agentId),
+    );
+    if (nonSpecialistIds.length > 0) {
+      throw modelConfigurationScopeConflict(
+        `Autonomous execution assignments require canonical action-owning specialists; planning-only roster identities are not executable: ${nonSpecialistIds.join(", ")}`,
       );
     }
     const overrides = orderedSelections(input.overrides ?? []);
@@ -834,6 +852,23 @@ export class ModelConfigurationService {
 
   listPreferences(filters: ModelPreferenceFilters = {}) {
     return this.repository.listPreferences(filters);
+  }
+
+  listPinnedAssignmentsForRun(
+    runId: string,
+  ): readonly PinnedModelAssignmentReadback[] {
+    return this.repository.listPinnedAssignmentsForRun(runId)
+      .map((assignment) => ({
+        assignment,
+        primaryConfiguration: this.repository.getConfiguration(
+          assignment.primaryConfigurationId,
+        ),
+        fallbackConfiguration: assignment.fallbackConfigurationId
+          ? this.repository.getConfiguration(
+              assignment.fallbackConfigurationId,
+            )
+          : null,
+      }));
   }
 
   putPreference(
@@ -1234,6 +1269,14 @@ export class ModelConfigurationService {
       throw invalidModelConfiguration(
         "duplicate_specialist_agent_id",
         "Autonomous specialistAgentIds contains duplicate values",
+      );
+    }
+    const nonSpecialistIds = specialistAgentIds.filter(
+      (agentId) => !PRODUCT_AGENT_IDS.has(agentId),
+    );
+    if (nonSpecialistIds.length > 0) {
+      throw modelConfigurationScopeConflict(
+        `Autonomous execution assignments require canonical action-owning specialists; planning-only roster identities are not executable: ${nonSpecialistIds.join(", ")}`,
       );
     }
     const selections = orderedSelections(assignments);

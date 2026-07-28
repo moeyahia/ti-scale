@@ -17,19 +17,18 @@ Reviewed SHA-256:
 The strict v2 manifest contains one `children` root and seven
 `history-root` roots:
 
-- `/home/chillspwn/htb/boxes`
-- `/var/lib/chillspwn/state`
-- `/var/lib/chillspwn/hermes`
-- `/var/lib/chillspwn/claude/projects`
-- `/root/.claude/projects`
-- `/root/.grok/sessions`
-- `/root/.grok/logs`
-- `/root/.codex/sessions`
+- a secondary operator-owned engagement tree;
+- application runtime state;
+- orchestration runtime history;
+- service-owned provider projects;
+- operator-owned provider projects;
+- operator-owned model sessions;
+- operator-owned model logs; and
+- operator-owned coding-agent sessions.
 
-It deliberately excludes both roots already covered by the v1 migration:
-
-- `/var/lib/chillspwn/workspaces/htb/boxes`
-- `/var/lib/chillspwn/workspaces/engagements`
+It deliberately excludes both primary engagement roots already covered by the
+v1 migration. Private absolute paths remain in the reviewed hash-pinned
+deployment manifest and are not repeated in public documentation.
 
 The focused manifest test proves that the supplemental root set is exactly the
 complete reviewed v2 set minus those two v1 roots. Required roots fail closed;
@@ -43,7 +42,7 @@ settled-source cutoff `2026-07-21T11:05:28.735Z`. Discovery used the production
 allowlist, an 8 MiB per-file parser limit, a 100,000-file aggregate bound, a
 24-level traversal bound, no symlink following, and no source writes.
 
-The separate `/home/chillspwn/htb/boxes` tree produced:
+The separately configured secondary engagement tree produced:
 
 - 1 canonical parent root, 0 aliases, and 0 missing roots;
 - 4 engagement manifests;
@@ -59,13 +58,13 @@ The seven generic history roots produced the following exact snapshot:
 
 | Source root | Scanned | Classified | Included | Deferred | Unsupported | Oversized | Active SQLite |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `/var/lib/chillspwn/state` | 12,682 | 8,213 | 8,207 | 3 | 4,286 | 3 | 0 |
-| `/var/lib/chillspwn/hermes` | 8,169 | 2,739 | 2,724 | 11 | 2,313 | 2 | 2 |
-| `/var/lib/chillspwn/claude/projects` | 484 | 193 | 193 | 0 | 282 | 0 | 0 |
-| `/root/.claude/projects` | 482 | 193 | 193 | 0 | 280 | 0 | 0 |
-| `/root/.grok/sessions` | 9,653 | 2,949 | 2,933 | 0 | 6,704 | 16 | 0 |
-| `/root/.grok/logs` | 6 | 6 | 6 | 0 | 0 | 0 | 0 |
-| `/root/.codex/sessions` | 722 | 722 | 263 | 3 | 0 | 456 | 0 |
+| application runtime state | 12,682 | 8,213 | 8,207 | 3 | 4,286 | 3 | 0 |
+| orchestration runtime history | 8,169 | 2,739 | 2,724 | 11 | 2,313 | 2 | 2 |
+| service-owned provider projects | 484 | 193 | 193 | 0 | 282 | 0 | 0 |
+| operator-owned provider projects | 482 | 193 | 193 | 0 | 280 | 0 | 0 |
+| operator-owned model sessions | 9,653 | 2,949 | 2,933 | 0 | 6,704 | 16 | 0 |
+| operator-owned model logs | 6 | 6 | 6 | 0 | 0 | 0 | 0 |
+| operator-owned coding-agent sessions | 722 | 722 | 263 | 3 | 0 | 456 | 0 |
 | **Total** | **32,198** | **15,015** | **14,519** | **17** | **13,865** | **477** | **2** |
 
 Aggregate bytes were 31,833,223,591 scanned, 30,489,905,524 classified,
@@ -73,7 +72,7 @@ Aggregate bytes were 31,833,223,591 scanned, 30,489,905,524 classified,
 were:
 
 - 4,180 session JSON records;
-- 2,602 Hermes Markdown conversations or memory notes;
+- 2,602 orchestration Markdown conversations or memory notes;
 - 2,106 raw model JSONL records;
 - 1,968 provider-session JSONL records;
 - 1,905 provider log records;

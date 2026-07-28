@@ -40,6 +40,8 @@ export interface MissionIntakeRequest {
   explanationDepth?: GuidedMissionRequest["explanationDepth"];
   executionPreference?: GuidedMissionRequest["executionPreference"];
   guidedReconnaissance?: GuidedReconnaissanceSelection;
+  guidedWindowsIdentity?: GuidedMissionRequest["guidedWindowsIdentity"];
+  guidedLocalExploitIntelligence?: GuidedMissionRequest["guidedLocalExploitIntelligence"];
   specialistAgentIds?: string[];
   agentModelAssignments?: AutonomousAgentModelAssignment[];
   planningSelection?: AutonomousPlanningSelection;
@@ -213,6 +215,65 @@ export interface IntakeRegistrySnapshot {
       example: string;
       explanation: string;
     };
+  };
+  guidedWindowsIdentity: {
+    registryVersion: 1;
+    sourceOfTruth: "reviewed-windows-identity-tool-pack";
+    modes: Array<{
+      id: NonNullable<GuidedMissionRequest["guidedWindowsIdentity"]>["operation"];
+      label: string;
+      description: string;
+      expectedResult: string;
+      toolId: string;
+      authenticationModes: Array<
+        NonNullable<GuidedMissionRequest["guidedWindowsIdentity"]>["authenticationMode"]
+      >;
+      readyAuthenticationModes: Array<
+        NonNullable<GuidedMissionRequest["guidedWindowsIdentity"]>["authenticationMode"]
+      >;
+      readiness: "ready" | "unavailable";
+      readinessExplanation: string;
+      remediation: string;
+      requiresSingleStepAgent: true;
+    }>;
+  };
+  guidedLocalExploitIntelligence: {
+    registryVersion: 1;
+    sourceOfTruth: "pinned-local-exploitdb-tool-pack";
+    toolId: string;
+    readiness: "ready" | "unavailable";
+    readinessExplanation: string;
+    remediation: string;
+    providerContact: false;
+    targetContact: false;
+    evidencePromotion: "none";
+    requiresSingleStepAgent: true;
+    queryKinds: [
+      {
+        id: "cve";
+        label: string;
+        purpose: string;
+        expectedResult: string;
+        example: {
+          kind: "cve";
+          cveId: string;
+          maximumResults: number;
+        };
+      },
+      {
+        id: "technology";
+        label: string;
+        purpose: string;
+        expectedResult: string;
+        example: {
+          kind: "technology";
+          product: string;
+          version: string | null;
+          platform: string | null;
+          maximumResults: number;
+        };
+      },
+    ];
   };
 }
 

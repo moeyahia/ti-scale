@@ -191,6 +191,27 @@ export function createModelConfigurationRouter(
     }
   });
 
+  router.get(
+    `${prefix}/runs/:runId/model-assignments`,
+    (request, response) => {
+      const traceId = attachV2RequestId(request, response);
+      try {
+        authenticatedActor(dependencies, request);
+        const runId = modelConfigurationIdentifier(
+          request.params.runId,
+          "runId",
+        );
+        response.json({
+          schemaVersion: MODEL_CONFIGURATION_SCHEMA_VERSION,
+          activeRunPinning: "immutable",
+          items: service.listPinnedAssignmentsForRun(runId),
+        });
+      } catch (error) {
+        errorResponse(response, traceId, error);
+      }
+    },
+  );
+
   router.put(
     `${prefix}/model-preferences/:scopeType/:scopeId`,
     (request, response) => {

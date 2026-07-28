@@ -587,7 +587,7 @@ export function RecoveryPanel({ runId, onChanged }: { runId: string; onChanged: 
       {freshReviewNotice && <p role="status" className="os-state-remediation"><strong>Fresh review required.</strong> {freshReviewNotice}</p>}
       {message && <p role="status" className="os-success-note">{message}</p>}
     </section>
-    <JsonDetails label="Technical recovery wording" value={{
+    <JsonDetails controlId="live-technical-recovery-wording" label="Technical recovery wording" value={{
       detectionSummary: recovery.detection.summary,
       proposedRecovery: recovery.proposedRecovery,
       nextAction: recovery.run.nextAction,

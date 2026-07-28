@@ -162,6 +162,168 @@ function parseField(value: unknown): IntakeFieldDefinition {
 }
 
 const GUIDED_TCP_PRESET_IDS = ["focused_services", "web_services", "remote_management"] as const;
+const GUIDED_WINDOWS_IDENTITY_OPERATIONS = [
+  "smb_share_list",
+  "smb_identity_summary",
+  "ldap_root_dse",
+  "rpc_domain_info",
+] as const;
+const GUIDED_WINDOWS_IDENTITY_AUTHENTICATION_MODES = [
+  "anonymous",
+  "credential_reference",
+] as const;
+const LOCAL_EXPLOIT_CVE_ID = /^CVE-[12][0-9]{3}-[0-9]{4,10}$/u;
+const LOCAL_EXPLOIT_TECHNOLOGY_TEXT =
+  /^[\p{L}\p{N}][\p{L}\p{N} ._+/:()#-]*$/u;
+
+function exactKeys(
+  value: JsonRecord,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const canonical = [...expected].sort();
+  if (
+    actual.length !== canonical.length
+    || actual.some((key, index) => key !== canonical[index])
+  ) {
+    throw new Error(`${label} contains unsupported or missing fields`);
+  }
+}
+
+function boundedInteger(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  label: string,
+): number {
+  const parsed = number(value, label);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(
+      `${label} must be a whole number from ${minimum} through ${maximum}`,
+    );
+  }
+  return parsed;
+}
+
+function localExploitTechnologyText(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  label: string,
+): string {
+  const parsed = nonEmpty(value, label);
+  if (
+    parsed !== parsed.trim()
+    || parsed.length < minimum
+    || parsed.length > maximum
+    || !LOCAL_EXPLOIT_TECHNOLOGY_TEXT.test(parsed)
+  ) {
+    throw new Error(
+      `${label} must be ${minimum} through ${maximum} readable technology characters without command syntax`,
+    );
+  }
+  return parsed;
+}
+
+function optionalLocalExploitTechnologyText(
+  value: unknown,
+  maximum: number,
+  label: string,
+): string | null {
+  if (value === null) return null;
+  return localExploitTechnologyText(value, 1, maximum, label);
+}
+
+function parseGuidedLocalExploitQuery(
+  value: unknown,
+): NonNullable<
+  GuidedMissionRequest["guidedLocalExploitIntelligence"]
+>["query"] {
+  const query = object(value, "Guided local ExploitDB query");
+  const kind = literal(
+    query.kind,
+    ["cve", "technology"],
+    "Guided local ExploitDB query kind",
+  );
+  if (kind === "cve") {
+    exactKeys(
+      query,
+      ["kind", "cveId", "maximumResults"],
+      "Guided local ExploitDB CVE query",
+    );
+    const cveId = nonEmpty(
+      query.cveId,
+      "Guided local ExploitDB CVE ID",
+    );
+    if (
+      cveId !== cveId.trim()
+      || cveId !== cveId.toLocaleUpperCase("en-US")
+      || !LOCAL_EXPLOIT_CVE_ID.test(cveId)
+    ) {
+      throw new Error(
+        "Guided local ExploitDB CVE ID must use canonical CVE-YYYY-NNNN format",
+      );
+    }
+    return {
+      kind,
+      cveId,
+      maximumResults: boundedInteger(
+        query.maximumResults,
+        1,
+        100,
+        "Guided local ExploitDB result limit",
+      ),
+    };
+  }
+  exactKeys(
+    query,
+    ["kind", "product", "version", "platform", "maximumResults"],
+    "Guided local ExploitDB technology query",
+  );
+  return {
+    kind,
+    product: localExploitTechnologyText(
+      query.product,
+      2,
+      120,
+      "Guided local ExploitDB product",
+    ),
+    version: optionalLocalExploitTechnologyText(
+      query.version,
+      80,
+      "Guided local ExploitDB version",
+    ),
+    platform: optionalLocalExploitTechnologyText(
+      query.platform,
+      80,
+      "Guided local ExploitDB platform",
+    ),
+    maximumResults: boundedInteger(
+      query.maximumResults,
+      1,
+      100,
+      "Guided local ExploitDB result limit",
+    ),
+  };
+}
+
+function parseGuidedLocalExploitIntelligence(
+  value: unknown,
+): NonNullable<GuidedMissionRequest["guidedLocalExploitIntelligence"]> {
+  const selection = object(
+    value,
+    "Guided local ExploitDB intelligence selection",
+  );
+  exactKeys(
+    selection,
+    ["query"],
+    "Guided local ExploitDB intelligence selection",
+  );
+  return {
+    query: parseGuidedLocalExploitQuery(selection.query),
+  };
+}
 
 function parseTcpPorts(value: unknown, label: string): number[] {
   return array(value, label).map((candidate, index) => {
@@ -232,6 +394,262 @@ function parseGuidedReconnaissanceRegistry(value: unknown): IntakeRegistrySnapsh
   };
 }
 
+function parseGuidedWindowsIdentity(
+  value: unknown,
+): NonNullable<GuidedMissionRequest["guidedWindowsIdentity"]> {
+  const item = object(value, "Guided Windows or identity selection");
+  const authenticationMode = literal(
+    item.authenticationMode,
+    GUIDED_WINDOWS_IDENTITY_AUTHENTICATION_MODES,
+    "Guided Windows or identity authentication mode",
+  );
+  const credentialReference = authenticationMode === "anonymous"
+    ? (() => {
+        if (item.credentialReference !== null) {
+          throw new Error("Anonymous Guided Windows or identity selection must not contain a credential reference");
+        }
+        return null;
+      })()
+    : (() => {
+        const reference = object(
+          item.credentialReference,
+          "Guided Windows or identity credential reference",
+        );
+        const id = nonEmpty(
+          reference.id,
+          "Guided Windows or identity credential reference ID",
+        );
+        if (
+          reference.kind !== "systemd_credential_bundle"
+          || Object.keys(reference).sort().join("\u0000") !== "id\u0000kind"
+          || !/^[A-Za-z0-9._:@/-]{1,200}$/u.test(id)
+        ) {
+          throw new Error("Guided Windows or identity credential reference kind is invalid");
+        }
+        return {
+          kind: "systemd_credential_bundle" as const,
+          id,
+        };
+      })();
+  return {
+    operation: literal(
+      item.operation,
+      GUIDED_WINDOWS_IDENTITY_OPERATIONS,
+      "Guided Windows or identity operation",
+    ),
+    authenticationMode,
+    credentialReference,
+  };
+}
+
+function parseGuidedWindowsIdentityRegistry(
+  value: unknown,
+): IntakeRegistrySnapshot["guidedWindowsIdentity"] {
+  const root = object(value, "Guided Windows or identity registry");
+  const registryVersion = number(
+    root.registryVersion,
+    "Guided Windows or identity registry version",
+  );
+  if (registryVersion !== 1) {
+    throw new Error("Guided Windows or identity registry version is unsupported");
+  }
+  if (root.sourceOfTruth !== "reviewed-windows-identity-tool-pack") {
+    throw new Error("Guided Windows or identity registry source is invalid");
+  }
+  return {
+    registryVersion: 1,
+    sourceOfTruth: "reviewed-windows-identity-tool-pack",
+    modes: array(root.modes, "Guided Windows or identity modes").map((value) => {
+      const mode = object(value, "Guided Windows or identity mode");
+      if (mode.requiresSingleStepAgent !== true) {
+        throw new Error("Guided Windows or identity mode must require one represented agent step");
+      }
+      const authenticationModes = array(
+        mode.authenticationModes,
+        "Guided Windows or identity authentication modes",
+      ).map((candidate) => literal(
+        candidate,
+        GUIDED_WINDOWS_IDENTITY_AUTHENTICATION_MODES,
+        "Guided Windows or identity authentication mode",
+      ));
+      const readyAuthenticationModes = array(
+        mode.readyAuthenticationModes,
+        "Ready Guided Windows or identity authentication modes",
+      ).map((candidate) => literal(
+        candidate,
+        GUIDED_WINDOWS_IDENTITY_AUTHENTICATION_MODES,
+        "Ready Guided Windows or identity authentication mode",
+      ));
+      if (readyAuthenticationModes.some((candidate) =>
+        !authenticationModes.includes(candidate))) {
+        throw new Error("Ready Guided Windows or identity authentication mode is not supported by its operation");
+      }
+      const readiness = literal(
+        mode.readiness,
+        ["ready", "unavailable"],
+        "Guided Windows or identity readiness",
+      );
+      if (
+        (readiness === "ready" && readyAuthenticationModes.length === 0)
+        || (readiness === "unavailable" && readyAuthenticationModes.length > 0)
+      ) {
+        throw new Error("Guided Windows or identity readiness contradicts its ready authentication modes");
+      }
+      return {
+        id: literal(
+          mode.id,
+          GUIDED_WINDOWS_IDENTITY_OPERATIONS,
+          "Guided Windows or identity mode ID",
+        ),
+        label: nonEmpty(mode.label, "Guided Windows or identity label"),
+        description: nonEmpty(mode.description, "Guided Windows or identity description"),
+        expectedResult: nonEmpty(
+          mode.expectedResult,
+          "Guided Windows or identity expected result",
+        ),
+        toolId: nonEmpty(mode.toolId, "Guided Windows or identity tool"),
+        authenticationModes,
+        readyAuthenticationModes,
+        readiness,
+        readinessExplanation: nonEmpty(
+          mode.readinessExplanation,
+          "Guided Windows or identity readiness explanation",
+        ),
+        remediation: nonEmpty(
+          mode.remediation,
+          "Guided Windows or identity remediation",
+        ),
+        requiresSingleStepAgent: true,
+      };
+    }),
+  };
+}
+
+function parseGuidedLocalExploitIntelligenceRegistry(
+  value: unknown,
+): IntakeRegistrySnapshot["guidedLocalExploitIntelligence"] {
+  const root = object(value, "Guided local ExploitDB registry");
+  exactKeys(root, [
+    "registryVersion",
+    "sourceOfTruth",
+    "toolId",
+    "readiness",
+    "readinessExplanation",
+    "remediation",
+    "providerContact",
+    "targetContact",
+    "evidencePromotion",
+    "requiresSingleStepAgent",
+    "queryKinds",
+  ], "Guided local ExploitDB registry");
+  if (number(root.registryVersion, "Guided local ExploitDB registry version") !== 1) {
+    throw new Error("Guided local ExploitDB registry version is unsupported");
+  }
+  if (root.sourceOfTruth !== "pinned-local-exploitdb-tool-pack") {
+    throw new Error("Guided local ExploitDB registry source is invalid");
+  }
+  if (
+    root.providerContact !== false
+    || root.targetContact !== false
+    || root.evidencePromotion !== "none"
+    || root.requiresSingleStepAgent !== true
+  ) {
+    throw new Error(
+      "Guided local ExploitDB registry contradicts its local-only exact-step boundary",
+    );
+  }
+  const queryKinds = array(
+    root.queryKinds,
+    "Guided local ExploitDB query kinds",
+  );
+  if (queryKinds.length !== 2) {
+    throw new Error(
+      "Guided local ExploitDB registry must publish exactly the CVE and technology query kinds",
+    );
+  }
+  const cve = object(queryKinds[0], "Guided local ExploitDB CVE query kind");
+  exactKeys(
+    cve,
+    ["id", "label", "purpose", "expectedResult", "example"],
+    "Guided local ExploitDB CVE query kind",
+  );
+  if (cve.id !== "cve") {
+    throw new Error("Guided local ExploitDB CVE query kind is missing or out of order");
+  }
+  const cveExample = parseGuidedLocalExploitQuery(cve.example);
+  if (cveExample.kind !== "cve") {
+    throw new Error("Guided local ExploitDB CVE example is invalid");
+  }
+  const technology = object(
+    queryKinds[1],
+    "Guided local ExploitDB technology query kind",
+  );
+  exactKeys(
+    technology,
+    ["id", "label", "purpose", "expectedResult", "example"],
+    "Guided local ExploitDB technology query kind",
+  );
+  if (technology.id !== "technology") {
+    throw new Error(
+      "Guided local ExploitDB technology query kind is missing or out of order",
+    );
+  }
+  const technologyExample = parseGuidedLocalExploitQuery(technology.example);
+  if (technologyExample.kind !== "technology") {
+    throw new Error("Guided local ExploitDB technology example is invalid");
+  }
+  return {
+    registryVersion: 1,
+    sourceOfTruth: "pinned-local-exploitdb-tool-pack",
+    toolId: nonEmpty(root.toolId, "Guided local ExploitDB tool"),
+    readiness: literal(
+      root.readiness,
+      ["ready", "unavailable"],
+      "Guided local ExploitDB readiness",
+    ),
+    readinessExplanation: nonEmpty(
+      root.readinessExplanation,
+      "Guided local ExploitDB readiness explanation",
+    ),
+    remediation: nonEmpty(
+      root.remediation,
+      "Guided local ExploitDB remediation",
+    ),
+    providerContact: false,
+    targetContact: false,
+    evidencePromotion: "none",
+    requiresSingleStepAgent: true,
+    queryKinds: [
+      {
+        id: "cve",
+        label: nonEmpty(cve.label, "Guided local ExploitDB CVE label"),
+        purpose: nonEmpty(cve.purpose, "Guided local ExploitDB CVE purpose"),
+        expectedResult: nonEmpty(
+          cve.expectedResult,
+          "Guided local ExploitDB CVE expected result",
+        ),
+        example: cveExample,
+      },
+      {
+        id: "technology",
+        label: nonEmpty(
+          technology.label,
+          "Guided local ExploitDB technology label",
+        ),
+        purpose: nonEmpty(
+          technology.purpose,
+          "Guided local ExploitDB technology purpose",
+        ),
+        expectedResult: nonEmpty(
+          technology.expectedResult,
+          "Guided local ExploitDB technology expected result",
+        ),
+        example: technologyExample,
+      },
+    ],
+  };
+}
+
 export function parseIntakeRegistrySnapshot(payload: unknown): IntakeRegistrySnapshot {
   const root = object(payload, "intake registry"); schema(root);
   const source = object(root.source, "intake registry source");
@@ -250,6 +668,11 @@ export function parseIntakeRegistrySnapshot(payload: unknown): IntakeRegistrySna
     safeStops: { mandatory: array(safeStops.mandatory, "mandatory safe stops").map(parseSafeStop), optional: array(safeStops.optional, "optional safe stops").map(parseSafeStop) },
     budgets: recordOf(root.budgets, "budget presets", (value) => parseBudget(value)) as IntakeRegistrySnapshot["budgets"],
     guidedReconnaissance: parseGuidedReconnaissanceRegistry(root.guidedReconnaissance),
+    guidedWindowsIdentity: parseGuidedWindowsIdentityRegistry(root.guidedWindowsIdentity),
+    guidedLocalExploitIntelligence:
+      parseGuidedLocalExploitIntelligenceRegistry(
+        root.guidedLocalExploitIntelligence,
+      ),
   };
 }
 
@@ -264,6 +687,15 @@ function parseGuidedRequest(root: JsonRecord): GuidedMissionRequest {
     evidenceExpectations: stringList(root.evidenceExpectations, "Guided evidence expectations"),
     ...(root.guidedReconnaissance === undefined ? {} : {
       guidedReconnaissance: parseGuidedReconnaissance(root.guidedReconnaissance),
+    }),
+    ...(root.guidedWindowsIdentity === undefined ? {} : {
+      guidedWindowsIdentity: parseGuidedWindowsIdentity(root.guidedWindowsIdentity),
+    }),
+    ...(root.guidedLocalExploitIntelligence === undefined ? {} : {
+      guidedLocalExploitIntelligence:
+        parseGuidedLocalExploitIntelligence(
+          root.guidedLocalExploitIntelligence,
+        ),
     }),
   };
 }

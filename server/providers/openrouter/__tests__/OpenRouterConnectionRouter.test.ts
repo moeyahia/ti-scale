@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PRODUCT_AGENT_REGISTRY } from "../../../agents";
+import { COMMANDER_AGENT_ID } from "../../../agents";
 import {
   createDatabaseConnection,
   migrateDatabase,
@@ -170,9 +170,15 @@ describe("OpenRouter provider connection API", () => {
     }[];
     expect(JSON.stringify(durableSettings)).not.toContain(KEY);
     expect(payload.planningCompatibility.compatibleAgentIds).toEqual(
-      PRODUCT_AGENT_REGISTRY.map(({ id }) => id),
+      [COMMANDER_AGENT_ID],
     );
-    expect(payload.planningCompatibility.compatibleAgentIds).toHaveLength(12);
+    expect(payload.planningCompatibility.compatibleAgentIds).toHaveLength(1);
+    expect(payload.planningCompatibility.explanation).toContain(
+      "Commander planning",
+    );
+    expect(payload.planningCompatibility.explanation).toContain(
+      "delegates all specialist actions",
+    );
 
     const replay = await fetch(`${base}/api/v2/provider-connections/openrouter`, {
       method: "PUT",

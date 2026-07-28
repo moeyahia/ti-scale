@@ -75,7 +75,7 @@ describe("startup readiness audit classification migration", () => {
     const database = createDatabaseConnection({ filename: ":memory:" });
     try {
       const migration = migrateDatabase(database);
-      expect(migration.currentVersion).toBe(58);
+      expect(migration.currentVersion).toBe(60);
       database.prepare(`
         INSERT INTO provider_turns (id, provider, status, started_at)
         VALUES ('turn-canonical', 'openrouter', 'started', ?)

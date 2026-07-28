@@ -70,7 +70,9 @@ interface FixtureState {
 }
 
 interface FixtureReceipt {
-  readonly schemaVersion: "ti-scale.no-backup-full-controller-fixture.v1";
+  readonly schemaVersion:
+    | "ti-scale.no-backup-preview-release-receipt.v1"
+    | "ti-scale.no-backup-forward-release-receipt.v2";
   readonly releaseId: string;
   status:
     | "prepared"
@@ -78,13 +80,15 @@ interface FixtureReceipt {
     | "deployed"
     | "failed_forward_recovery_required";
   readonly backupPolicy: "none";
-  readonly cutoverEligible: false;
+  readonly cutoverEligible?: false;
+  readonly deploymentMode?: "current_service";
+  readonly releaseObserver?: typeof STANDALONE_RELEASE_OBSERVER;
   readonly rollbackCapability: "none_after_schema_commit";
-  readonly sourceSchema: 47;
-  readonly targetSchema: 60;
+  readonly sourceSchema: number;
+  readonly targetSchema: number;
   readonly source: Readonly<Record<string, unknown>>;
   readonly target: Readonly<Record<string, unknown>>;
-  readonly legacyBefore: FixtureServiceIdentity;
+  readonly legacyBefore?: FixtureServiceIdentity;
   legacyAfter?: FixtureServiceIdentity;
   schemaCommitted?: boolean;
   forwardRecoveryRequired?: boolean;
@@ -98,6 +102,8 @@ interface FixtureReceipt {
 
 interface FixtureConfiguration {
   readonly releaseId: string;
+  readonly sourceSchema: number;
+  readonly targetSchema: number;
   readonly statePath: string;
   readonly legacyIdentityPath: string;
   readonly hostBootIdPath: string;
@@ -119,6 +125,8 @@ type CrashBoundary =
   | "pre_schema"
   | "post_schema"
   | `schema_${number}`
+  | "target_precommit"
+  | "target_committed"
   | "target_receipt_prepared"
   | "target_receipt_written"
   | "target_receipt_committed"
@@ -127,8 +135,36 @@ type CrashBoundary =
   | "source_receipt_committed";
 
 const [command, configurationPath, crashBoundaryValue] = process.argv.slice(2);
-const SOURCE_SCHEMA = 47;
-const TARGET_SCHEMA = 60;
+if (
+  (command !== "deploy" && command !== "recover") ||
+  !configurationPath
+) {
+  process.stderr.write(
+    "usage: no-backup-full-controller-worker.ts deploy|recover CONFIG BOUNDARY\n",
+  );
+  process.exit(64);
+}
+const configuration = JSON.parse(
+  readFileSync(configurationPath, "utf8"),
+) as FixtureConfiguration;
+const SOURCE_SCHEMA = configuration.sourceSchema;
+const TARGET_SCHEMA = configuration.targetSchema;
+const STANDALONE_RELEASE_OBSERVER = Object.freeze({
+  schemaVersion: "ti-scale.release-observer.v1" as const,
+  mode: "standalone" as const,
+  scope: "ti_scale_only" as const,
+  externalServiceDependency: "none" as const,
+});
+const FORWARD_V2 = SOURCE_SCHEMA === 60 && TARGET_SCHEMA === 60;
+if (
+  !Number.isSafeInteger(SOURCE_SCHEMA) ||
+  !Number.isSafeInteger(TARGET_SCHEMA) ||
+  SOURCE_SCHEMA < 0 ||
+  TARGET_SCHEMA < SOURCE_SCHEMA ||
+  TARGET_SCHEMA > DATABASE_MIGRATIONS.length
+) {
+  throw new Error("Fixture schema progression is invalid");
+}
 const FORWARD_SCHEMAS = Object.freeze(
   Array.from(
     { length: TARGET_SCHEMA - SOURCE_SCHEMA },
@@ -141,12 +177,12 @@ const schemaCrashBoundary = /^schema_(\d+)$/u.exec(
 const validSchemaCrashBoundary = schemaCrashBoundary !== null &&
   FORWARD_SCHEMAS.includes(Number(schemaCrashBoundary[1]));
 if (
-  (command !== "deploy" && command !== "recover") ||
-  !configurationPath ||
   ![
     "none",
     "pre_schema",
     "post_schema",
+    "target_precommit",
+    "target_committed",
     "target_receipt_prepared",
     "target_receipt_written",
     "target_receipt_committed",
@@ -159,17 +195,15 @@ if (
   process.stderr.write(
     "usage: no-backup-full-controller-worker.ts deploy|recover CONFIG " +
       "none|pre_schema|post_schema|target_receipt_prepared|" +
+      "target_precommit|target_committed|" +
       "target_receipt_written|target_receipt_committed|" +
       "source_receipt_prepared|" +
-      "source_restore_prepared|source_receipt_committed|schema_48..schema_60\n",
+      "source_restore_prepared|source_receipt_committed|schema_SOURCE..schema_TARGET\n",
   );
   process.exit(64);
 }
 const crashBoundary = crashBoundaryValue as CrashBoundary;
 const controllerCommand = command as "deploy" | "recover";
-const configuration = JSON.parse(
-  readFileSync(configurationPath, "utf8"),
-) as FixtureConfiguration;
 
 function withoutBackupRequirement(migration: Migration): Migration {
   const {
@@ -298,12 +332,59 @@ function stateOfMutation(
 interface FixtureReceiptCommitment {
   readonly receipt: FixtureReceipt;
   readonly receiptSha256: string;
-  readonly legacyIdentitySha256: string;
+  readonly observerProofSha256: string;
 }
 
 interface FixtureRestoredReceiptCommitment {
   readonly receiptSha256: string;
-  readonly legacyIdentitySha256: string;
+  readonly observerProofSha256: string;
+}
+
+function observerProofField():
+  "observerProofSha256" | "legacyIdentitySha256" {
+  return FORWARD_V2 ? "observerProofSha256" : "legacyIdentitySha256";
+}
+
+function receiptObserverProof(
+  receipt: FixtureReceipt,
+): FixtureServiceIdentity | typeof STANDALONE_RELEASE_OBSERVER {
+  if (FORWARD_V2) {
+    if (
+      receipt.schemaVersion !==
+        "ti-scale.no-backup-forward-release-receipt.v2" ||
+      receipt.deploymentMode !== "current_service" ||
+      releaseTransactionSha256(receipt.releaseObserver ?? null) !==
+        releaseTransactionSha256(STANDALONE_RELEASE_OBSERVER) ||
+      receipt.cutoverEligible !== undefined ||
+      receipt.legacyBefore !== undefined ||
+      receipt.legacyAfter !== undefined
+    ) {
+      throw new Error("Fixture v2 receipt lacks its standalone observer binding");
+    }
+    return STANDALONE_RELEASE_OBSERVER;
+  }
+  if (
+    receipt.schemaVersion !==
+      "ti-scale.no-backup-preview-release-receipt.v1" ||
+    receipt.cutoverEligible !== false ||
+    !receipt.legacyAfter
+  ) {
+    throw new Error("Fixture v1 receipt lacks its historical identity binding");
+  }
+  return receipt.legacyAfter;
+}
+
+function observerProofDetail(
+  observerProofSha256: string,
+): Readonly<Record<string, string>> {
+  return { [observerProofField()]: observerProofSha256 };
+}
+
+function observerProofFromDetail(
+  detail: Readonly<Record<string, unknown>> | undefined,
+): string | undefined {
+  const value = detail?.[observerProofField()];
+  return typeof value === "string" ? value : undefined;
 }
 
 function preparedRestoredReceiptCommitment():
@@ -322,18 +403,17 @@ function preparedRestoredReceiptCommitment():
   }
   const preparation = preparations[0]!;
   const receiptSha256 = preparation.detail?.receiptSha256;
-  const legacyIdentitySha256 =
-    preparation.detail?.legacyIdentitySha256;
+  const observerProofSha256 = observerProofFromDetail(preparation.detail);
   if (
     preparation.detail?.receiptPath !== configuration.receiptPath ||
     typeof receiptSha256 !== "string" ||
     !/^[a-f0-9]{64}$/u.test(receiptSha256) ||
-    typeof legacyIdentitySha256 !== "string" ||
-    !/^[a-f0-9]{64}$/u.test(legacyIdentitySha256)
+    typeof observerProofSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(observerProofSha256)
   ) {
     throw new Error("Fixture source receipt restore intent is malformed");
   }
-  return { receiptSha256, legacyIdentitySha256 };
+  return { receiptSha256, observerProofSha256 };
 }
 
 function receiptIntent(
@@ -350,15 +430,16 @@ function receiptIntent(
   const intents = records.map((record) => {
     const receipt = record.detail?.receipt as FixtureReceipt | undefined;
     const intendedSha256 = record.detail?.receiptSha256;
-    const legacyIdentitySha256 = record.detail?.legacyIdentitySha256;
+    const observerProofSha256 = observerProofFromDetail(record.detail);
     if (
       record.detail?.receiptPath !== configuration.receiptPath ||
       !receipt ||
       typeof intendedSha256 !== "string" ||
       intendedSha256 !== receiptSha256(receipt) ||
-      typeof legacyIdentitySha256 !== "string" ||
-      !receipt.legacyAfter ||
-      legacyIdentitySha256 !== releaseTransactionSha256(receipt.legacyAfter)
+      typeof observerProofSha256 !== "string" ||
+      observerProofSha256 !== releaseTransactionSha256(
+        receiptObserverProof(receipt),
+      )
     ) {
       throw new Error(
         `Fixture prepared receipt intent is malformed: ${
@@ -369,9 +450,9 @@ function receiptIntent(
             expectedReceiptPath: configuration.receiptPath,
             intendedSha256,
             computedSha256: receipt ? receiptSha256(receipt) : null,
-            legacyIdentitySha256,
-            receiptLegacyIdentitySha256: receipt?.legacyAfter
-              ? releaseTransactionSha256(receipt.legacyAfter)
+            observerProofSha256,
+            receiptObserverProofSha256: receipt
+              ? releaseTransactionSha256(receiptObserverProof(receipt))
               : null,
           })
         }`,
@@ -380,13 +461,13 @@ function receiptIntent(
     return {
       receipt,
       receiptSha256: intendedSha256,
-      legacyIdentitySha256,
+      observerProofSha256,
     };
   });
   const first = intents[0]!;
   if (intents.some((candidate) =>
     candidate.receiptSha256 !== first.receiptSha256 ||
-    candidate.legacyIdentitySha256 !== first.legacyIdentitySha256
+    candidate.observerProofSha256 !== first.observerProofSha256
   )) {
     throw new Error("Fixture prepared receipt intents conflict");
   }
@@ -410,8 +491,8 @@ function completedReceiptCommitment(
     if (
       record.detail?.receiptPath !== configuration.receiptPath ||
       record.detail?.receiptSha256 !== intent.receiptSha256 ||
-      record.detail?.legacyIdentitySha256 !==
-        intent.legacyIdentitySha256
+      observerProofFromDetail(record.detail) !==
+        intent.observerProofSha256
     ) {
       throw new Error("Fixture receipt completion differs from its intent");
     }
@@ -437,18 +518,18 @@ function completedRestoredReceiptCommitment():
   if (!completion) return undefined;
   const preparation = preparedRestoredReceiptCommitment();
   const receiptSha256 = completion.detail?.receiptSha256;
-  const legacyIdentitySha256 = completion.detail?.legacyIdentitySha256;
+  const observerProofSha256 = observerProofFromDetail(completion.detail);
   if (
     !preparation ||
     preparation.receiptSha256 !== receiptSha256 ||
-    preparation.legacyIdentitySha256 !== legacyIdentitySha256 ||
+    preparation.observerProofSha256 !== observerProofSha256 ||
     completion.detail?.receiptPath !== configuration.receiptPath ||
     typeof receiptSha256 !== "string" ||
-    typeof legacyIdentitySha256 !== "string"
+    typeof observerProofSha256 !== "string"
   ) {
     throw new Error("Fixture restored receipt commitment is malformed");
   }
-  return { receiptSha256, legacyIdentitySha256 };
+  return { receiptSha256, observerProofSha256 };
 }
 
 async function ensureMutation(
@@ -567,12 +648,14 @@ function assertInventoryAndLegacy(
     inventoryAfter,
   );
   assertLegacyIdentityUnchanged(expectedLegacy);
-  return {
+  const common = {
     ...receipt,
-    legacyAfter: expectedLegacy,
     backupPayloadInventoryAfter: inventoryAfter,
     backupPayloadInventoryUnchanged: true,
   };
+  return FORWARD_V2
+    ? common
+    : { ...common, legacyAfter: expectedLegacy };
 }
 
 function initializeDeployment(): void {
@@ -583,17 +666,26 @@ function initializeDeployment(): void {
     configuration.inventoryRoots,
   );
   const receipt: FixtureReceipt = {
-    schemaVersion: "ti-scale.no-backup-full-controller-fixture.v1",
+    schemaVersion: FORWARD_V2
+      ? "ti-scale.no-backup-forward-release-receipt.v2"
+      : "ti-scale.no-backup-preview-release-receipt.v1",
     releaseId: configuration.releaseId,
     status: "prepared",
     backupPolicy: "none",
-    cutoverEligible: false,
+    ...(FORWARD_V2
+      ? {
+        deploymentMode: "current_service" as const,
+        releaseObserver: STANDALONE_RELEASE_OBSERVER,
+      }
+      : {
+        cutoverEligible: false as const,
+        legacyBefore,
+      }),
     rollbackCapability: "none_after_schema_commit",
     sourceSchema: SOURCE_SCHEMA,
     targetSchema: TARGET_SCHEMA,
     source: sourceState(),
     target: targetState(),
-    legacyBefore,
     backupPayloadInventoryBefore: inventoryBefore,
   };
   writeReceipt(receipt);
@@ -604,7 +696,15 @@ function initializeDeployment(): void {
     receiptPath: configuration.receiptPath,
     recoveryIntent: "restore_predeploy",
     identity: {
-      deploymentKind: "no_backup_preview_v1",
+      deploymentKind: FORWARD_V2
+        ? "no_backup_forward_v2"
+        : "no_backup_preview_v1",
+      ...(FORWARD_V2
+        ? {
+          deploymentMode: "current_service",
+          releaseObserver: STANDALONE_RELEASE_OBSERVER,
+        }
+        : { legacyBefore }),
       releaseStartupProtocol: RELEASE_SOURCE_RUNTIME_PROTOCOL,
       targetRuntimeCommitProtocol: RELEASE_TARGET_RUNTIME_COMMIT_PROTOCOL,
       requireRunningStateVerification: true,
@@ -612,7 +712,6 @@ function initializeDeployment(): void {
       rollbackCapability: "none_after_schema_commit",
       predeploy: sourceState(),
       target: targetState(),
-      legacyBefore,
       backupPayloadInventoryBefore: {
         roots: inventoryBefore.roots,
         inventorySha256: inventoryBefore.inventorySha256,
@@ -633,7 +732,13 @@ async function stop(): Promise<void> {
       },
     });
   });
-  assertLegacyIdentityUnchanged(readReceipt().legacyBefore);
+  if (!FORWARD_V2) {
+    const legacyBefore = readReceipt().legacyBefore;
+    if (!legacyBefore) {
+      throw new Error("Fixture v1 receipt lost its historical identity");
+    }
+    assertLegacyIdentityUnchanged(legacyBefore);
+  }
 }
 
 async function withMaintenance<T>(operation: () => Promise<T>): Promise<T> {
@@ -740,6 +845,7 @@ async function commitTarget(): Promise<void> {
       throw new Error("Target fixture state is not exact");
     }
   });
+  await blockForSigkill("target_precommit");
   const journal = readFunctionalReleaseTransactionJournal(
     configuration.journalDirectory,
   );
@@ -749,6 +855,7 @@ async function commitTarget(): Promise<void> {
       targetState(),
     );
   }
+  await blockForSigkill("target_committed");
 }
 
 async function startAndFinalize(forceRecovery: boolean): Promise<void> {
@@ -824,7 +931,9 @@ async function startAndFinalize(forceRecovery: boolean): Promise<void> {
       intent = {
         receipt,
         receiptSha256: receiptSha256(receipt),
-        legacyIdentitySha256: releaseTransactionSha256(legacyProof),
+        observerProofSha256: releaseTransactionSha256(
+          receiptObserverProof(receipt),
+        ),
       };
     }
     if (
@@ -844,7 +953,7 @@ async function startAndFinalize(forceRecovery: boolean): Promise<void> {
           receiptPath: configuration.receiptPath,
           receipt: intent.receipt,
           receiptSha256: intent.receiptSha256,
-          legacyIdentitySha256: intent.legacyIdentitySha256,
+          ...observerProofDetail(intent.observerProofSha256),
           backupPolicy: "none",
         },
       );
@@ -871,7 +980,7 @@ async function startAndFinalize(forceRecovery: boolean): Promise<void> {
         {
           receiptPath: configuration.receiptPath,
           receiptSha256: intent.receiptSha256,
-          legacyIdentitySha256: intent.legacyIdentitySha256,
+          ...observerProofDetail(intent.observerProofSha256),
           backupPolicy: "none",
         },
       );
@@ -894,13 +1003,26 @@ async function startAndFinalize(forceRecovery: boolean): Promise<void> {
         outcome: "deployed",
         receiptPath: configuration.receiptPath,
         backupPolicy: "none",
-        cutoverEligible: false,
+        deploymentMode: FORWARD_V2
+          ? "current_service"
+          : "historical_preview",
         receiptSha256: commitment.receiptSha256,
-        legacyIdentitySha256: commitment.legacyIdentitySha256,
-        receiptLegacyIdentitySha256:
-          commitment.legacyIdentitySha256,
-        reconciliationLegacyIdentitySha256:
-          releaseTransactionSha256(readLegacyIdentity()),
+        ...(FORWARD_V2
+          ? {
+            observerProofSha256: commitment.observerProofSha256,
+            receiptObserverProofSha256:
+              commitment.observerProofSha256,
+            reconciliationObserverProofSha256:
+              releaseTransactionSha256(STANDALONE_RELEASE_OBSERVER),
+          }
+          : {
+            cutoverEligible: false,
+            legacyIdentitySha256: commitment.observerProofSha256,
+            receiptLegacyIdentitySha256:
+              commitment.observerProofSha256,
+            reconciliationLegacyIdentitySha256:
+              releaseTransactionSha256(readLegacyIdentity()),
+          }),
       },
     });
   }
@@ -937,7 +1059,26 @@ async function restoreSourceBeforeSchemaCommit(cause: unknown): Promise<void> {
     });
   });
   await ensureMutation("recovery", "source_state_verification", () => {
-    const state = readState();
+    let state = readState();
+    if (
+      !["source-application", "target-application"].includes(
+        state.application,
+      ) ||
+      !["source-static", "target-static"].includes(state.staticRelease)
+    ) {
+      throw new Error("Source fixture pointers are outside the immutable pair");
+    }
+    if (
+      state.application !== "source-application" ||
+      state.staticRelease !== "source-static"
+    ) {
+      state = {
+        ...state,
+        application: "source-application",
+        staticRelease: "source-static",
+      };
+      writeState(state);
+    }
     if (
       state.schema !== SOURCE_SCHEMA ||
       databaseSchema() !== SOURCE_SCHEMA ||
@@ -987,10 +1128,14 @@ async function restoreSourceBeforeSchemaCommit(cause: unknown): Promise<void> {
   const restoredReceiptSha256 = restoredCommitment?.receiptSha256 ??
     restoredIntent?.receiptSha256 ??
     fileSha256(configuration.receiptPath);
-  const restoredLegacyIdentitySha256 =
-    restoredCommitment?.legacyIdentitySha256 ??
-    restoredIntent?.legacyIdentitySha256 ??
-    releaseTransactionSha256(readLegacyIdentity());
+  const restoredObserverProofSha256 =
+    restoredCommitment?.observerProofSha256 ??
+    restoredIntent?.observerProofSha256 ??
+    releaseTransactionSha256(
+      FORWARD_V2
+        ? STANDALONE_RELEASE_OBSERVER
+        : readLegacyIdentity(),
+    );
   if (restoreState === "unseen") {
     prepareFunctionalReleaseMutation(
       configuration.journalDirectory,
@@ -999,7 +1144,7 @@ async function restoreSourceBeforeSchemaCommit(cause: unknown): Promise<void> {
       {
         receiptPath: configuration.receiptPath,
         receiptSha256: restoredReceiptSha256,
-        legacyIdentitySha256: restoredLegacyIdentitySha256,
+        ...observerProofDetail(restoredObserverProofSha256),
         backupPolicy: "none",
       },
     );
@@ -1011,8 +1156,8 @@ async function restoreSourceBeforeSchemaCommit(cause: unknown): Promise<void> {
     if (
       !restoredIntent ||
       restoredIntent.receiptSha256 !== restoredReceiptSha256 ||
-      restoredIntent.legacyIdentitySha256 !==
-        restoredLegacyIdentitySha256 ||
+      restoredIntent.observerProofSha256 !==
+        restoredObserverProofSha256 ||
       fileSha256(configuration.receiptPath) !==
         restoredIntent.receiptSha256
     ) {
@@ -1026,7 +1171,7 @@ async function restoreSourceBeforeSchemaCommit(cause: unknown): Promise<void> {
         outcome: "already_exact",
         receiptPath: configuration.receiptPath,
         receiptSha256: restoredReceiptSha256,
-        legacyIdentitySha256: restoredLegacyIdentitySha256,
+        ...observerProofDetail(restoredObserverProofSha256),
         backupPolicy: "none",
       },
     );
@@ -1074,7 +1219,9 @@ async function restoreSourceBeforeSchemaCommit(cause: unknown): Promise<void> {
       intent = {
         receipt,
         receiptSha256: receiptSha256(receipt),
-        legacyIdentitySha256: releaseTransactionSha256(legacyProof),
+        observerProofSha256: releaseTransactionSha256(
+          receiptObserverProof(receipt),
+        ),
       };
     }
     if (
@@ -1094,7 +1241,7 @@ async function restoreSourceBeforeSchemaCommit(cause: unknown): Promise<void> {
           receiptPath: configuration.receiptPath,
           receipt: intent.receipt,
           receiptSha256: intent.receiptSha256,
-          legacyIdentitySha256: intent.legacyIdentitySha256,
+          ...observerProofDetail(intent.observerProofSha256),
           backupPolicy: "none",
         },
       );
@@ -1120,7 +1267,7 @@ async function restoreSourceBeforeSchemaCommit(cause: unknown): Promise<void> {
         {
           receiptPath: configuration.receiptPath,
           receiptSha256: intent.receiptSha256,
-          legacyIdentitySha256: intent.legacyIdentitySha256,
+          ...observerProofDetail(intent.observerProofSha256),
           backupPolicy: "none",
         },
       );
@@ -1143,14 +1290,35 @@ async function restoreSourceBeforeSchemaCommit(cause: unknown): Promise<void> {
         outcome: "predeploy_restored",
         receiptPath: configuration.receiptPath,
         backupPolicy: "none",
+        deploymentMode: FORWARD_V2
+          ? "current_service"
+          : "historical_preview",
         receiptSha256: commitment.receiptSha256,
-        legacyIdentitySha256: commitment.legacyIdentitySha256,
-        receiptLegacyIdentitySha256:
-          commitment.legacyIdentitySha256,
-        reconciliationLegacyIdentitySha256:
-          releaseTransactionSha256(readLegacyIdentity()),
+        ...(FORWARD_V2
+          ? {
+            observerProofSha256: commitment.observerProofSha256,
+            receiptObserverProofSha256:
+              commitment.observerProofSha256,
+            reconciliationObserverProofSha256:
+              releaseTransactionSha256(STANDALONE_RELEASE_OBSERVER),
+          }
+          : {
+            legacyIdentitySha256: commitment.observerProofSha256,
+            receiptLegacyIdentitySha256:
+              commitment.observerProofSha256,
+            reconciliationLegacyIdentitySha256:
+              releaseTransactionSha256(readLegacyIdentity()),
+          }),
         restoredReceiptSha256,
-        restoredLegacyIdentitySha256,
+        ...(FORWARD_V2
+          ? {
+            restoredObserverProofSha256:
+              restoredCommitment.observerProofSha256,
+          }
+          : {
+            restoredLegacyIdentitySha256:
+              restoredCommitment.observerProofSha256,
+          }),
       },
     });
   }
@@ -1239,6 +1407,12 @@ async function runController(): Promise<NoBackupForwardOnlyControllerResult> {
       commitTarget,
       startAndFinalize,
       observedSchema: databaseSchema,
+      durableTargetCommitted: () =>
+        Boolean(functionalReleaseTargetCommitRecord(
+          readFunctionalReleaseTransactionJournal(
+            configuration.journalDirectory,
+          ),
+        )),
       restoreSourceBeforeSchemaCommit,
       ensureTargetCommitted,
       recordForwardRecoveryFailure: (primaryFailure, recoveryFailure) => {

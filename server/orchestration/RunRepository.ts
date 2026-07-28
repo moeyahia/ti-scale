@@ -827,7 +827,10 @@ export class RunRepository {
     run: DurableRun,
     action: DurableAction,
     toolId: string,
-    executionBinding: "reviewed_local_process" | "reviewed_windows_identity_process",
+    executionBinding:
+      | "reviewed_local_process"
+      | "reviewed_windows_identity_process"
+      | "reviewed_local_exploit_intelligence",
   ): CurrentActionBoundaryResult {
     const base = this.authorizePersistedAction(run, action);
     if (!base.allowed) return base;
