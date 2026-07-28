@@ -100,22 +100,46 @@ function stableRuntimeAdapterProof(
   attestation: RuntimeToolManifest["runtimeAdapterAttestation"],
 ): unknown {
   if (!attestation) return null;
+  // Receipt, component, parent, and aggregate binding hashes include bounded
+  // observation timestamps. They remain mandatory in each issued route proof,
+  // but cannot identify the stable runtime generation or every healthy
+  // coordinator refresh would look like a policy/tool mutation.
   return {
     schemaVersion: attestation.schemaVersion,
     source: attestation.source,
     toolId: attestation.toolId,
     dependencyId: attestation.dependencyId ?? null,
-    parentBindingSha256: attestation.parentBindingSha256 ?? null,
     executionJourneys: [...attestation.executionJourneys].sort(),
     binding: {
       configurationSha256: attestation.binding.configurationSha256,
-      providerReceiptSha256: attestation.binding.providerReceiptSha256,
       localManifestSha256: attestation.binding.localManifestSha256,
-      componentReceiptSha256s:
-        [...attestation.binding.componentReceiptSha256s].sort(),
     },
-    bindingSha256: attestation.bindingSha256,
   };
+}
+
+function plannerBindingToolId(
+  binding: LocalAutonomousPlannerBindingReceipt,
+): string {
+  return "executionBinding" in binding ? binding.toolId : binding.toolName;
+}
+
+function selectedToolClosure(
+  manifests: RuntimeSourceManifests,
+  executionBindings: readonly LocalAutonomousPlannerBindingReceipt[],
+): RuntimeToolManifest[] {
+  const toolsById = new Map(
+    manifests.tools.map((tool) => [tool.id, tool] as const),
+  );
+  const selectedIds = new Set<string>();
+  const pending = executionBindings.map(plannerBindingToolId);
+  while (pending.length > 0) {
+    const toolId = pending.pop()!;
+    if (selectedIds.has(toolId)) continue;
+    selectedIds.add(toolId);
+    const tool = toolsById.get(toolId);
+    if (tool) pending.push(...(tool.constituentToolIds ?? []));
+  }
+  return manifests.tools.filter(({ id }) => selectedIds.has(id));
 }
 
 /**
@@ -130,15 +154,65 @@ function stableRuntimeGenerationPreimage(
   manifests: RuntimeSourceManifests,
   executionBindings: readonly LocalAutonomousPlannerBindingReceipt[],
 ): unknown {
+  const actionClassIds = new Set<string>(
+    executionBindings.map(({ actionClassId }) => actionClassId),
+  );
+  const tools = selectedToolClosure(manifests, executionBindings);
+  const toolIds = new Set<string>(tools.map(({ id }) => id));
+  const agentIds = new Set<string>(
+    executionBindings.map(({ agentId }) => agentId),
+  );
+  const modelIdsByProvider = new Map<string, Set<string>>();
+  for (const binding of executionBindings) {
+    const modelIds = modelIdsByProvider.get(binding.providerId)
+      ?? new Set<string>();
+    modelIds.add(binding.modelId);
+    modelIdsByProvider.set(binding.providerId, modelIds);
+  }
+  const mcpServerIds = new Set(
+    [
+      ...tools.flatMap(({ mcpServerId }) => mcpServerId ? [mcpServerId] : []),
+      ...executionBindings.flatMap((binding) =>
+        "executionBinding" in binding ? [] : [binding.mcpServerId]),
+    ],
+  );
+  const agents = manifests.agents.filter(({ id }) => agentIds.has(id));
+  const evidenceTypeIds = new Set<string>(
+    tools.flatMap(({ evidenceTypeIds: ids }) => ids),
+  );
+  const capabilityById = new Map(
+    manifests.capabilities.map((capability) =>
+      [capability.id, capability] as const),
+  );
+  const capabilityIds = new Set<string>(
+    agents.flatMap(({ capabilityIds: ids }) => ids.filter((id) => {
+      const capability = capabilityById.get(id);
+      return capability !== undefined
+        && (
+          capability.actionClassIds.some((actionClassId) =>
+            actionClassIds.has(actionClassId))
+          || (capability.evidenceTypeIds ?? []).some((evidenceTypeId) =>
+            evidenceTypeIds.has(evidenceTypeId))
+        );
+    })),
+  );
+  const deliverableIds = new Set<string>(
+    tools.flatMap(({ deliverableIds: ids = [] }) => ids),
+  );
   return {
     schemaVersion: RUNTIME_GENERATION_SCHEMA,
-    riskClasses: [...manifests.riskClasses].sort((left, right) =>
+    riskClasses: manifests.riskClasses.filter((riskClass) =>
+      tools.some(({ riskClassIds: ids }) => ids.includes(riskClass.id))
+      || riskClass.actionClassIds.some((id) => actionClassIds.has(id))
+    ).sort((left, right) => left.id.localeCompare(right.id, "en-US")),
+    evidenceKinds: manifests.evidenceKinds.filter(({ evidenceTypeIds: ids }) =>
+      ids.some((id) => evidenceTypeIds.has(id))
+    ).sort((left, right) => left.id.localeCompare(right.id, "en-US")),
+    capabilities: manifests.capabilities.filter(({ id }) =>
+      capabilityIds.has(id)
+    ).sort((left, right) =>
       left.id.localeCompare(right.id, "en-US")),
-    evidenceKinds: [...manifests.evidenceKinds].sort((left, right) =>
-      left.id.localeCompare(right.id, "en-US")),
-    capabilities: [...manifests.capabilities].sort((left, right) =>
-      left.id.localeCompare(right.id, "en-US")),
-    tools: manifests.tools.map((tool) => ({
+    tools: tools.map((tool) => ({
       id: tool.id,
       label: tool.label,
       available: tool.available,
@@ -173,33 +247,67 @@ function stableRuntimeGenerationPreimage(
         ),
       })).sort((left, right) => left.id.localeCompare(right.id, "en-US")),
     })).sort((left, right) => left.id.localeCompare(right.id, "en-US")),
-    mcpServers: [...manifests.mcpServers].sort((left, right) =>
-      left.id.localeCompare(right.id, "en-US")),
-    agents: manifests.agents.map((agent) => ({
-      ...agent,
-      capabilityIds: [...agent.capabilityIds].sort(),
-      actionClassIds: [...(agent.actionClassIds ?? [])].sort(),
-      toolIds: [...agent.toolIds].sort(),
-      deliverableIds: [...(agent.deliverableIds ?? [])].sort(),
-      modelRefs: [...agent.modelRefs].sort((left, right) =>
+    mcpServers: manifests.mcpServers.filter(({ id }) =>
+      mcpServerIds.has(id)
+    ).map((server) => ({
+      id: server.id,
+      label: server.label,
+      status: server.status,
+      toolIds: server.toolIds.filter((id) => toolIds.has(id)).sort(),
+    })).sort((left, right) => left.id.localeCompare(right.id, "en-US")),
+    agents: agents.map((agent) => ({
+      id: agent.id,
+      label: agent.label,
+      available: agent.available,
+      capabilityIds: agent.capabilityIds.filter((id) =>
+        capabilityIds.has(id)).sort(),
+      actionClassIds: (agent.actionClassIds ?? []).filter((id) =>
+        actionClassIds.has(id)).sort(),
+      toolIds: agent.toolIds.filter((id) => toolIds.has(id)).sort(),
+      deliverableIds: (agent.deliverableIds ?? []).filter((id) =>
+        deliverableIds.has(id)).sort(),
+      modelRefs: agent.modelRefs.filter(({ providerId, modelId }) =>
+        executionBindings.some((binding) =>
+          binding.agentId === agent.id
+          && binding.providerId === providerId
+          && binding.modelId === modelId
+        )).sort((left, right) =>
         `${left.providerId}\u0000${left.modelId}`.localeCompare(
           `${right.providerId}\u0000${right.modelId}`,
           "en-US",
         )),
     })).sort((left, right) => left.id.localeCompare(right.id, "en-US")),
-    providers: manifests.providers.map((provider) => ({
+    providers: manifests.providers.filter(({ id }) =>
+      modelIdsByProvider.has(id)).map((provider) => ({
       id: provider.id,
       authenticated: provider.authenticated,
       healthy: provider.healthy,
-      models: [...provider.models].sort((left, right) =>
+      models: provider.models.filter(({ id }) =>
+        modelIdsByProvider.get(provider.id)!.has(id)
+      ).sort((left, right) =>
         left.id.localeCompare(right.id, "en-US")),
     })).sort((left, right) => left.id.localeCompare(right.id, "en-US")),
-    mcpRoutes: projection.mcpServers.map((server) => {
+    mcpRoutes: projection.mcpServers.flatMap((server) => {
+      const policy = server.policy;
+      if (
+        !mcpServerIds.has(server.id)
+        || !isSpecialistMcpExecutionPolicy(policy)
+      ) return [];
       const attestation = server.capabilityAttestation;
-      return {
+      return [{
         id: server.id,
         status: server.status,
-        policy: server.policy,
+        policy: {
+          schemaVersion: policy.schemaVersion,
+          enabled: policy.enabled,
+          startPermitted: policy.startPermitted,
+          executionAuthorization: policy.executionAuthorization,
+          autonomousExecution: policy.autonomousExecution,
+          exactInventoryRequired: policy.exactInventoryRequired,
+          directCommanderToolsAllowed:
+            policy.directCommanderToolsAllowed,
+          assignedAgents: [...policy.assignedAgents].sort(),
+        },
         capability: attestation
           ? {
               schemaVersion: attestation.schemaVersion,
@@ -214,7 +322,7 @@ function stableRuntimeGenerationPreimage(
               executionAuthorization: attestation.executionAuthorization,
             }
           : null,
-      };
+      }];
     }).sort((left, right) => left.id.localeCompare(right.id, "en-US")),
     exactExecutionBindings: [...executionBindings].sort((left, right) =>
       left.bindingId.localeCompare(right.bindingId, "en-US")),

@@ -28,7 +28,10 @@ import type {
 } from "../../command-runtime";
 import { RuntimeRepository } from "../../command-runtime";
 import { createDatabaseConnection, migrateDatabase, type SqliteDatabase } from "../../db";
-import { ACTION_CLASS_IDS } from "../../domain";
+import {
+  ACTION_CLASS_IDS,
+  createRuntimeAdapterAttestation,
+} from "../../domain";
 import { MissionIntakeService } from "../../intake";
 import {
   MemoryRepository,
@@ -85,6 +88,7 @@ const CONTRACT_HASH = "c".repeat(64);
 const MODEL_CONFIGURATION_HASH = "a".repeat(64);
 const CRITERION = "The disposable authorized host baseline is supported by verified evidence";
 const TOOL_ID = "tool-disposable-host-baseline";
+const COMPOSITE_TOOL_ID = "tool-disposable-host-baseline-composite";
 const MCP_SERVER_ID = "fixture-specialist-mcp";
 const AGENT_ID = "ReconScout";
 const MODEL_CONFIGURATION_ID = "modelcfg-autonomous-activation-fixture";
@@ -349,16 +353,46 @@ function capabilityAttestation(): McpCapabilityAttestation {
   };
 }
 
-function localToolAttestation(observedAt: string, expiresAt: string) {
+function localToolAttestation(
+  observedAt: string,
+  expiresAt: string,
+  executableMarker = "4",
+) {
   return {
     schemaVersion: "ti-scale.local-tool-activation-receipt.v1" as const,
     source: "local_guided_tool_activation" as const,
     manifestSha256: "1".repeat(64),
     toolBindingSha256: "2".repeat(64),
     preflightBindingSha256: "3".repeat(64),
-    executableSha256: "4".repeat(64),
+    executableSha256: executableMarker.repeat(64),
     observedAt,
     expiresAt,
+  };
+}
+
+function compositeLocalActivationProjection(
+  modelConfigurationHash: string,
+  attestation: ReturnType<typeof localToolAttestation>,
+): RuntimeProjectionInput {
+  const base = localActivationProjection(modelConfigurationHash, attestation);
+  const manifests = base.capabilityManifests!;
+  const constituent = manifests.tools.find(({ id }) => id === TOOL_ID)!;
+  const composite = {
+    ...constituent,
+    id: COMPOSITE_TOOL_ID,
+    label: "Disposable host baseline composite fixture",
+    constituentToolIds: [TOOL_ID],
+    dependencies: [],
+  };
+  return {
+    ...base,
+    capabilityManifests: {
+      ...manifests,
+      tools: [...manifests.tools, composite],
+      agents: manifests.agents.map((agent) => agent.id === AGENT_ID
+        ? { ...agent, toolIds: [...agent.toolIds, COMPOSITE_TOOL_ID] }
+        : agent),
+    },
   };
 }
 
@@ -388,6 +422,110 @@ function localActivationProjection(
   };
 }
 
+function runtimeAdapterAttestation(
+  observedAt: string,
+  expiresAt: string,
+  providerReceiptMarker: string,
+  componentReceiptMarker: string,
+) {
+  return createRuntimeAdapterAttestation({
+    toolId: TOOL_ID,
+    executionJourneys: ["autonomous"],
+    binding: {
+      configurationSha256: "9".repeat(64),
+      providerReceiptSha256: providerReceiptMarker.repeat(64),
+      localManifestSha256: "8".repeat(64),
+      componentReceiptSha256s: [componentReceiptMarker.repeat(64)],
+    },
+    observedAt,
+    expiresAt,
+  });
+}
+
+function runtimeAdapterActivationProjection(
+  modelConfigurationHash: string,
+  attestation: ReturnType<typeof runtimeAdapterAttestation>,
+): RuntimeProjectionInput {
+  const base = projection(modelConfigurationHash);
+  const manifest = base.capabilityManifests!;
+  const sourceTool = manifest.tools[0]!;
+  const { mcpServerId: _mcpServerId, ...localTool } = sourceTool;
+  return {
+    ...base,
+    mcpServers: [],
+    capabilityManifests: {
+      ...manifest,
+      tools: [{
+        ...localTool,
+        dependencies: [],
+        runtimeAdapterAttestation: attestation,
+      }],
+      mcpServers: [],
+    },
+  };
+}
+
+function withUnrelatedMcpObservation(
+  input: RuntimeProjectionInput,
+  observedAt: string,
+  status: "unknown" | "healthy",
+): RuntimeProjectionInput {
+  return {
+    ...input,
+    mcpServers: [
+      ...input.mcpServers,
+      {
+        id: "public-nvd-observation-fixture",
+        name: "Unrelated public intelligence observation",
+        transport: "in-memory-test-only",
+        status,
+        capabilities: [],
+        policy: {
+          executionAuthorization: "none",
+          autonomousExecution: false,
+          readOnly: true,
+          attestedAt: observedAt,
+          expiresAt: new Date(
+            Date.parse(observedAt) + 60_000,
+          ).toISOString(),
+          reason: status === "healthy"
+            ? "The unrelated read-only observer refreshed."
+            : "The unrelated read-only observer is probing.",
+        },
+        lastCheckedAt: observedAt,
+      },
+    ],
+  };
+}
+
+function withUnrelatedProviderCatalogModel(
+  input: RuntimeProjectionInput,
+  modelId: string,
+): RuntimeProjectionInput {
+  const manifests = input.capabilityManifests!;
+  return {
+    ...input,
+    capabilityManifests: {
+      ...manifests,
+      providers: manifests.providers.map((provider) => ({
+        ...provider,
+        models: [
+          ...provider.models,
+          {
+            id: modelId,
+            displayName: "Unrelated catalog model",
+            toolCalling: false,
+            structuredOutput: true,
+            enforcement: "advisor_only" as const,
+            compatibleActionClassIds: [],
+            disclosureClasses: ["public"],
+          },
+        ],
+      })),
+    },
+  };
+}
+
 function withRuntimeGenerationLabel(
   input: RuntimeProjectionInput,
   label: string,
@@ -407,22 +545,26 @@ function withRuntimeGenerationLabel(
 
 function localExecutionBinding(
   modelConfigurationHash: string,
+  toolId = TOOL_ID,
 ): LocalAutonomousPlannerBindingReceipt {
   return {
-    bindingId: "binding-disposable-host-baseline-local-v1",
+    bindingId: toolId === TOOL_ID
+      ? "binding-disposable-host-baseline-local-v1"
+      : "binding-disposable-host-baseline-composite-local-v1",
     actionClassId: "active_host_discovery",
     agentId: AGENT_ID,
     providerId: "fixture-enforcing-provider",
     modelId: "fixture-reviewed-model",
     modelConfigurationHash,
     executionBinding: "reviewed_local_process",
-    toolId: TOOL_ID,
+    toolId,
   };
 }
 
 function seedLocalActivationLifecycle(
   database: SqliteDatabase,
   modelConfigurationHash: string,
+  selectedToolId = TOOL_ID,
 ) {
   const now = NOW.toISOString();
   const contextPackId = "context-pack-local-activation-lifecycle";
@@ -540,10 +682,10 @@ function seedLocalActivationLifecycle(
       RUN_ID,
       action.stepId,
       action.assignmentId,
-      TOOL_ID,
+      selectedToolId,
       action.fingerprint,
       JSON.stringify({
-        input: { toolId: TOOL_ID, target: TARGET },
+        input: { toolId: selectedToolId, target: TARGET },
         orchestration: {
           target: TARGET,
           kind: "tool",
@@ -2278,6 +2420,145 @@ describe("disposable Autonomous activation proof", () => {
     `).get(second.receiptId, lifecycle.actionRows[1].id)).toEqual({
       count: 1,
     });
+  });
+
+  test("keeps a live generation stable across equivalent runtime-adapter receipt refreshes", () => {
+    const db = database();
+    seed(db);
+    const configurationHash = modelConfigurationBindingHash(
+      new ModelConfigurationRepository(db).getConfiguration(
+        MODEL_CONFIGURATION_ID,
+      ),
+    );
+    const lifecycle = seedLocalActivationLifecycle(db, configurationHash);
+    let current = NOW;
+    let liveProjection = withUnrelatedProviderCatalogModel(
+      withUnrelatedMcpObservation(
+        runtimeAdapterActivationProjection(
+          configurationHash,
+          runtimeAdapterAttestation(
+            NOW.toISOString(),
+            "2026-07-19T10:31:00.000Z",
+            "1",
+            "2",
+          ),
+        ),
+        NOW.toISOString(),
+        "unknown",
+      ),
+      "fixture-unrelated-model-before-refresh",
+    );
+    const service = new AutonomousActivationRuntimeService(
+      db,
+      () => liveProjection,
+      () => current,
+      [localExecutionBinding(configurationHash)],
+    );
+    const first = service.ensureIssued({
+      missionId: MISSION_ID,
+      runId: RUN_ID,
+      brainContextPackId: lifecycle.contextPackId,
+      issuedBy: "fixture-runtime-adapter",
+    });
+    service.verifyAndBind({
+      runId: RUN_ID,
+      bindingType: "plan_version",
+      subjectId: lifecycle.planId,
+      subjectDigest: lifecycle.planHash,
+      planId: lifecycle.planId,
+      contextPackId: lifecycle.contextPackId,
+      boundBy: "fixture-runtime-adapter",
+    });
+
+    current = new Date("2026-07-19T10:30:30.000Z");
+    liveProjection = withUnrelatedProviderCatalogModel(
+      withUnrelatedMcpObservation(
+        runtimeAdapterActivationProjection(
+          configurationHash,
+          runtimeAdapterAttestation(
+            current.toISOString(),
+            "2026-07-19T10:31:30.000Z",
+            "3",
+            "4",
+          ),
+        ),
+        current.toISOString(),
+        "healthy",
+      ),
+      "fixture-unrelated-model-after-refresh",
+    );
+
+    expect(service.verifyCurrent({ runId: RUN_ID })).toMatchObject({
+      receiptId: first.receiptId,
+      runtimeGenerationHash: first.runtimeGenerationHash,
+    });
+    expect(service.verifyAndBind({
+      runId: RUN_ID,
+      bindingType: "dispatch",
+      subjectId: lifecycle.actionRows[0].id,
+      subjectDigest: lifecycle.actionRows[0].fingerprint,
+      planId: lifecycle.planId,
+      stepId: lifecycle.actionRows[0].stepId,
+      actionId: lifecycle.actionRows[0].id,
+      contextPackId: lifecycle.contextPackId,
+      boundBy: "fixture-runtime-adapter",
+    }).receiptId).toBe(first.receiptId);
+    expect(db.prepare(`
+      SELECT COUNT(*) AS count FROM autonomous_activation_receipts
+      WHERE run_id = ?
+    `).get(RUN_ID)).toEqual({ count: 1 });
+  });
+
+  test("rejects a live composite generation when a constituent executable changes", () => {
+    const db = database();
+    seed(db);
+    const configurationHash = modelConfigurationBindingHash(
+      new ModelConfigurationRepository(db).getConfiguration(
+        MODEL_CONFIGURATION_ID,
+      ),
+    );
+    const lifecycle = seedLocalActivationLifecycle(
+      db,
+      configurationHash,
+      COMPOSITE_TOOL_ID,
+    );
+    let current = NOW;
+    let liveProjection = compositeLocalActivationProjection(
+      configurationHash,
+      localToolAttestation(
+        NOW.toISOString(),
+        "2026-07-19T10:31:00.000Z",
+        "4",
+      ),
+    );
+    const service = new AutonomousActivationRuntimeService(
+      db,
+      () => liveProjection,
+      () => current,
+      [localExecutionBinding(configurationHash, COMPOSITE_TOOL_ID)],
+    );
+    service.ensureIssued({
+      missionId: MISSION_ID,
+      runId: RUN_ID,
+      brainContextPackId: lifecycle.contextPackId,
+      issuedBy: "fixture-composite-runtime",
+    });
+
+    current = new Date("2026-07-19T10:30:30.000Z");
+    liveProjection = compositeLocalActivationProjection(
+      configurationHash,
+      localToolAttestation(
+        current.toISOString(),
+        "2026-07-19T10:31:30.000Z",
+        "5",
+      ),
+    );
+
+    expect(() => service.verifyCurrent({ runId: RUN_ID })).toThrow(
+      expect.objectContaining({
+        code: "activation_receipt_runtime_generation_drift",
+      }),
+    );
   });
 
   test("uses the latest heartbeat token to close a dispatch failure after the original lease TTL", async () => {
