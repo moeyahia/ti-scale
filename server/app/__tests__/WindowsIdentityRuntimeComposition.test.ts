@@ -3,9 +3,11 @@ import { lstat, readFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 import type { RuntimeSourceManifests } from "../../domain";
 import {
+  CapabilitySelfTestService,
   EngagementWorkspaceResolver,
   ToolBindingReadinessRunner,
   ToolExecutionPreflightService,
+  type CapabilityLocalHealthSnapshot,
   type ToolExecutableIdentity,
   type ToolExecutionPreflightEnvironment,
 } from "../../system-capabilities";
@@ -199,9 +201,10 @@ describe("Windows identity runtime composition", () => {
   test("joins target-free executable receipts to real adapter receipts without granting mission execution", async () => {
     const registry = new WindowsIdentityCapabilityRegistry();
     const processAdapter = await adapter(registry);
+    const runner = await readyRunner(registry);
     const activation = await activateWindowsIdentityRuntime({
       registry,
-      runner: await readyRunner(registry),
+      runner,
       adapter: processAdapter,
       now: NOW,
     });
@@ -247,6 +250,60 @@ describe("Windows identity runtime composition", () => {
     expect(composed.capabilityManifests?.tools.filter(({ available }) => available)).toHaveLength(3);
     expect(processAdapter.readiness("kali:smbclient-share-list")?.status).toBe("ready");
     expect(processAdapter.readiness("kali:nxc-smb-summary")).toBeNull();
+
+    const localHealth = {
+      checkedAt: NOW.toISOString(),
+      database: {
+        healthy: true,
+        integrity: ["ok"],
+        integrityStatus: "verified",
+        integrityCheckedAt: NOW.toISOString(),
+        integritySource: "startup",
+        journalMode: "wal",
+        foreignKeys: true,
+        busyTimeoutMs: 5_000,
+        currentMigration: 60,
+        pendingOutbox: 0,
+        checkedAt: NOW.toISOString(),
+      },
+      eventStream: { started: true, subscribers: 0 },
+      secondBrain: {
+        health: "healthy",
+        databaseHealthy: true,
+        canonicalStoreAvailable: true,
+        lexicalIndexAvailable: true,
+        lexicalIndexSynchronized: true,
+        vaultProjection: {
+          status: "healthy",
+          configuredConnections: 1,
+          connectedConnections: 1,
+          reachableConnections: 1,
+          healthVerifiedConnections: 1,
+          reason: "The bounded fixture Vault is healthy.",
+        },
+        reason: "The bounded fixture Brain is healthy.",
+      },
+    } satisfies CapabilityLocalHealthSnapshot;
+    const selfTests = new CapabilitySelfTestService({
+      repository: { read: () => localHealth },
+      readRuntimeProjection: () => composed,
+      readToolExecutionPreflight: (toolId) =>
+        runner.readToolExecutionPreflight(toolId),
+      clock: () => NOW,
+    }).snapshot();
+    for (const toolId of activation.readyToolIds) {
+      expect(selfTests.results.find(({ component }) => component.id === toolId))
+        .toMatchObject({
+          status: "pass",
+          availability: "available",
+          freshness: { state: "fresh" },
+        });
+    }
+    expect(selfTests.results.find(({ component }) =>
+      component.id === "kali:nxc-smb-summary")).toMatchObject({
+      status: "fail",
+      availability: "unavailable",
+    });
   });
 
   test("keeps every tool and the specialist unavailable when the sandbox identity cannot be attested", async () => {

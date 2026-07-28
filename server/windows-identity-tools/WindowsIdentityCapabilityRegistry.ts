@@ -18,6 +18,7 @@ import {
 
 export const WINDOWS_IDENTITY_REGISTRY_VERSION =
   "windows-identity-2026.07.20-v1" as const;
+const SHA256 = /^[a-f0-9]{64}$/u;
 
 export interface WindowsIdentityAdapterBoundaryReadiness {
   readonly workspaceConfinementReady: boolean;
@@ -256,6 +257,36 @@ export class WindowsIdentityCapabilityRegistry {
       tools: this.pack.definitions.map((definition) => {
         const receipt = byTool.get(definition.toolId);
         const isAvailable = available.get(definition.toolId) === true;
+        const observedAt = receipt ? validTime(receipt.observedAt) : null;
+        const expiresAt = receipt ? validTime(receipt.expiresAt) : null;
+        const receiptBoundToTool = receipt !== undefined
+          && receipt.schemaVersion === WINDOWS_IDENTITY_READINESS_SCHEMA_VERSION
+          && receipt.toolId === definition.toolId
+          && receipt.executablePath === definition.executable.path
+          && receipt.expectedExecutableSha256 === definition.executable.sha256
+          && receipt.observedExecutableSha256 === definition.executable.sha256
+          && SHA256.test(this.descriptor.manifestSha256)
+          && SHA256.test(receipt.registryBindingSha256)
+          && typeof receipt.preflightBindingSha256 === "string"
+          && SHA256.test(receipt.preflightBindingSha256)
+          && observedAt !== null
+          && expiresAt !== null
+          && expiresAt > observedAt;
+        const attestation = receiptBoundToTool ? {
+          schemaVersion: "ti-scale.local-tool-activation-receipt.v1" as const,
+          source: "local_guided_tool_activation" as const,
+          manifestSha256: this.descriptor.manifestSha256,
+          toolBindingSha256: receipt.registryBindingSha256,
+          preflightBindingSha256: receipt.preflightBindingSha256!,
+          executableSha256: definition.executable.sha256,
+          observedAt: receipt.observedAt,
+          expiresAt: receipt.expiresAt,
+        } : undefined;
+        const dependency = (id: string, ready: boolean) => ({
+          id,
+          ready,
+          ...(attestation ? { attestation } : {}),
+        });
         return {
           id: definition.toolId,
           label: definition.label,
@@ -267,14 +298,20 @@ export class WindowsIdentityCapabilityRegistry {
           evidenceTypeIds: [definition.evidenceTypeId],
           riskClassIds: ["ti-scale:network"],
           dependencies: [
-            { id: "operator-review", ready: true },
-            { id: "executable-integrity", ready: receipt?.observedExecutableSha256 === definition.executable.sha256 },
-            { id: "isolated-target-free-readiness", ready: receipt?.status === "ready" },
-            { id: "direct-argv-adapter", ready: receipt?.directArgv === true && receipt?.shell === false },
-            { id: "workspace-confinement", ready: receipt?.workspaceConfinementReady === true },
-            { id: "credential-isolation", ready: receipt?.credentialIsolationReady === true },
-            { id: "output-bound", ready: receipt?.outputBoundReady === true },
-            { id: "cancellation", ready: receipt?.cancellationReady === true },
+            dependency("operator-review", true),
+            dependency(
+              "executable-integrity",
+              receipt?.observedExecutableSha256 === definition.executable.sha256,
+            ),
+            dependency("isolated-target-free-readiness", receipt?.status === "ready"),
+            dependency(
+              "direct-argv-adapter",
+              receipt?.directArgv === true && receipt?.shell === false,
+            ),
+            dependency("workspace-confinement", receipt?.workspaceConfinementReady === true),
+            dependency("credential-isolation", receipt?.credentialIsolationReady === true),
+            dependency("output-bound", receipt?.outputBoundReady === true),
+            dependency("cancellation", receipt?.cancellationReady === true),
           ],
         };
       }),

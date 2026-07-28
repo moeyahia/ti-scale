@@ -99,6 +99,15 @@ describe("Windows identity capability registry", () => {
     expect(manifests.tools.every(({ available }) => available)).toBeTrue();
     expect(manifests.tools.every(({ executionJourneys }) =>
       JSON.stringify(executionJourneys) === JSON.stringify(["guided"]))).toBeTrue();
+    expect(manifests.tools.every(({ dependencies }) =>
+      dependencies?.every(({ attestation }) =>
+        attestation?.schemaVersion === "ti-scale.local-tool-activation-receipt.v1"
+        && attestation.source === "local_guided_tool_activation"
+        && attestation.manifestSha256 === registry.descriptor.manifestSha256
+        && attestation.preflightBindingSha256 === "a".repeat(64)
+        && attestation.executableSha256.length === 64
+        && attestation.observedAt === CHECKED
+        && attestation.expiresAt === EXPIRES) === true)).toBeTrue();
     expect(manifests.agents[0]).toMatchObject({
       id: "specialist:windows-identity",
       available: true,
