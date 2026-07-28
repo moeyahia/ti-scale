@@ -20,6 +20,7 @@ import {
   type CanonicalReportPresentation,
   type CanonicalReportGeneration,
 } from "../reports";
+import { RunMetricsService } from "../run-intelligence";
 import {
   AUTONOMOUS_IP_EVIDENCE_VERIFIER_SCHEMA_VERSION,
 } from "./AutonomousIpEvidenceVerifier";
@@ -143,6 +144,11 @@ export interface AutonomousTerminalDeliverableResult {
   readonly runId: string;
   readonly selectedDeliverableIds: readonly DeliverableId[];
   readonly findingIds: readonly string[];
+  /**
+   * Reproducible metric projection computed from canonical records after the
+   * terminal transition, findings, and report artifacts have materialized.
+   */
+  readonly runMetricsSnapshotId: string;
   readonly report: CanonicalReportGeneration | null;
   readonly idempotent: true;
 }
@@ -540,11 +546,16 @@ export class AutonomousTerminalDeliverableService implements AutonomousTerminalD
     const report = selected.length > 0
       ? this.#generateReport(run, this.#resolveTerminalReportPreferences(run))
       : null;
+    const runMetricsSnapshot = new RunMetricsService(
+      this.database,
+      this.#clock,
+    ).recomputeAndStore(run.id);
     return Object.freeze({
       schemaVersion: AUTONOMOUS_TERMINAL_DELIVERABLE_SCHEMA_VERSION,
       runId,
       selectedDeliverableIds: Object.freeze([...selectedDeliverableIds]),
       findingIds: Object.freeze(findingIds),
+      runMetricsSnapshotId: runMetricsSnapshot.id,
       report,
       idempotent: true,
     });

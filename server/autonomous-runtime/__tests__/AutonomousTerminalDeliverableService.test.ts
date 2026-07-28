@@ -684,8 +684,18 @@ describe("AutonomousTerminalDeliverableService", () => {
     expect(first.deliverables.selectedDeliverableIds)
       .toEqual(["machine_readable_export", "pdf_html_markdown_report"]);
     expect(first.deliverables.findingIds).toEqual([]);
+    expect(first.deliverables.runMetricsSnapshotId)
+      .toMatch(/^run_metrics_[a-f0-9]{24}$/u);
     expect(first.deliverables.report?.artifacts).toHaveLength(2);
     expect(contentFiles(artifactRoot)).toHaveLength(2);
+    expect(database.prepare(`
+      SELECT id, run_id, through_event_sequence
+      FROM run_metrics_snapshots WHERE id = ?
+    `).get(first.deliverables.runMetricsSnapshotId)).toEqual({
+      id: first.deliverables.runMetricsSnapshotId,
+      run_id: RUN_ID,
+      through_event_sequence: expect.any(Number),
+    });
 
     const jsonArtifact = first.deliverables.report!.artifacts.find(({ format }) => format === "json")!;
     const report = reportJson(database, artifactRoot, jsonArtifact.id);
@@ -697,7 +707,11 @@ describe("AutonomousTerminalDeliverableService", () => {
       .get(RUN_ID) as { readonly budget_usage_json: string };
     const replay = service.completeAtomically(RUN_ID, () => "already-terminal");
     expect(replay.deliverables.report?.artifacts).toEqual(first.deliverables.report?.artifacts);
+    expect(replay.deliverables.runMetricsSnapshotId)
+      .toBe(first.deliverables.runMetricsSnapshotId);
     expect(database.prepare("SELECT COUNT(*) AS count FROM artifacts").get()).toEqual({ count: 2 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM run_metrics_snapshots").get())
+      .toEqual({ count: 1 });
     expect(database.prepare("SELECT budget_usage_json FROM runs WHERE id = ?").all(RUN_ID))
       .toEqual([usageBefore]);
     expect(contentFiles(artifactRoot)).toHaveLength(2);
@@ -755,6 +769,8 @@ describe("AutonomousTerminalDeliverableService", () => {
       .toEqual({ status: "active" });
     expect(database.prepare("SELECT COUNT(*) AS count FROM run_evaluations").get()).toEqual({ count: 0 });
     expect(database.prepare("SELECT COUNT(*) AS count FROM artifacts").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM run_metrics_snapshots").get())
+      .toEqual({ count: 0 });
     expect(contentFiles(artifactRoot)).toEqual([]);
 
     database.exec("DROP TRIGGER inject_terminal_report_failure");
@@ -764,6 +780,8 @@ describe("AutonomousTerminalDeliverableService", () => {
       .toEqual({ status: "completed" });
     expect(database.prepare("SELECT COUNT(*) AS count FROM run_evaluations").get()).toEqual({ count: 1 });
     expect(database.prepare("SELECT COUNT(*) AS count FROM artifacts").get()).toEqual({ count: 2 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM run_metrics_snapshots").get())
+      .toEqual({ count: 1 });
     expect(contentFiles(artifactRoot)).toHaveLength(2);
   });
 
