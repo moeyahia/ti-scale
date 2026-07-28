@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "ti-scale.historical-source-roots.v1",
+  "configurationVersion": "historical-parent-roots-2026.07.20-v1",
+  "roots": [
+    {
+      "id": "historical-htb-workspaces",
+      "path": "/var/lib/chillspwn/workspaces/htb/boxes",
+      "mode": "children",
+      "required": true
+    },
+    {
+      "id": "historical-engagement-workspaces",
+      "path": "/var/lib/chillspwn/workspaces/engagements",
+      "mode": "children",
+      "required": true
+    }
+  ]
+}

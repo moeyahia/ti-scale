@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createDatabaseConnection, migrateDatabase, type SqliteDatabase } from "../../db";
+import { MemoryRepository } from "../../memory/MemoryRepository";
 import { aggregateMcpHealth, OverviewRepository } from "../OverviewRepository";
 
 type StoredMcpStatus = "unknown" | "healthy" | "degraded" | "offline" | "quarantined";
@@ -85,5 +86,66 @@ describe("OverviewRepository MCP health", () => {
       { status: "healthy", policy_json: '{"enabled":true}' },
       { status: "error", policy_json: '{"enabled":true}' },
     ])).toBe("unhealthy");
+  });
+});
+
+describe("OverviewRepository memory count semantics", () => {
+  test("keeps lifecycle-candidate nodes separate from pending Memory Inbox reviews", () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    try {
+      migrateDatabase(database);
+      const memory = new MemoryRepository(database);
+      const provenance = {
+        method: "imported" as const,
+        explanation: "Imported canonical node remains a lifecycle candidate until reviewed through its provenance workflow.",
+        sources: [{
+          sourceType: "legacy_note",
+          sourceId: "candidate-node-source",
+          acquiredAt: "2026-07-19T12:00:00.000Z",
+        }],
+      };
+      memory.createNode({
+        id: "candidate-node",
+        nodeType: "source",
+        title: "Imported candidate node",
+        summary: "A canonical graph node that is not itself a pending Inbox proposal.",
+        scope: { kind: "global" },
+        sensitivity: "internal",
+        confidence: 0.7,
+        lifecycleStatus: "candidate",
+        confirmationState: "pending",
+        provenance,
+        authorType: "import",
+        authorId: "legacy-importer",
+      });
+      memory.createCandidate({
+        id: "pending-inbox-review",
+        nodeType: "preference",
+        title: "Pending explanation preference",
+        summary: "A proposal that is actually waiting for operator review in the Memory Inbox.",
+        scope: { kind: "global" },
+        sensitivity: "private",
+        confidence: 0.8,
+        provenance: {
+          method: "operator_statement",
+          explanation: "The operator statement must be reviewed before it can influence future behavior.",
+          sources: [{
+            sourceType: "message",
+            sourceId: "pending-review-source",
+            acquiredAt: "2026-07-19T12:01:00.000Z",
+          }],
+        },
+        proposedBy: "guided-commander",
+      });
+
+      const brain = new OverviewRepository(database).readData().brain;
+      expect(brain).toMatchObject({
+        candidateNodes: 1,
+        pendingReviews: 1,
+        candidates: 1,
+      });
+    } finally {
+      database.close();
+    }
   });
 });

@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import {
   ACTION_CLASS_IDS,
+  AUTONOMOUS_HTB_WEB_FULL_PATH_TERMINAL_SUCCESS_CRITERIA,
+  AUTONOMOUS_OUTCOME_CAPABILITIES,
   DELIVERABLE_IDS,
   EVIDENCE_TYPE_IDS,
   MANDATORY_PLATFORM_SAFE_STOPS,
@@ -11,6 +13,10 @@ import {
   OPTIONAL_SAFE_STOP_IDS,
   applyMissionTemplate,
   assertTemplatePreservedTargetScope,
+  autonomousMaterialObjectiveActionClassIds,
+  autonomousMaterialObjectiveRequirements,
+  autonomousMaterialObjectiveSuccessCriteria,
+  resolveAutonomousOutcomeProfile,
   buildActionClassRegistry,
   buildDeliverableRegistry,
   buildEvidenceTypeRegistry,
@@ -24,6 +30,7 @@ import {
   type MissionTarget,
   type MissionTemplate,
   type MissionTemplateId,
+  type RuntimeCapabilityProjection,
   type RuntimeSourceManifests,
 } from "../domain";
 import type {
@@ -33,10 +40,31 @@ import type {
   MissionIntakeTargetInput,
   ResolvedMissionIntake,
 } from "./types";
+import { buildGuidedReconnaissanceRegistry } from "./GuidedReconnaissanceRegistry";
+import { parseGuidedReconnaissanceSelection } from "../missions/GuidedReconnaissance";
+import {
+  PRODUCT_AGENT_IDS,
+  PRODUCT_AGENT_REGISTRY,
+  productAgentIdsForRuntimeManifestAgent,
+} from "../agents";
+import {
+  AUTONOMOUS_LOCAL_PLANNING_SELECTION,
+  ModelConfigurationError,
+  autonomousModelCatalogItemReadinessReasons,
+  modelCatalogItems,
+  type AgentModelAssignmentSelection,
+  type AutonomousPlanningSelection,
+  type ModelConfigurationService,
+} from "../model-config";
 
 const MAX_TARGETS = 250;
 const MAX_TEXT = 20_000;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/u;
+const DISPOSABLE_ENVIRONMENT_CLASSIFICATIONS = new Set([
+  "htb",
+  "ctf",
+  "local_disposable_lab",
+]);
 
 export class MissionIntakeValidationError extends Error {
   constructor(readonly issues: readonly string[]) {
@@ -60,6 +88,14 @@ export const INTAKE_FIELD_DEFINITIONS: readonly IntakeFieldDefinition[] = [
     purpose: "Defines the exact host, network, URL, domain, account, scope file, engagement, or lab boundary.",
     example: "https://portal.example.test or 10.10.10.0/24",
     optional: false,
+    structuredWhenPossible: true,
+  },
+  {
+    id: "environmentClassification",
+    label: "Environment classification",
+    purpose: "Separates a target's technical type from whether the surrounding environment is disposable and suitable for tightly bounded lab-only execution.",
+    example: "Hack The Box — disposable lab",
+    optional: true,
     structuredWhenPossible: true,
   },
   {
@@ -105,14 +141,14 @@ function text(value: string | undefined, label: string, maximum = MAX_TEXT): str
   return normalized;
 }
 
-function unique(values: readonly string[]): string[] {
+function unique<T extends string>(values: readonly T[]): T[] {
   const seen = new Set<string>();
   return values.flatMap((value) => {
     const normalized = value.trim();
     const key = normalized.toLocaleLowerCase("en-US");
     if (!normalized || seen.has(key)) return [];
     seen.add(key);
-    return [normalized];
+    return [normalized as T];
   });
 }
 
@@ -186,18 +222,187 @@ function hasLiveSource(manifests: RuntimeSourceManifests): boolean {
   return manifests.agents.length > 0 || manifests.tools.length > 0 || manifests.providers.length > 0;
 }
 
+function autonomousAgentsForActionClasses(
+  manifests: RuntimeSourceManifests,
+  projection: RuntimeCapabilityProjection,
+  actionClassIds: readonly ActionClassId[],
+): string[] {
+  const selected = new Set(actionClassIds);
+  const providers = new Map(manifests.providers.map((provider) => [provider.id, provider]));
+  const productAgents = new Set<string>();
+  for (const agent of manifests.agents) {
+    if (!agent.available) continue;
+    const assignedContractClasses = [...selected].filter((actionClassId) =>
+      projection.actionClasses[actionClassId].availableAgentIds.includes(agent.id));
+    if (assignedContractClasses.length === 0) continue;
+    const executable = agent.modelRefs.some(({ providerId, modelId }) => {
+      const provider = providers.get(providerId);
+      const model = provider?.models.find(({ id }) => id === modelId);
+      const compatibleClasses = new Set(model?.compatibleActionClassIds ?? []);
+      return provider?.authenticated === true
+        && provider.healthy === true
+        && model?.enforcement === "enforced_executor"
+        && model.structuredOutput === true
+        && assignedContractClasses.every((actionClassId) => compatibleClasses.has(actionClassId));
+    });
+    if (!executable) continue;
+    for (const productAgentId of productAgentIdsForRuntimeManifestAgent(agent, manifests)) {
+      const definition = PRODUCT_AGENT_REGISTRY.find(({ id }) => id === productAgentId);
+      if (definition?.capabilities.some(({ actionClassIds: owned }) =>
+        owned.some((actionClassId) => assignedContractClasses.includes(actionClassId)))) {
+        productAgents.add(productAgentId);
+      }
+    }
+  }
+  return PRODUCT_AGENT_REGISTRY
+    .map(({ id }) => id)
+    .filter((id) => productAgents.has(id));
+}
+
+function normalizeRequestedProductAgents(
+  requestedAgentIds: readonly string[],
+  manifests: RuntimeSourceManifests,
+  actionClassIds: readonly ActionClassId[],
+): string[] {
+  const selectedActionClasses = new Set(actionClassIds);
+  const normalized = new Set<string>();
+  for (const requestedAgentId of requestedAgentIds) {
+    if (PRODUCT_AGENT_IDS.has(requestedAgentId)) {
+      normalized.add(requestedAgentId);
+      continue;
+    }
+    const runtimeAgent = manifests.agents.find(({ id }) => id === requestedAgentId);
+    if (!runtimeAgent) {
+      normalized.add(requestedAgentId);
+      continue;
+    }
+    const mapped = productAgentIdsForRuntimeManifestAgent(runtimeAgent, manifests)
+      .filter((productAgentId) => PRODUCT_AGENT_REGISTRY
+        .find(({ id }) => id === productAgentId)
+        ?.capabilities.some(({ actionClassIds: owned }) =>
+          owned.some((actionClassId) => selectedActionClasses.has(actionClassId))));
+    if (mapped.length === 0) normalized.add(requestedAgentId);
+    for (const productAgentId of mapped) normalized.add(productAgentId);
+  }
+  return [
+    ...PRODUCT_AGENT_REGISTRY
+      .map(({ id }) => id)
+      .filter((id) => normalized.has(id)),
+    ...[...normalized]
+      .filter((id) => !PRODUCT_AGENT_IDS.has(id))
+      .sort(),
+  ];
+}
+
+function fallbackAutonomousModelAssignments(input: {
+  readonly manifests: RuntimeSourceManifests;
+  readonly specialistAgentIds: readonly string[];
+  readonly overrides: readonly AgentModelAssignmentSelection[];
+  readonly requiredActionClassIds: readonly string[];
+  readonly now: Date;
+}): AgentModelAssignmentSelection[] {
+  const catalog = modelCatalogItems(input.manifests, { now: input.now });
+  const overrides = new Map(input.overrides.map((item) => [item.agentId, item]));
+  const selected = new Set(input.specialistAgentIds);
+  const extra = [...overrides.keys()].filter((agentId) => !selected.has(agentId));
+  if (extra.length > 0) {
+    throw new MissionIntakeValidationError([
+      `Model assignment overrides name unselected specialists: ${extra.sort().join(", ")}.`,
+    ]);
+  }
+  return [...input.specialistAgentIds]
+    .sort((left, right) => left.localeCompare(right))
+    .map((agentId) => {
+      const ownedActionClassIds = new Set<string>(
+        PRODUCT_AGENT_REGISTRY
+          .find(({ id }) => id === agentId)
+          ?.capabilities.flatMap(({ actionClassIds }) => [...actionClassIds])
+          ?? [],
+      );
+      const required = input.requiredActionClassIds.filter((id) =>
+        ownedActionClassIds.has(id));
+      const override = overrides.get(agentId);
+      if (override) {
+        const primary = catalog.find(({ configurationId }) =>
+          configurationId === override.primaryConfigurationId);
+        const fallback = override.fallbackConfigurationId
+          ? catalog.find(({ configurationId }) =>
+              configurationId === override.fallbackConfigurationId)
+          : undefined;
+        if (!primary || (override.fallbackConfigurationId && !fallback)) {
+          throw new MissionIntakeValidationError([
+            `The model override for ${agentId} is not present in the current live catalog.`,
+          ]);
+        }
+        const reasons = [
+          ...autonomousModelCatalogItemReadinessReasons(
+            primary,
+            agentId,
+            required,
+          ),
+          ...(fallback
+            ? autonomousModelCatalogItemReadinessReasons(
+                fallback,
+                agentId,
+                required,
+              ).map((reason) => reason.replace(/^The primary /u, "The fallback "))
+            : []),
+        ];
+        if (reasons.length > 0) {
+          throw new MissionIntakeValidationError([
+            `The model override for ${agentId} is not Autonomous-ready: ${reasons.join(" ")}`,
+          ]);
+        }
+        return { ...override, source: "operator_override" as const };
+      }
+      const recommendation = catalog.find((item) => {
+        const compatibleActionClassIds = new Set(
+          item.capabilities.compatibleActionClassIds,
+        );
+        return item.selectable
+          && item.compatibleAgentIds.includes(agentId)
+          && required.every((id) => compatibleActionClassIds.has(id))
+          && autonomousModelCatalogItemReadinessReasons(
+            item,
+            agentId,
+            required,
+          ).length === 0;
+      });
+      if (!recommendation) {
+        throw new MissionIntakeValidationError([
+          `No current Autonomous-ready model configuration is available for selected specialist ${agentId}. Connect a healthy enforced provider tool-calling route or an exact available local deterministic tool route for every required action class.`,
+        ]);
+      }
+      return {
+        agentId,
+        primaryConfigurationId: recommendation.configurationId,
+        fallbackConfigurationId: null,
+        source: "recommended" as const,
+      };
+    });
+}
+
 export interface MissionIntakeServiceOptions {
   readonly readRuntimeManifests?: () => RuntimeSourceManifests;
   readonly clock?: () => Date;
+  readonly modelConfigurations?: Pick<
+    ModelConfigurationService,
+    "resolveAutonomousAssignments"
+  > & Partial<Pick<
+    ModelConfigurationService,
+    "validateAutonomousPlanningSelection"
+  >>;
 }
 
 export class MissionIntakeService {
   private readonly readRuntimeManifests: () => RuntimeSourceManifests;
   private readonly clock: () => Date;
+  private readonly modelConfigurations?: MissionIntakeServiceOptions["modelConfigurations"];
 
   constructor(options: MissionIntakeServiceOptions = {}) {
     this.readRuntimeManifests = options.readRuntimeManifests ?? emptyRuntimeSourceManifests;
     this.clock = options.clock ?? (() => new Date());
+    this.modelConfigurations = options.modelConfigurations;
   }
 
   snapshot(journey: "autonomous" | "guided" = "autonomous", templateId: MissionTemplateId = "safe_recon"): IntakeRegistrySnapshot {
@@ -227,6 +432,7 @@ export class MissionIntakeService {
         optional: OPTIONAL_MISSION_SAFE_STOPS,
       },
       budgets: MISSION_BUDGET_PRESETS,
+      guidedReconnaissance: buildGuidedReconnaissanceRegistry(manifests),
     };
   }
 
@@ -239,6 +445,18 @@ export class MissionIntakeService {
     const normalizedTargets = normalizeTargets(input.targets);
     const allowedTargets = normalizedTargets.filter(({ excluded }) => !excluded);
     const prohibitedTargets = normalizedTargets.filter(({ excluded }) => excluded);
+    const guidedReconnaissance = parseGuidedReconnaissanceSelection(input.guidedReconnaissance);
+    if (guidedReconnaissance.issues.length > 0) {
+      throw new MissionIntakeValidationError(guidedReconnaissance.issues);
+    }
+    if (input.guidedReconnaissance && input.journey !== "guided") {
+      throw new MissionIntakeValidationError(["The first represented reconnaissance step is available only in Guided missions."]);
+    }
+    if (guidedReconnaissance.selection && !["host", "domain"].includes(allowedTargets[0]!.type)) {
+      throw new MissionIntakeValidationError([
+        "The selected first reconnaissance step requires one host, IP address, or hostname as the first authorized target. Remove the selection to keep target-derived behavior, or supply a host target instead of a URL, CIDR, cloud, file, engagement, or lab reference.",
+      ]);
+    }
     const templateId = input.templateId ?? "safe_recon";
     const template = templateById(templateId);
     const applied = applyMissionTemplate(template, input.journey, normalizedTargets);
@@ -246,9 +464,21 @@ export class MissionIntakeService {
     const manifests = this.readRuntimeManifests();
     const projection = buildRuntimeCapabilityProjection(manifests);
     const registeredTemplate = buildMissionTemplateRegistry(projection).templates[template.id];
+    const allowedTargetKinds = new Set<"domain" | "ip">(
+      allowedTargets.flatMap(({ type, value }) =>
+        type === "domain" ? ["domain" as const] : isIP(value) > 0 ? ["ip" as const] : []),
+    );
+    const defaultAllowedActionClassIds = ACTION_CLASS_IDS.filter((actionClassId) => {
+      const capability = AUTONOMOUS_OUTCOME_CAPABILITIES[actionClassId];
+      return capability?.targetKinds.some((kind) => allowedTargetKinds.has(kind)) === true;
+    });
     const destructivePolicy = input.destructivePolicy ?? "prohibited";
     const boundedDestructiveTargetIds = unique(input.boundedDestructiveTargetIds ?? []);
     const boundedTargetIssues: string[] = [];
+    const disposableEnvironment = input.environmentClassification !== undefined
+      && DISPOSABLE_ENVIRONMENT_CLASSIFICATIONS.has(input.environmentClassification);
+    const explicitlyNonDisposableEnvironment = input.environmentClassification === "client_or_public"
+      || input.environmentClassification === "internal";
     if (destructivePolicy === "bounded_lab_only" && boundedDestructiveTargetIds.length === 0) {
       boundedTargetIssues.push("Named disposable lab targets are required for the bounded lab-only destructive policy.");
     }
@@ -259,8 +489,18 @@ export class MissionIntakeService {
       const boundedTarget = allowedTargets.find(({ id }) => id === boundedTargetId);
       if (!boundedTarget) {
         boundedTargetIssues.push(`Bounded destructive target ${boundedTargetId} is outside the supplied authorization.`);
-      } else if (boundedTarget.type !== "lab_environment") {
-        boundedTargetIssues.push(`${boundedTarget.value} is not classified as a disposable lab environment.`);
+      } else if (explicitlyNonDisposableEnvironment) {
+        boundedTargetIssues.push(
+          `${boundedTarget.value} cannot be bounded for lab-only execution because the mission environment is explicitly classified as non-disposable.`,
+        );
+      } else if (boundedTarget.type === "host" && !disposableEnvironment) {
+        boundedTargetIssues.push(
+          `${boundedTarget.value} is an exact host, but the mission environment is not explicitly classified as Hack The Box, CTF, or a local disposable lab.`,
+        );
+      } else if (boundedTarget.type !== "host" && boundedTarget.type !== "lab_environment") {
+        boundedTargetIssues.push(
+          `${boundedTarget.value} is not an exact host or disposable lab target. CIDRs, URLs, domains, cloud accounts, scope files, and engagement references cannot be used as bounded destructive targets.`,
+        );
       }
     }
     if (boundedTargetIssues.length > 0) throw new MissionIntakeValidationError(boundedTargetIssues);
@@ -270,16 +510,39 @@ export class MissionIntakeService {
       destructivePolicy,
       projection,
       overrides: input.actionPolicyOverrides,
+      ...(input.journey === "autonomous" ? { defaultAllowedActionClassIds } : {}),
       authorizedTargetIds: allowedTargets.map(({ id }) => id),
       boundedDestructiveTargetIds,
     });
+    const preAuthorized = ACTION_CLASS_IDS.filter(
+      (id) => policyMatrix.classes[id].policyState === "pre_authorized",
+    );
+    const modelAssignmentActionClassIds = preAuthorized.filter(
+      (id) => policyMatrix.classes[id].capability.enforcementReady,
+    );
+    const inferredOutcomeCapabilities = preAuthorized.flatMap((actionClassId) => {
+      const capability = AUTONOMOUS_OUTCOME_CAPABILITIES[actionClassId];
+      return capability?.targetKinds.some((kind) => allowedTargetKinds.has(kind))
+        ? [capability]
+        : [];
+    });
+    const inferredEvidenceTypeIds = unique(inferredOutcomeCapabilities.flatMap(
+      ({ evidenceTypeIds }) => evidenceTypeIds,
+    )).filter((evidenceTypeId) =>
+      projection.evidenceTypes[evidenceTypeId].availability === "supported");
     const evidenceTypeIds = assertKnownIds(
-      input.evidenceTypeIds ?? registeredTemplate.recommendedEvidenceTypeIds,
+      input.evidenceTypeIds ?? (input.journey === "autonomous"
+        ? inferredEvidenceTypeIds
+        : registeredTemplate.recommendedEvidenceTypeIds),
       EVIDENCE_TYPE_IDS,
       "Evidence requirements",
     ) as typeof EVIDENCE_TYPE_IDS[number][];
     const deliverableIds = assertKnownIds(
-      input.deliverableIds ?? template.recommendedDeliverableIds,
+      input.deliverableIds ?? (input.journey === "autonomous"
+        ? registeredTemplate.recommendedDeliverableIds.filter(
+            (id) => !registeredTemplate.unavailableDeliverableIds.includes(id),
+          )
+        : registeredTemplate.recommendedDeliverableIds),
       DELIVERABLE_IDS,
       "Deliverables",
     );
@@ -294,19 +557,59 @@ export class MissionIntakeService {
     const title = text(input.title, "Mission title", 240) ?? boundedTitle(template, allowedTargets[0]!, now);
     const objective = text(input.objective, "Authorized objective")
       ?? `${applied.generatedObjective} Authorized scope: ${allowedTargets.map(({ value }) => value).join(", ")}.`;
-    const successCriteria = input.successCriteria && input.successCriteria.length > 0
+    const materialObjectiveRequirements =
+      input.journey === "autonomous"
+        ? autonomousMaterialObjectiveRequirements(objective)
+        : [];
+    const materialObjectiveSuccessCriteria =
+      autonomousMaterialObjectiveSuccessCriteria(objective);
+    const autonomousOutcome = input.journey === "autonomous"
+      ? resolveAutonomousOutcomeProfile({
+          templateId: template.id,
+          objective,
+          successCriteria: input.successCriteria,
+        })
+      : undefined;
+    const inferredSuccessCriteria = unique(inferredOutcomeCapabilities.flatMap(
+      ({ successCriteria }) => successCriteria,
+    ));
+    const terminalHtbCriteria = new Set<string>(
+      AUTONOMOUS_HTB_WEB_FULL_PATH_TERMINAL_SUCCESS_CRITERIA,
+    );
+    const defaultSuccessCriteria =
+      autonomousOutcome?.id === "complete_engagement"
+      ? [
+          ...inferredSuccessCriteria.filter((criterion) =>
+            !terminalHtbCriteria.has(criterion)),
+          ...AUTONOMOUS_HTB_WEB_FULL_PATH_TERMINAL_SUCCESS_CRITERIA,
+        ]
+      : inferredSuccessCriteria;
+    const selectedSuccessCriteria = input.successCriteria && input.successCriteria.length > 0
       ? unique(input.successCriteria)
-      : [...applied.successCriteria];
+      : defaultSuccessCriteria.length > 0
+        ? defaultSuccessCriteria
+        : [...applied.successCriteria];
+    const successCriteria = unique([
+      ...selectedSuccessCriteria,
+      ...materialObjectiveSuccessCriteria,
+      ...(autonomousOutcome?.requiredTerminalSuccessCriteria ?? []),
+    ]);
     const defaultMemoryScopes = [
       "confirmed_preferences",
       "verified_lessons",
+      "confirmed_attack_knowledge",
+      "verified_attack_knowledge",
       ...(text(input.engagementId, "Engagement ID", 240) ? ["engagement_memory"] : []),
     ];
     const memoryScopes = input.memoryScopes ? unique(input.memoryScopes) : defaultMemoryScopes;
     const inferredFields = [
       ...(input.title ? [] : ["title"]),
       ...(input.objective ? [] : ["objective"]),
-      ...(input.successCriteria?.length ? [] : ["successCriteria"]),
+      ...(input.successCriteria?.length
+        && materialObjectiveSuccessCriteria.length === 0
+        && (autonomousOutcome?.requiredTerminalSuccessCriteria.length ?? 0) === 0
+        ? []
+        : ["successCriteria"]),
       ...(input.deliverableIds ? [] : ["deliverables"]),
       ...(input.evidenceTypeIds ? [] : ["evidenceRequirements"]),
       ...(input.optionalSafeStopIds ? [] : ["optionalSafeStops"]),
@@ -315,18 +618,89 @@ export class MissionIntakeService {
       ...(input.journey === "autonomous" && !input.memoryScopes ? ["memoryScopes"] : []),
     ];
     const selectedAgentIds = input.specialistAgentIds
-      ? unique(input.specialistAgentIds)
-      : unique(ACTION_CLASS_IDS.flatMap((id) =>
-          policyMatrix.classes[id].policyState === "pre_authorized"
-            ? policyMatrix.classes[id].capability.availableAgentIds
-            : []));
+      ? normalizeRequestedProductAgents(unique(input.specialistAgentIds), manifests, preAuthorized)
+      : unique(autonomousAgentsForActionClasses(manifests, projection, preAuthorized));
+    const signedSpecialistAgentIds = selectedAgentIds
+      .filter((id) => SAFE_ID.test(id))
+      .sort((left, right) => left.localeCompare(right));
+    let agentModelAssignments: readonly AgentModelAssignmentSelection[] = [];
+    let planningSelection: AutonomousPlanningSelection =
+      AUTONOMOUS_LOCAL_PLANNING_SELECTION;
+    if (input.journey === "autonomous") {
+      planningSelection =
+        input.planningSelection ?? AUTONOMOUS_LOCAL_PLANNING_SELECTION;
+      if (planningSelection.route === "provider_advisory") {
+        if (!this.modelConfigurations?.validateAutonomousPlanningSelection) {
+          throw new MissionIntakeValidationError([
+            "Provider-backed plan construction cannot be reviewed because the live planning-model catalog is unavailable. Restore the catalog or use the local deterministic planner.",
+          ]);
+        }
+        try {
+          const receipt =
+            this.modelConfigurations.validateAutonomousPlanningSelection(
+            planningSelection,
+          );
+          if (!receipt?.ready) {
+            throw new MissionIntakeValidationError([
+              `The selected provider-backed planning route is not ready: ${
+                receipt?.reasons.join(" ").trim()
+                || "the exact advisor-only configuration could not be attested"
+              }. Choose a current authenticated, healthy advisor-only model with structured output and the exact disclosure class, or use the local deterministic planner.`,
+            ]);
+          }
+        } catch (error) {
+          if (error instanceof MissionIntakeValidationError) throw error;
+          if (!(error instanceof ModelConfigurationError)) throw error;
+          throw new MissionIntakeValidationError([
+            `${error.message} ${error.remediation}`,
+          ]);
+        }
+      }
+      try {
+        agentModelAssignments = this.modelConfigurations
+          ? this.modelConfigurations.resolveAutonomousAssignments({
+              specialistAgentIds: signedSpecialistAgentIds,
+              overrides: input.agentModelAssignments ?? [],
+              requiredActionClassIds: modelAssignmentActionClassIds,
+            }).selections
+          : fallbackAutonomousModelAssignments({
+              manifests,
+              specialistAgentIds: signedSpecialistAgentIds,
+              overrides: input.agentModelAssignments ?? [],
+              requiredActionClassIds: modelAssignmentActionClassIds,
+              now: this.clock(),
+            });
+      } catch (error) {
+        if (!(error instanceof ModelConfigurationError)) throw error;
+        throw new MissionIntakeValidationError([
+          `${error.message} ${error.remediation}`,
+        ]);
+      }
+      if (
+        signedSpecialistAgentIds.some((agentId) =>
+          !(input.agentModelAssignments ?? []).some((item) =>
+            item.agentId === agentId))
+      ) {
+        inferredFields.push("agentModelAssignments");
+      }
+      if (!input.planningSelection) inferredFields.push("planningSelection");
+    }
     const blockedActionLabels = ACTION_CLASS_IDS
       .filter((id) => policyMatrix.classes[id].launchBlockingReasons.length > 0)
       .map((id) => policyMatrix.classes[id].label);
+    const missingMaterialObjectiveActionClassIds =
+      autonomousMaterialObjectiveActionClassIds(objective)
+        .filter((actionClassId) => !preAuthorized.includes(actionClassId));
     const limitations = [
       ...(!hasLiveSource(manifests) ? ["No attested runtime capability manifest is connected; operational launch readiness is unavailable."] : []),
+      ...(input.journey === "autonomous" && inferredOutcomeCapabilities.length === 0 ? [
+        "No target-compatible reviewed outcome producer is mounted for the supplied target type. The generated draft remains inspectable, but Autonomous preflight must block until an exact executor is connected or the target is narrowed to a supported form.",
+      ] : []),
       ...(blockedActionLabels.length > 0 ? [
         `Autonomous execution is not ready for ${blockedActionLabels.length} contract action classes: ${blockedActionLabels.join(", ")}. Connect compatible specialists, tools, and locally enforced provider paths, or change those classes to Guided only or Prohibited. Exact class-level reasons remain in the Action-class policy matrix.`,
+      ] : []),
+      ...(missingMaterialObjectiveActionClassIds.length > 0 ? [
+        `The authorized objective explicitly requests ${materialObjectiveRequirements.map(({ label }) => label).join(", ")}, so Ti-Scale added the matching evidence-backed success criteria. Launch remains blocked because the signed action policy does not pre-authorize: ${missingMaterialObjectiveActionClassIds.join(", ")}. Select a reviewed capable contract or narrow the objective; Ti-Scale will not silently reduce this mission to reconnaissance.`,
       ] : []),
     ];
 
@@ -347,6 +721,7 @@ export class MissionIntakeService {
           explanationDepth: input.explanationDepth ?? "balanced",
           executionPreference: input.executionPreference ?? "manual",
           evidenceExpectations: evidenceTypeIds,
+          ...(guidedReconnaissance.selection ? { guidedReconnaissance: guidedReconnaissance.selection } : {}),
         },
         normalizedTargets,
         template: { id: template.id, version: template.version },
@@ -361,10 +736,10 @@ export class MissionIntakeService {
       };
     }
 
-    const preAuthorized = ACTION_CLASS_IDS.filter((id) => policyMatrix.classes[id].policyState === "pre_authorized");
     const prohibited = ACTION_CLASS_IDS.filter((id) => policyMatrix.classes[id].policyState !== "pre_authorized");
     return {
       schemaVersion: "2.4",
+      autonomousOutcome,
       request: {
         journey: "autonomous",
         launch: true,
@@ -373,11 +748,15 @@ export class MissionIntakeService {
         successCriteria,
         authorization: {
           ...(text(input.engagementId, "Engagement ID", 240) ? { engagementId: text(input.engagementId, "Engagement ID", 240) } : {}),
+          ...(input.environmentClassification ? {
+            environmentClassification: input.environmentClassification,
+          } : {}),
           allowedTargets: allowedTargets.map(({ value }) => value),
           prohibitedTargets: prohibitedTargets.map(({ value }) => value),
           authorizationConfirmed: true,
         },
         contract: {
+          outcomeProfile: autonomousOutcome!.id,
           allowedActionClasses: preAuthorized,
           prohibitedActionClasses: prohibited,
           destructivePolicy,
@@ -401,7 +780,9 @@ export class MissionIntakeService {
           retentionPolicy: "operator_managed",
           providerPolicy: "automatic_enforcing_only",
           toolPolicy: "contract_allowlist",
-          specialistAgentIds: selectedAgentIds.filter((id) => SAFE_ID.test(id)),
+          specialistAgentIds: signedSpecialistAgentIds,
+          agentModelAssignments,
+          planningSelection,
           memoryScopes,
           contextNodeIds: input.contextNodeIds ? unique(input.contextNodeIds) : [],
           safeStopConditions: optionalSafeStopIds,

@@ -55,7 +55,8 @@ function seed(database: ReturnType<typeof createDatabaseConnection>): void {
     INSERT INTO agent_capabilities (
       agent_id, capability, source, enabled, metadata_json
     ) VALUES (
-      'ReconScout', 'quick_scan', 'test-runtime-manifest', 1, '{}'
+      'ReconScout', 'quick_scan', 'runtime-manifest-tool-binding', 1,
+      '{"toolId":"quick_scan","actionClassIds":["reconnaissance"]}'
     )
   `).run();
   database.prepare(`
@@ -65,7 +66,7 @@ function seed(database: ReturnType<typeof createDatabaseConnection>): void {
     ) VALUES (
       'sechub-reconnaissance', 'sechub-reconnaissance', 'stdio', 'healthy',
       '["quick_scan"]',
-      '{"enabled":true,"startPermitted":true,"assignedAgents":["ReconScout"]}',
+      '{"schemaVersion":"ti-scale.specialist-mcp-execution-policy.v1","enabled":true,"startPermitted":true,"executionAuthorization":"signed_contract_specialist_action","autonomousExecution":true,"exactInventoryRequired":true,"directCommanderToolsAllowed":false,"assignedAgents":["ReconScout"]}',
       ?, ?, ?
     )
   `).run(NOW, NOW, NOW);
@@ -576,10 +577,13 @@ describe("canonical follow-up run HTTP boundary", () => {
       });
       expect(created.nextUrl).toBe(`/missions/mission-follow-up/runs/${created.run.id}`);
       expect(database.prepare(`
-        SELECT contract_id, journey, status, budget_usage_json, retry_count, replan_count
+        SELECT contract_id, contract_version_bound, contract_hash_bound,
+          journey, status, budget_usage_json, retry_count, replan_count
         FROM runs WHERE id = ?
       `).get(created.run.id)).toEqual({
         contract_id: "contract-follow-up",
+        contract_version_bound: 1,
+        contract_hash_bound: "a".repeat(64),
         journey: "autonomous",
         status: "planning",
         budget_usage_json: "{}",

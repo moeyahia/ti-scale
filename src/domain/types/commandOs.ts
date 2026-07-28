@@ -1,4 +1,21 @@
+import type { MemoryNodeType } from "./brain";
+import type {
+  ModelAuthState,
+  ModelEnforcementMode,
+  ModelHealthState,
+} from "./modelConfiguration";
+
 export type Journey = "autonomous" | "guided";
+export type AutonomousOutcomeProfileId =
+  | "assessment"
+  | "complete_engagement";
+
+export type MissionEnvironmentClassification =
+  | "client_or_public"
+  | "internal"
+  | "htb"
+  | "ctf"
+  | "local_disposable_lab";
 
 export type RunStatus =
   | "queued"
@@ -178,6 +195,9 @@ export interface OverviewSnapshot {
   agents: AgentSummary[];
   brain: {
     confirmed: number;
+    candidateNodes: number;
+    pendingReviews: number;
+    /** @deprecated Compatibility alias for pendingReviews. */
     candidates: number;
     stale: number;
     conflicts: number;
@@ -225,6 +245,7 @@ export interface AutonomousMissionRequest {
   successCriteria: string[];
   authorization: {
     engagementId?: string;
+    environmentClassification?: MissionEnvironmentClassification;
     allowedTargets: string[];
     prohibitedTargets: string[];
     authorizationConfirmed: boolean;
@@ -232,6 +253,7 @@ export interface AutonomousMissionRequest {
     dataHandling?: string;
   };
   contract: {
+    outcomeProfile?: AutonomousOutcomeProfileId;
     allowedActionClasses: string[];
     prohibitedActionClasses: string[];
     destructivePolicy: "prohibited" | "validate_without_executing" | "bounded_lab_only";
@@ -250,8 +272,14 @@ export interface AutonomousMissionRequest {
     dataHandlingPolicy: "local_private";
     retentionPolicy: "operator_managed";
     providerPolicy: "automatic_enforcing_only";
+    /**
+     * Exact authority used to construct the plan. Provider-backed planning is
+     * advisory-only and is never an execution assignment.
+     */
+    planningSelection?: AutonomousPlanningSelection;
     toolPolicy: "contract_allowlist";
     specialistAgentIds: string[];
+    agentModelAssignments: AutonomousAgentModelAssignment[];
     memoryScopes: string[];
     contextNodeIds: string[];
     safeStopConditions: string[];
@@ -260,9 +288,75 @@ export interface AutonomousMissionRequest {
   contractReview?: { version: 1; hash: string };
 }
 
+export type AutonomousPlanningSelection =
+  | {
+      route: "local_deterministic";
+      plannerId: "ti-scale.local-autonomous-contract-planner.v1";
+      enforcementMode: "local_policy";
+      disclosureClass: "local_only";
+      executionAuthority: "none";
+    }
+  | {
+      route: "provider_advisory";
+      agentId: string;
+      primaryConfigurationId: string;
+      fallbackConfigurationId: string | null;
+      enforcementMode: "advisor_only";
+      disclosureClass: "public_only" | "sanitized_internal";
+      executionAuthority: "none";
+    };
+
+export const AUTONOMOUS_LOCAL_PLANNING_SELECTION: AutonomousPlanningSelection =
+  Object.freeze({
+    route: "local_deterministic",
+    plannerId: "ti-scale.local-autonomous-contract-planner.v1",
+    enforcementMode: "local_policy",
+    disclosureClass: "local_only",
+    executionAuthority: "none",
+  });
+
+/**
+ * Exact model authority pinned inside one mission contract.
+ *
+ * This is deliberately separate from workspace and per-agent preferences:
+ * changing an intake assignment cannot mutate the operator's future defaults.
+ */
+export interface AutonomousAgentModelAssignment {
+  agentId: string;
+  primaryConfigurationId: string;
+  fallbackConfigurationId: string | null;
+}
+
+export interface AutonomousAgentModelConfigurationReceipt {
+  configurationId: string;
+  providerId: string;
+  modelId: string;
+  displayName: string;
+  executionBoundary: import("./modelConfiguration").ModelExecutionBoundary;
+  reasoningEffort: string | null;
+  enforcementMode: ModelEnforcementMode;
+  authState: ModelAuthState;
+  healthState: ModelHealthState;
+  disclosureClass: string;
+  costClass: string;
+  latencyClass: string;
+  contextLimit: number | null;
+  catalogSource: string;
+  catalogRetrievedAt: string | null;
+}
+
+export interface AutonomousAgentModelAssignmentReceipt {
+  agentId: string;
+  source: "recommended" | "inherited" | "operator_override";
+  ready: boolean;
+  reasons: string[];
+  primary: AutonomousAgentModelConfigurationReceipt;
+  fallback: AutonomousAgentModelConfigurationReceipt | null;
+}
+
 export interface AutonomousContextCandidate {
   id: string;
-  nodeType: "preference" | "lesson";
+  nodeType: MemoryNodeType;
   title: string;
   summary: string;
   lifecycleStatus: "confirmed" | "verified";
@@ -318,6 +412,14 @@ export interface AutonomousSpecialistCandidate {
 
 export interface AutonomousMissionPreflight {
   schemaVersion: "2.4";
+  outcome: {
+    id: AutonomousOutcomeProfileId;
+    label: string;
+    concisePromise: string;
+    completionMeaning: string;
+    requiredTerminalSuccessCriteria: string[];
+    requiredActionClassIds: string[];
+  };
   contract: { version: 1; hash: string };
   readiness: ReadinessSummary;
   context: {
@@ -334,6 +436,7 @@ export interface AutonomousMissionPreflight {
       invalidSelectedAgentIds: string[];
       recommendedAgentIds: string[];
       effectiveAgentIds: string[];
+      modelAssignments: AutonomousAgentModelAssignmentReceipt[];
     };
   };
   policySummary: {
@@ -405,7 +508,24 @@ export interface GuidedMissionRequest {
   explanationDepth: "concise" | "balanced" | "deep";
   executionPreference: "manual" | "single_step_agent";
   evidenceExpectations: string[];
+  guidedReconnaissance?: GuidedReconnaissanceSelection;
+  guidedWindowsIdentity?: {
+    operation: "smb_share_list" | "smb_identity_summary" | "ldap_root_dse" | "rpc_domain_info";
+    authenticationMode: "anonymous" | "credential_reference";
+    credentialReference: { kind: "systemd_credential_bundle"; id: string } | null;
+  };
 }
+
+export type GuidedTcpPortPresetId = "focused_services" | "web_services" | "remote_management";
+
+export type GuidedReconnaissanceSelection =
+  | { mode: "host_liveness" }
+  | {
+      mode: "tcp_service_scan";
+      portSelection:
+        | { source: "preset"; presetId: GuidedTcpPortPresetId; presetVersion: number; ports: number[] }
+        | { source: "custom"; ports: number[] };
+    };
 
 export type MissionCreateRequest = AutonomousMissionRequest | GuidedMissionRequest;
 

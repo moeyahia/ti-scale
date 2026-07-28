@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -22,9 +22,11 @@ import {
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const DISPOSABLE_ROOT = join(tmpdir(), "ti-scale-e2e-data");
-const LEGACY_HEALTH_URL = process.env.TI_SCALE_TEST_EXTERNAL_HEALTH_URL?.trim()
-  || "http://127.0.0.1:3131/api/health";
+const LEGACY_HEALTH_URL = process.env.TI_SCALE_TEST_EXTERNAL_HEALTH_URL?.trim();
 const LOG_LIMIT_BYTES = 64 * 1_024;
+const PROCESS_BOUNDARY_VAULT_NODE_ID = `mem_${createHash("sha256")
+  .update("process-boundary-reusable-recovery-procedure")
+  .digest("hex")}`;
 
 interface CapturedChild {
   readonly child: ChildProcess;
@@ -178,8 +180,16 @@ async function waitForV2(
       const response = await fetch(`${baseUrl}/api/v2/health`, {
         signal: AbortSignal.timeout(750),
       });
-      lastStatus = String(response.status);
-      if (response.status === 200) return;
+      const body = await response.json().catch(() => null) as {
+        readonly startup?: { readonly status?: string };
+      } | null;
+      const startupStatus = body?.startup?.status;
+      lastStatus = `${response.status}/${startupStatus ?? "operational"}`;
+      // Authentication health intentionally becomes reachable before mission
+      // admission. Restart durability must wait for the atomic operational
+      // handler handoff, not mistake the truthful initializing response for a
+      // runtime that is ready to accept mutations.
+      if (response.status === 200 && startupStatus !== "initializing") return;
     } catch (error) {
       lastStatus = error instanceof Error ? error.name : "fetch failure";
     }
@@ -229,8 +239,31 @@ async function apiJson<T>(
 }
 
 async function readLegacyHealth(): Promise<{ status: string } | null> {
+  // The standalone release gate must never discover or contact a live service
+  // implicitly. A separately controlled compatibility job may opt into one
+  // exact read-only loopback health route through the explicit environment
+  // variable.
+  if (!LEGACY_HEALTH_URL) return null;
+  const endpoint = new URL(LEGACY_HEALTH_URL);
+  const loopback = endpoint.hostname === "localhost"
+    || endpoint.hostname === "[::1]"
+    || endpoint.hostname === "::1"
+    || /^127(?:\.\d{1,3}){3}$/u.test(endpoint.hostname);
+  if (
+    endpoint.protocol !== "http:"
+    || !loopback
+    || endpoint.pathname !== "/api/health"
+    || endpoint.username
+    || endpoint.password
+    || endpoint.search
+    || endpoint.hash
+  ) {
+    throw new Error(
+      "TI_SCALE_TEST_EXTERNAL_HEALTH_URL must be one credential-free loopback HTTP /api/health route",
+    );
+  }
   try {
-    const response = await fetch(LEGACY_HEALTH_URL, {
+    const response = await fetch(endpoint, {
       method: "GET",
       signal: AbortSignal.timeout(1_000),
     });
@@ -251,22 +284,22 @@ function seedConfirmedMemory(databasePath: string): void {
   try {
     migrateDatabase(database);
     new MemoryRepository(database).createNode({
-      id: "mem-process-boundary-vault",
-      nodeType: "procedure",
-      title: "Process-boundary Guided restart fixture",
-      summary: "Use durable checkpoints and verified local evidence during the authorized restart fixture",
-      body: "This operator-confirmed local procedure is safe to retrieve for the Guided process-boundary mission and project into Obsidian.",
+      id: PROCESS_BOUNDARY_VAULT_NODE_ID,
+      nodeType: "attack_procedure",
+      title: "Durable non-repeatable action recovery",
+      summary: "Use a durable checkpoint and require operator review before recovering a non-repeatable action.",
+      body: "Preserve the last completed state, classify the interrupted action, and do not repeat it when safe completion cannot be proven.",
       scope: { kind: "global" },
       sensitivity: "private",
       confidence: 1,
-      lifecycleStatus: "confirmed",
+      lifecycleStatus: "verified",
       confirmationState: "confirmed",
       provenance: {
-        method: "operator_statement",
-        explanation: "Confirmed for the isolated process-boundary durability fixture",
+        method: "derived",
+        explanation: "Generalized from an operator-reviewed local durability test receipt.",
         sources: [{
-          sourceType: "message",
-          sourceId: "source-process-boundary-vault",
+          sourceType: "local_test_receipt",
+          sourceId: "receipt-process-boundary-recovery",
           acquiredAt: "2026-07-17T00:00:00.000Z",
         }],
       },
@@ -468,7 +501,7 @@ describe("standalone V2 process-boundary durability", () => {
           "Idempotency-Key": "process-boundary-vault-health-v1",
         },
         body: JSON.stringify({
-          vaultPath: "Operator-Brain",
+          vaultPath: "Attack-Knowledge-Vault",
           permissionGranted: true,
         }),
       });
@@ -477,23 +510,29 @@ describe("standalone V2 process-boundary durability", () => {
         checks: { write: true, read: true, rename: true, delete: true },
       });
 
+      const preset = await apiJson<{
+        preset: { policyHash: string; projection: { policyEligibleNodeCount: number } };
+      }>(baseUrl, operatorToken, "/api/v2/brain/vault/attack-knowledge-preset");
+      expect(preset.preset.projection.policyEligibleNodeCount).toBeGreaterThanOrEqual(1);
+
       const connected = await apiJson<{
         connection: { id: string; status: string; vaultPath: string };
-      }>(baseUrl, operatorToken, "/api/v2/brain/vault/connect", {
+      }>(baseUrl, operatorToken, "/api/v2/brain/vault/attack-knowledge-preset/activate", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": "process-boundary-vault-connect-v1",
+          "Idempotency-Key": "process-boundary-vault-activate-v1",
         },
         body: JSON.stringify({
-          vaultPath: "Operator-Brain",
-          displayName: "Process Boundary Brain",
+          expectedPolicyHash: preset.preset.policyHash,
           permissionGranted: true,
+          activationAcknowledged: true,
+          includeConfirmed: false,
         }),
       }, 201);
       expect(connected.connection).toMatchObject({
         status: "connected",
-        vaultPath: "Operator-Brain",
+        vaultPath: "Attack-Knowledge-Vault",
       });
 
       const exported = await apiJson<{
@@ -512,11 +551,11 @@ describe("standalone V2 process-boundary durability", () => {
       });
       expect(exported.result.message).toMatch(/^Exported [1-9][0-9]* accessible canonical notes/u);
 
-      const vaultPath = join(vaultRoot, "Operator-Brain");
+      const vaultPath = join(vaultRoot, "Attack-Knowledge-Vault");
       const projectedFiles = markdownFiles(vaultPath);
       expect(projectedFiles.length).toBeGreaterThanOrEqual(1);
       const projectedNote = projectedFiles.find((path) =>
-        readFileSync(path, "utf8").includes("mem-process-boundary-vault"));
+        readFileSync(path, "utf8").includes(PROCESS_BOUNDARY_VAULT_NODE_ID));
       expect(projectedNote).toBeTruthy();
       const projectedBefore = readFileSync(projectedNote!, "utf8");
 
@@ -536,7 +575,7 @@ describe("standalone V2 process-boundary durability", () => {
         status: "connected",
         vaultPath,
       }]);
-      expect(beforeCrash.vaultSyncNodeIds).toContain("mem-process-boundary-vault");
+      expect(beforeCrash.vaultSyncNodeIds).toContain(PROCESS_BOUNDARY_VAULT_NODE_ID);
 
       await stopChild(first, "SIGKILL");
       const legacyAfterCrash = legacyBefore ? await readLegacyHealth() : null;
@@ -584,10 +623,10 @@ describe("standalone V2 process-boundary durability", () => {
       expect(vault.connections).toContainEqual(expect.objectContaining({
         id: connected.connection.id,
         status: "connected",
-        vaultPath: "Operator-Brain",
+        vaultPath: "Attack-Knowledge-Vault",
       }));
       expect(vault.syncStates).toContainEqual(expect.objectContaining({
-        nodeId: "mem-process-boundary-vault",
+        nodeId: PROCESS_BOUNDARY_VAULT_NODE_ID,
       }));
       expect(readFileSync(projectedNote!, "utf8")).toBe(projectedBefore);
 

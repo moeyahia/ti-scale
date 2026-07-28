@@ -6,6 +6,7 @@ import {
   type BrainContextService,
 } from "../brain-runtime";
 import { canonicalObject, canonicalValue } from "./serialization";
+import { OperationalHazardMatcher } from "../memory";
 import { AttackAttemptRepository } from "./AttackAttemptRepository";
 import {
   RunIntelligenceError,
@@ -68,11 +69,37 @@ export class AttackAttemptService {
       actionClass: text(input.actionClass, "Action class"),
       prerequisites: (input.prerequisites ?? []).map((item) => canonicalValue(item)),
       normalizedParameters: canonicalObject(input.normalizedParameters ?? {}),
+      ...(input.representedActionBinding
+        ? {
+            representedActionBinding: {
+              actionType: text(input.representedActionBinding.actionType, "Represented action type"),
+              actionClass: text(input.representedActionBinding.actionClass, "Represented action class"),
+              normalizedArguments: canonicalObject(input.representedActionBinding.normalizedArguments),
+              scopedTarget: text(input.representedActionBinding.scopedTarget, "Represented action target"),
+            },
+          }
+        : {}),
     };
+    if (
+      normalized.representedActionBinding
+      && normalized.representedActionBinding.actionClass !== normalized.actionClass
+    ) {
+      throw new RunIntelligenceError(
+        "attack_action_class_mismatch",
+        "Represented action binding must use the attack attempt's exact action class",
+      );
+    }
     const now = this.clock().toISOString();
     return inImmediateTransaction(this.database, () => {
       this.repository.assertCreateReferences(normalized);
-      return this.repository.insert({ ...normalized, id: `attempt_${randomUUID()}`, now });
+      const attempt = this.repository.insert({ ...normalized, id: `attempt_${randomUUID()}`, now });
+      if (normalized.reviewedKnowledgeBinding) {
+        new OperationalHazardMatcher(this.database, { clock: this.clock }).bindAttackAttempt({
+          attackAttemptId: attempt.id,
+          ...normalized.reviewedKnowledgeBinding,
+        });
+      }
+      return attempt;
     });
   }
 

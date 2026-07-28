@@ -12,6 +12,7 @@ import type {
   GuidedDecisionInboxRecord,
 } from "../../domain/types/operations";
 import type { GuidedDecision, GuidedDecisionControl } from "../../domain/types/runtimeV2";
+import { guidedRuntimeCapabilities } from "../../domain/guidedRuntimeCapabilities";
 import { Button, ButtonLink, Card, ErrorPanel, PageHeader, StatusPill } from "../../design-system/components/Primitives";
 import { CursorControls, FilterForm, formatTime, JsonDetails, QueryBoundary, SelectFilter, StreamState, useActionState, useUrlFilters } from "../runs/OperationalSurface";
 
@@ -78,6 +79,56 @@ export function guidedDecisionActionKind(requestedParameters: unknown): GuidedAc
   return nested ?? flattened;
 }
 
+export interface GuidedDecisionReadableSummary {
+  readonly action: string;
+  readonly target: string;
+  readonly execution: string;
+  readonly exactInputs: readonly Readonly<{ label: string; value: string }>[];
+}
+
+function readableValue(value: unknown): string {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return "Shown in technical details";
+}
+
+/** Operator-first view of the immutable action; raw JSON remains available below it. */
+export function guidedDecisionReadableSummary(
+  requestedParameters: unknown,
+): GuidedDecisionReadableSummary | null {
+  const root = record(requestedParameters);
+  if (!root) return null;
+  const represented = record(root.action) ?? root;
+  const args = record(represented.arguments) ?? {};
+  const local = record(args.parameters);
+  const toolId = typeof args.toolId === "string"
+    ? args.toolId
+    : typeof represented.actionType === "string"
+      ? represented.actionType
+      : "Unrecognized represented action";
+  const target = typeof represented.target === "string"
+    ? represented.target
+    : "Target not retained";
+  const kind = knownActionKind(represented.kind ?? root.kind);
+  const exactInputs = Object.entries(local ?? args)
+    .filter(([key]) => !["schemaVersion", "executionBinding", "toolId", "workspace"].includes(key))
+    .map(([key, value]) => ({
+      label: key.replaceAll(/([a-z])([A-Z])/gu, "$1 $2").replaceAll("_", " "),
+      value: readableValue(value),
+    }));
+  return {
+    action: toolId,
+    target,
+    execution: kind === "manual"
+      ? "You perform this represented step"
+      : args.executionBinding === "reviewed_local_process"
+        ? "Reviewed local specialist process; no MCP or public model"
+        : "Exact represented agent step",
+    exactInputs,
+  };
+}
+
 export default function DecisionsPage() {
   const filters = useUrlFilters({ limit: "50" });
   const readiness = useQuery("runtime-readiness", fetchRuntimeReadiness, { staleTime: 5_000 });
@@ -90,6 +141,7 @@ export default function DecisionsPage() {
     cursor: filters.values.cursor,
     limit: Number(filters.values.limit ?? 50),
   }, signal), { staleTime: 0 });
+  const capabilities = guidedRuntimeCapabilities(readiness.data);
   return <div className="os-page"><PageHeader eyebrow="Deliberate control" title="Decisions" description="Exact Guided-step decisions and real Autonomous exceptions. Autonomous runs never wait here for routine approval." actions={<StreamState />} />
     <FilterForm filters={filters} searchKey="query" searchLabel="Mission, run, record, or event">
       <SelectFilter filters={filters} name="kind" label="Record type" options={SECTION_ORDER.map((kind) => ({ value: kind, label: SECTION_LABELS[kind].title }))} />
@@ -97,21 +149,25 @@ export default function DecisionsPage() {
       <label><span>Mission ID</span><input value={filters.values.missionId ?? ""} onChange={(event) => filters.set({ missionId: event.target.value || undefined })} /></label>
       <label><span>Run ID</span><input value={filters.values.runId ?? ""} onChange={(event) => filters.set({ runId: event.target.value || undefined })} /></label>
     </FilterForm>
-    {readiness.data?.execution.guided === "unavailable" && <p className="os-guided-inline-warning" role="status">Exact Guided runtime controls are read-only because this Ti-Scale instance has no callable Guided provider or execution boundary. Connect and verify that boundary before executing a represented step.</p>}
+    {capabilities.mode === "unavailable" && !readiness.isLoading && <p className="os-guided-inline-warning" role="status">Exact Guided runtime controls are read-only because this Ti-Scale instance has no verified exact-step execution boundary. Verify System readiness before changing a represented step.</p>}
+    {capabilities.manualOnly && <p className="os-guided-inline-warning" role="status">Manual Guided runtime is active. You can reject, skip, or stop an exact decision and review operator-run evidence. {capabilities.localCommanderGuidance ? "Local deterministic Commander explanations are available without provider or execution authority." : "Commander explanations are unavailable until their local capability is attested."} Provider semantic interpretation and agent tool execution remain unavailable.</p>}
+    {capabilities.mode === "ready" && !capabilities.providerGuidance && <p className="os-guided-inline-warning" role="status">Reviewed local Guided execution is active. Exact tool dispatch follows its separate readiness receipt. {capabilities.localCommanderGuidance ? "Local deterministic Commander explanations are available without contacting a provider or granting tool authority." : "Local Commander guidance is not currently attested."} Provider-backed semantic interpretation remains unavailable.</p>}
     <QueryBoundary data={inbox.data?.items} error={inbox.error} isLoading={inbox.isLoading} onRetry={inbox.refresh} emptyTitle="No canonical decision records match" emptyDescription="No signed contract, explicit exception, administrative approval, or exact Guided decision matches these filters.">{(items) => <DecisionInboxSections
       items={items}
       onChanged={inbox.refresh}
-      runtimeAvailable={readiness.data?.execution.guided === "ready"}
+      runtimeAvailable={capabilities.decisionMutations}
+      toolExecutionAvailable={capabilities.toolDispatch}
       availabilityPending={readiness.isLoading}
     />}</QueryBoundary>
     <CursorControls nextCursor={inbox.data?.nextCursor ?? null} cursor={filters.values.cursor} onChange={(cursor) => filters.set({ cursor }, { resetCursor: false, replace: false })} />
   </div>;
 }
 
-export function DecisionInboxSections({ items, onChanged, runtimeAvailable = true, availabilityPending = false }: {
+export function DecisionInboxSections({ items, onChanged, runtimeAvailable = true, toolExecutionAvailable = runtimeAvailable, availabilityPending = false }: {
   items: DecisionInboxRecord[];
   onChanged: () => void;
   runtimeAvailable?: boolean;
+  toolExecutionAvailable?: boolean;
   availabilityPending?: boolean;
 }) {
   return <>{SECTION_ORDER.map((kind) => {
@@ -120,19 +176,19 @@ export function DecisionInboxSections({ items, onChanged, runtimeAvailable = tru
     const section = SECTION_LABELS[kind];
     return <section key={kind} aria-labelledby={`decision-section-${kind}`}>
       <div className="os-section-heading"><div><h2 id={`decision-section-${kind}`}>{section.title}</h2><p>{section.description}</p></div><StatusPill status="canonical">{records.length} on this page</StatusPill></div>
-      <div className="os-decision-grid">{records.map((record) => <DecisionInboxCard key={`${record.kind}:${record.id}`} record={record} onChanged={onChanged} runtimeAvailable={runtimeAvailable} availabilityPending={availabilityPending} />)}</div>
+      <div className="os-decision-grid">{records.map((record) => <DecisionInboxCard key={`${record.kind}:${record.id}`} record={record} onChanged={onChanged} runtimeAvailable={runtimeAvailable} toolExecutionAvailable={toolExecutionAvailable} availabilityPending={availabilityPending} />)}</div>
     </section>;
   })}</>;
 }
 
-function DecisionInboxCard({ record, onChanged, runtimeAvailable, availabilityPending }: { record: DecisionInboxRecord; onChanged: () => void; runtimeAvailable: boolean; availabilityPending: boolean }) {
-  if (record.kind === "guided_decision") return <GuidedInboxCard record={record} onChanged={onChanged} runtimeAvailable={runtimeAvailable} availabilityPending={availabilityPending} />;
+function DecisionInboxCard({ record, onChanged, runtimeAvailable, toolExecutionAvailable, availabilityPending }: { record: DecisionInboxRecord; onChanged: () => void; runtimeAvailable: boolean; toolExecutionAvailable: boolean; availabilityPending: boolean }) {
+  if (record.kind === "guided_decision") return <GuidedInboxCard record={record} onChanged={onChanged} runtimeAvailable={runtimeAvailable} toolExecutionAvailable={toolExecutionAvailable} availabilityPending={availabilityPending} />;
   if (record.kind === "autonomous_contract") return <ContractCard record={record} />;
   if (record.kind === "autonomous_exception") return <ExceptionCard record={record} />;
   return <AdministrativeApprovalCard record={record} onChanged={onChanged} />;
 }
 
-function GuidedInboxCard({ record, onChanged, runtimeAvailable, availabilityPending }: { record: GuidedDecisionInboxRecord; onChanged: () => void; runtimeAvailable: boolean; availabilityPending: boolean }) {
+function GuidedInboxCard({ record, onChanged, runtimeAvailable, toolExecutionAvailable, availabilityPending }: { record: GuidedDecisionInboxRecord; onChanged: () => void; runtimeAvailable: boolean; toolExecutionAvailable: boolean; availabilityPending: boolean }) {
   const decision: GuidedDecision = {
     id: record.id,
     missionId: record.mission.id,
@@ -147,7 +203,7 @@ function GuidedInboxCard({ record, onChanged, runtimeAvailable, availabilityPend
     expiresAt: record.expiresAt ?? record.createdAt,
     createdAt: record.createdAt,
   };
-  return <DecisionCard decision={decision} onChanged={onChanged} runtimeAvailable={runtimeAvailable} availabilityPending={availabilityPending} />;
+  return <DecisionCard decision={decision} onChanged={onChanged} runtimeAvailable={runtimeAvailable} toolExecutionAvailable={toolExecutionAvailable} availabilityPending={availabilityPending} />;
 }
 
 function ContractCard({ record }: { record: AutonomousContractInboxRecord }) {
@@ -201,10 +257,11 @@ export function AdministrativeApprovalCard({ record, onChanged }: { record: Admi
   </Card>;
 }
 
-export function DecisionCard({ decision, onChanged, runtimeAvailable = true, availabilityPending = false }: {
+export function DecisionCard({ decision, onChanged, runtimeAvailable = true, toolExecutionAvailable = runtimeAvailable, availabilityPending = false }: {
   decision: GuidedDecision;
   onChanged: () => void;
   runtimeAvailable?: boolean;
+  toolExecutionAvailable?: boolean;
   availabilityPending?: boolean;
 }) {
   const [authorizationNote, setAuthorizationNote] = useState("");
@@ -215,6 +272,7 @@ export function DecisionCard({ decision, onChanged, runtimeAvailable = true, ava
   const action = useActionState();
   const pending = decision.status === "pending" && Date.parse(decision.expiresAt) > Date.now();
   const actionKind = guidedDecisionActionKind(decision.requestedParameters);
+  const readable = guidedDecisionReadableSummary(decision.requestedParameters);
   const agentExecutable = actionKind !== null && actionKind !== "manual";
   const submit = (operation: GuidedDecisionControl, event: FormEvent): void => {
     event.preventDefault();
@@ -249,9 +307,19 @@ export function DecisionCard({ decision, onChanged, runtimeAvailable = true, ava
   return <Card className="os-guided-decision-card">
     <div className="os-card-heading"><div><p className="os-eyebrow">Step {decision.stepId}</p><h3>{decision.rationale}</h3></div><StatusPill status={pending ? decision.status : decision.status === "pending" ? "expired" : decision.status} /></div>
     <dl className="os-key-values"><div><dt>Risk</dt><dd>{decision.riskClass}</dd></div><div><dt>Reversibility</dt><dd>{decision.reversibility}</dd></div><div><dt>Expires</dt><dd>{formatTime(decision.expiresAt)}</dd></div><div><dt>Fingerprint</dt><dd className="os-mono">{decision.actionFingerprint.slice(0, 16)}…</dd></div></dl>
+    {readable && <section className="os-guided-action-summary" aria-label="Readable exact action">
+      <h4>What Ti-Scale will do</h4>
+      <dl className="os-key-values">
+        <div><dt>Action</dt><dd>{readable.action}</dd></div>
+        <div><dt>Exact target</dt><dd>{readable.target}</dd></div>
+        <div><dt>Execution path</dt><dd>{readable.execution}</dd></div>
+        {readable.exactInputs.map((item) => <div key={`${item.label}:${item.value}`}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}
+      </dl>
+    </section>}
     <JsonDetails label="Exact normalized parameters" value={decision.requestedParameters} />
     {pending && <div className="os-decision-actions">
-      {!runtimeAvailable && <p className="os-guided-inline-warning" role="status">{availabilityPending ? "Checking the exact-step runtime boundary." : "This represented decision is read-only until a callable, policy-enforced Guided runtime is connected."}</p>}
+      {!runtimeAvailable && <p className="os-guided-inline-warning" role="status">{availabilityPending ? "Checking the exact-step runtime boundary." : "This represented decision is read-only until a policy-enforced Guided runtime is connected."}</p>}
+      {runtimeAvailable && agentExecutable && !toolExecutionAvailable && <p className="os-guided-inline-warning" role="status">Agent tool execution is unavailable in this Guided runtime mode. You can still reject, skip, or stop this exact decision, or review an operator-run result.</p>}
       <section aria-labelledby={`execute-${decision.id}`}>
         <h4 id={`execute-${decision.id}`}>Authorize represented execution</h4>
         <p>Authorizes only the fingerprint and normalized parameters shown above.</p>
@@ -259,9 +327,9 @@ export function DecisionCard({ decision, onChanged, runtimeAvailable = true, ava
           <label><span>Optional authorization note</span><input maxLength={2000} value={authorizationNote} onChange={(event) => setAuthorizationNote(event.target.value)} /></label>
           {!agentExecutable
             ? <p className="os-muted">{actionKind === "manual"
-              ? "This operator-run step cannot be dispatched through MCP. Perform only the represented procedure, then open the Guided result review below."
+              ? "This operator-run step cannot be dispatched by Ti-Scale. Perform only the represented procedure, then open the Guided result review below."
               : "This retained step has no recognized executable action kind. It cannot be dispatched; choose another approach or stop safely."}</p>
-            : <Button disabled={!runtimeAvailable || availabilityPending || action.pending}>Run this exact step</Button>}
+            : <Button disabled={!toolExecutionAvailable || availabilityPending || action.pending}>Run this exact step</Button>}
         </form>
       </section>
 

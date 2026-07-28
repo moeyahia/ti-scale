@@ -1,68 +1,73 @@
-import { createDatabaseConnection, inImmediateTransaction } from "../../../server/db";
-import { MissionIntakeService } from "../../../server/intake";
-import { hashCanonical } from "../../../server/missions/canonical";
-import { MissionRepository } from "../../../server/missions/MissionRepository";
-import { validateMissionCreateRequest } from "../../../server/missions/validation";
-import { completeRuntimeManifests } from "../../unit/domain/fixtures";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { E2E_DATABASE_PATH } from "./environment";
-import { normalizeFixtureNamespace } from "./fixtureNamespace";
 
 export interface AutonomousBranchFixture {
   readonly missionId: string;
   readonly runId: string;
 }
 
+interface SeedResponse {
+  readonly fixture?: AutonomousBranchFixture;
+  readonly error?: string;
+}
+
+const seedEntry = fileURLToPath(new URL("./autonomousBranchFixtureSeed.ts", import.meta.url));
+
 function databasePath(): string {
   if (!E2E_DATABASE_PATH) throw new Error("The isolated Playwright database path was not configured");
   return E2E_DATABASE_PATH;
 }
 
+function isFixture(value: unknown): value is AutonomousBranchFixture {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.missionId === "string"
+    && record.missionId.length > 0
+    && typeof record.runId === "string"
+    && record.runId.length > 0;
+}
+
+/**
+ * Keep the Playwright worker on its supported Node runtime while seeding the
+ * isolated fixture through the same Bun SQLite adapter as the application.
+ */
 export function createAutonomousBranchFixture(instanceId: string): AutonomousBranchFixture {
-  const namespace = normalizeFixtureNamespace(instanceId);
-  const database = createDatabaseConnection({
-    filename: databasePath(),
-    fileMustExist: true,
-    busyTimeoutMs: 120_000,
-  });
-  try {
-    const resolved = new MissionIntakeService({
-      // Strict Autonomous creation must be backed by an attested, locally
-      // enforced execution path. The fail-closed empty-manifest default is
-      // appropriate for product code, but it cannot create this executable
-      // branch-contract fixture.
-      readRuntimeManifests: () => completeRuntimeManifests(),
-      clock: () => new Date("2026-07-17T07:00:00.000Z"),
-    }).resolve({
-      journey: "autonomous",
-      authorizationAcknowledged: true,
-      targets: [{ value: `lab:branch-contract-${namespace}` }],
-      templateId: "safe_recon",
-      title: `Autonomous branch contract ${namespace}`,
-      objective: "Validate a versioned successor contract using only runtime-derived structured policy controls.",
-    });
-    const request = validateMissionCreateRequest(resolved.request);
-    if (request.journey !== "autonomous") throw new Error("Expected an Autonomous branch fixture request");
-    const created = inImmediateTransaction(database, () => {
-      const mission = new MissionRepository(database).create({
-        request,
-        requestHash: hashCanonical(request),
-        idempotencyKey: `autonomous-branch-contract-e2e-${namespace}`,
-        actorId: `e2e-branch-operator-${namespace}`,
-      });
-      const completedAt = "2026-07-17T07:05:00.000Z";
-      database.prepare(`
-        UPDATE runs SET status = 'completed', progress = 1,
-          status_reason = 'Completed autonomously for structured branch-contract coverage.',
-          next_action_summary = 'Create a separate versioned run when needed.',
-          ended_at = ?, updated_at = ?, version = version + 1 WHERE id = ?
-      `).run(completedAt, completedAt, mission.run.id);
-      database.prepare(`
-        UPDATE missions SET status = 'completed', updated_at = ? WHERE id = ?
-      `).run(completedAt, mission.mission.id);
-      return mission;
-    });
-    return { missionId: created.mission.id, runId: created.run.id };
-  } finally {
-    database.close();
+  const result = spawnSync(
+    process.env.TI_SCALE_BUN_EXECUTABLE?.trim() || "bun",
+    ["run", seedEntry, instanceId],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        TI_SCALE_E2E_DATABASE_PATH: databasePath(),
+      },
+      maxBuffer: 1024 * 1024,
+      timeout: 120_000,
+    },
+  );
+  if (result.error) {
+    throw new Error(`Autonomous branch fixture seed could not start: ${result.error.message}`);
   }
+  if (result.signal) {
+    throw new Error(`Autonomous branch fixture seed was terminated by ${result.signal}`);
+  }
+  const output = result.stdout.trim();
+  let response: SeedResponse;
+  try {
+    response = JSON.parse(output) as SeedResponse;
+  } catch {
+    throw new Error(
+      `Autonomous branch fixture seed returned invalid JSON (exit ${String(result.status)}): ${output || result.stderr.trim()}`,
+    );
+  }
+  if (result.status !== 0 || response.error) {
+    throw new Error(
+      `Autonomous branch fixture seed failed (exit ${String(result.status)}): ${response.error ?? result.stderr.trim()}`,
+    );
+  }
+  if (!isFixture(response.fixture)) {
+    throw new Error("Autonomous branch fixture seed did not return stable mission and run identifiers");
+  }
+  return response.fixture;
 }

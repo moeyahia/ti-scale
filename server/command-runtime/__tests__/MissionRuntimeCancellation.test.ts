@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import {
+  canonicalMissionMemoryNodeId,
+  canonicalRunMemoryNodeId,
+} from "../../brain-runtime";
 import { createDatabaseConnection, migrateDatabase, type SqliteDatabase } from "../../db";
 import type { DurableAction } from "../../orchestration";
 import {
@@ -90,6 +94,38 @@ function seedRun(database: SqliteDatabase) {
   return { missionId, runId, assignmentId };
 }
 
+function seedActiveAction(database: SqliteDatabase, fixture: ReturnType<typeof seedRun>) {
+  const actionId = "action-cancellation-crash";
+  const toolCallId = "tool-call-cancellation-crash";
+  database.prepare(`
+    INSERT INTO actions (
+      id, mission_id, run_id, step_id, assignment_id, action_type, action_class,
+      fingerprint, normalized_arguments_json, scoped_target, status,
+      intent_summary, started_at, created_at, updated_at
+    ) VALUES (?, ?, ?, 'step-cancellation-crash', ?,
+      'kali:test-cancellation', 'port_service_enumeration', ?, '{}',
+      '127.0.0.1', 'running', 'Exercise one disposable cancellation boundary',
+      ?, ?, ?)
+  `).run(
+    actionId,
+    fixture.missionId,
+    fixture.runId,
+    fixture.assignmentId,
+    "b".repeat(64),
+    NOW,
+    NOW,
+    NOW,
+  );
+  database.prepare(`
+    INSERT INTO tool_calls (
+      id, action_id, provider, tool_name, normalized_arguments_json,
+      status, started_at, created_at
+    ) VALUES (?, ?, 'reviewed-local-process', 'fixture-cancellation-tool',
+      '{}', 'running', ?, ?)
+  `).run(toolCallId, actionId, NOW, NOW);
+  return { actionId, toolCallId };
+}
+
 function runtime(
   database: SqliteDatabase,
   workerId: string,
@@ -108,11 +144,160 @@ function runtime(
 }
 
 describe("MissionRuntimeEngine cancellation durability", () => {
+  test("startup clears active-work residue beneath an older completed run", async () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    databases.push(database);
+    migrateDatabase(database);
+    const fixture = seedRun(database);
+    database.prepare(`
+      UPDATE runs SET status = 'completed', status_reason = 'Completed by the prior runtime',
+        ended_at = ? WHERE id = ?
+    `).run(NOW, fixture.runId);
+
+    const restarted = runtime(database, "completed-residue-worker");
+    try {
+      await restarted.start();
+      expect(database.prepare(`
+        SELECT status, current_step_id, current_owner_id, lease_owner,
+          lease_expires_at FROM runs WHERE id = ?
+      `).get(fixture.runId)).toEqual({
+        status: "completed",
+        current_step_id: null,
+        current_owner_id: null,
+        lease_owner: null,
+        lease_expires_at: null,
+      });
+      expect(database.prepare(`
+        SELECT status, ended_at, lease_owner FROM assignments WHERE id = ?
+      `).get(fixture.assignmentId)).toEqual({
+        status: "cancelled",
+        ended_at: NOW,
+        lease_owner: null,
+      });
+      expect(database.prepare(`
+        SELECT status, ended_at FROM provider_turns
+        WHERE id = 'provider-cancellation-crash'
+      `).get()).toEqual({ status: "cancelled", ended_at: NOW });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM events
+        WHERE run_id = ? AND event_type = 'run.completion_residue_reconciled'
+      `).get(fixture.runId)).toEqual({ count: 1 });
+
+      await restarted.stop();
+      await restarted.start();
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM events
+        WHERE run_id = ? AND event_type = 'run.completion_residue_reconciled'
+      `).get(fixture.runId)).toEqual({ count: 1 });
+    } finally {
+      await restarted.stop();
+    }
+  });
+
+  test("startup closes failed-run child residue and creates one structured diagnosis", async () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    databases.push(database);
+    migrateDatabase(database);
+    const fixture = seedRun(database);
+    database.prepare(`
+      UPDATE runs SET status = 'failed', status_reason = 'Execution boundary failed safely',
+        ended_at = ?, lease_owner = 'orphan-worker', lease_acquired_at = ?,
+        last_heartbeat_at = ?, lease_expires_at = '2026-07-16T12:10:00.000Z'
+      WHERE id = ?
+    `).run(NOW, NOW, NOW, fixture.runId);
+    database.prepare(`
+      INSERT INTO actions (
+        id, mission_id, run_id, step_id, assignment_id, action_type, action_class,
+        fingerprint, normalized_arguments_json, scoped_target, status,
+        intent_summary, result_summary, error_category, progress_signature,
+        started_at, ended_at, created_at, updated_at
+      ) VALUES (
+        'action-failed-residue', ?, ?, 'step-cancellation-crash', ?,
+        'kali:test-boundary', 'port_service_enumeration', ?,
+        '{"input":{},"orchestration":{"target":"127.0.0.1","kind":"tool","idempotent":true,"destructive":false,"planVersion":1}}',
+        '127.0.0.1', 'failed', 'Inspect the loopback test service',
+        'The reviewed workspace dependency was missing.', 'dependency_missing', ?,
+        ?, ?, ?, ?
+      )
+    `).run(
+      fixture.missionId,
+      fixture.runId,
+      fixture.assignmentId,
+      "f".repeat(64),
+      "e".repeat(64),
+      NOW,
+      NOW,
+      NOW,
+      NOW,
+    );
+
+    const restarted = runtime(database, "failed-residue-worker");
+    try {
+      await restarted.start();
+      expect(database.prepare(`
+        SELECT status, ended_at FROM plan_steps WHERE id = 'step-cancellation-crash'
+      `).get()).toEqual({ status: "failed", ended_at: NOW });
+      expect(database.prepare(`
+        SELECT status, ended_at, lease_owner, lease_acquired_at,
+          last_heartbeat_at, lease_expires_at
+        FROM assignments WHERE id = ?
+      `).get(fixture.assignmentId)).toEqual({
+        status: "failed",
+        ended_at: NOW,
+        lease_owner: null,
+        lease_acquired_at: null,
+        last_heartbeat_at: null,
+        lease_expires_at: null,
+      });
+      expect(database.prepare(`
+        SELECT status, current_step_id, current_owner_id, lease_owner,
+          lease_expires_at FROM runs WHERE id = ?
+      `).get(fixture.runId)).toEqual({
+        status: "failed",
+        current_step_id: null,
+        current_owner_id: null,
+        lease_owner: null,
+        lease_expires_at: null,
+      });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM events
+        WHERE run_id = ? AND event_type = 'run.failure_residue_reconciled'
+      `).get(fixture.runId)).toEqual({ count: 1 });
+      expect(database.prepare(`
+        SELECT category, code, state, action_id, assignment_id
+        FROM failure_diagnoses WHERE run_id = ?
+      `).get(fixture.runId)).toEqual({
+        category: "dependency_missing",
+        code: "terminal_failure_residue_reconciled",
+        state: "terminal",
+        action_id: "action-failed-residue",
+        assignment_id: fixture.assignmentId,
+      });
+
+      // A second startup pass is idempotent: no duplicate event or diagnosis.
+      await restarted.stop();
+      const second = runtime(database, "failed-residue-worker-2");
+      await second.start();
+      await second.stop();
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM events
+        WHERE run_id = ? AND event_type = 'run.failure_residue_reconciled'
+      `).get(fixture.runId)).toEqual({ count: 1 });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM failure_diagnoses
+        WHERE run_id = ? AND action_id = 'action-failed-residue'
+      `).get(fixture.runId)).toEqual({ count: 1 });
+    } finally {
+      await restarted.stop();
+    }
+  });
+
   test("closes provider work before the terminal checkpoint and reconciles historical terminal residue", async () => {
     const database = createDatabaseConnection({ filename: ":memory:" });
     databases.push(database);
     migrateDatabase(database);
     const fixture = seedRun(database);
+    const active = seedActiveAction(database, fixture);
     const crashing = runtime(database, "cancellation-worker-a", (point) => {
       if (point === "cancellation_terminal_before_runtime_cleanup") {
         throw new Error("simulated process loss after terminal commit");
@@ -125,8 +310,25 @@ describe("MissionRuntimeEngine cancellation durability", () => {
       "Stop the disposable run and every child",
     )).rejects.toThrow("Injected process crash after durable commit");
 
-    expect(database.prepare("SELECT status FROM runs WHERE id = ?").get(fixture.runId))
-      .toEqual({ status: "cancelled" });
+    expect(database.prepare(`
+      SELECT status, current_step_id, current_owner_id, lease_owner,
+        lease_acquired_at, last_heartbeat_at, lease_expires_at
+      FROM runs WHERE id = ?
+    `).get(fixture.runId)).toEqual({
+      status: "cancelled",
+      current_step_id: null,
+      current_owner_id: null,
+      lease_owner: null,
+      lease_acquired_at: null,
+      last_heartbeat_at: null,
+      lease_expires_at: null,
+    });
+    expect(database.prepare(`
+      SELECT status, ended_at FROM actions WHERE id = ?
+    `).get(active.actionId)).toEqual({ status: "cancelled", ended_at: NOW });
+    expect(database.prepare(`
+      SELECT status, ended_at FROM tool_calls WHERE id = ?
+    `).get(active.toolCallId)).toEqual({ status: "cancelled", ended_at: NOW });
     expect(database.prepare("SELECT status, ended_at FROM provider_turns WHERE run_id = ?").get(fixture.runId))
       .toEqual({ status: "cancelled", ended_at: NOW });
     expect(database.prepare(`
@@ -139,6 +341,9 @@ describe("MissionRuntimeEngine cancellation durability", () => {
       last_heartbeat_at: null,
       lease_expires_at: null,
     });
+    expect(database.prepare(`
+      SELECT released_at FROM control_plane_leases WHERE run_id = ?
+    `).get(fixture.runId)).toEqual({ released_at: NOW });
     const terminalCheckpoint = database.prepare(`
       SELECT state_json, state_hash FROM checkpoints
       WHERE run_id = ? ORDER BY event_sequence DESC, created_at DESC LIMIT 1
@@ -224,17 +429,31 @@ describe("MissionRuntimeEngine cancellation durability", () => {
     expect(brainHooks.map(({ hook }) => hook)).toEqual([
       "evaluation",
       "lesson_proposal",
+      "reporting",
       "closeout",
     ]);
-    expect(brainHooks.every(({ status, context_pack_id }) =>
-      status === "no_relevant_memory" && typeof context_pack_id === "string")).toBe(true);
+    expect(brainHooks.map(({ status }) => status)).toEqual([
+      "ready",
+      "ready",
+      "ready",
+      "ready",
+    ]);
+    expect(brainHooks.every(({ context_pack_id }) => typeof context_pack_id === "string")).toBe(true);
+    const canonicalMissionNodeId = canonicalMissionMemoryNodeId(fixture.missionId);
+    const canonicalRunNodeId = canonicalRunMemoryNodeId(fixture.runId);
+    expect(database.prepare(`
+      SELECT COUNT(DISTINCT mcp.id) AS count
+      FROM memory_context_packs mcp
+      JOIN memory_context_items mci ON mci.context_pack_id = mcp.id
+      WHERE mcp.run_id = ? AND mci.node_id IN (?, ?)
+    `).get(fixture.runId, canonicalMissionNodeId, canonicalRunNodeId)).toEqual({ count: 4 });
     expect(database.prepare(`
       SELECT COUNT(*) AS count FROM memory_context_packs
       WHERE run_id = ? AND NOT EXISTS (
         SELECT 1 FROM memory_context_items
         WHERE context_pack_id = memory_context_packs.id
       )
-    `).get(fixture.runId)).toEqual({ count: 3 });
+    `).get(fixture.runId)).toEqual({ count: 0 });
     expect(database.prepare("SELECT COUNT(*) AS count FROM run_evaluations WHERE run_id = ?")
       .get(fixture.runId)).toEqual({ count: 1 });
   });

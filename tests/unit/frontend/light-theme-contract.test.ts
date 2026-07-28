@@ -103,10 +103,46 @@ describe("Ti-Scale editorial titanium theme contract", () => {
     expect(authBlock).toContain("background: var(--os-canvas);");
     expect(authBlock).not.toContain("background-size:");
     expect(graphCanvas).toContain('color("--os-graph-canvas"');
-    expect(graphCanvas).toContain('mission: "--os-graph-node-mission"');
+    expect(graphCanvas).toContain('node: color("--os-graph-node-titanium"');
+    expect(graphCanvas).not.toContain("theme.grid");
+    expect(graphCanvas).toContain('data-background-grid="removed"');
+    expect(graphCanvas).toContain('data-background-artwork="removed"');
+    expect(graphCanvas).toContain('data-anatomy-silhouette="removed"');
+    expect(graphCanvas).toContain('data-spinal-silhouette="removed"');
+    expect(graphCanvas).toContain('data-visual-theme="dark-titanium"');
+    const graphWorkspaceBlock = featureCss.match(/\.ti-scale \.brain-graph-workspace\s*\{(?<body>[\s\S]*?)\n\}/u)?.groups?.body;
+    expect(graphWorkspaceBlock).toContain("--os-graph-canvas:#0b1015;");
+    expect(graphWorkspaceBlock).toContain("color-scheme:dark;");
+    expect(graphWorkspaceBlock).not.toContain("--os-graph-grid");
+    expect(graphCanvas).toContain('data-brain-anatomy="particle-cloud-3d"');
+    expect(graphCanvas).toContain('data-node-language="unified-titanium-dots"');
+    expect(graphCanvas).toContain('data-region-taxonomy="attack-knowledge"');
+    expect(graphCanvas).toContain('data-renderer={rendererMode}');
+    expect(graphCanvas).toContain('window.matchMedia("(prefers-reduced-motion: reduce)")');
+    expect(graphCanvas).toContain('document.addEventListener("visibilitychange"');
+    expect(graphCanvas).toContain("window.requestAnimationFrame(draw)");
+    expect(graphCanvas).toContain("buildNeuronSignalRoutes(displayNodes, displayEdges, selectedId)");
     expect(tokenCss).toContain("@keyframes os-assembly-in");
     expect(tokenCss).toContain("@keyframes os-data-transfer");
     expect(tokenCss.match(/\binfinite\b/gu)?.length).toBe(1);
     expect(tokenCss).toContain("@media (prefers-reduced-motion: reduce)");
+  });
+
+  test("constrains stacked operational sections to the mobile content track", () => {
+    expect(featureCss).toContain(
+      ".ti-scale .os-section-stack { min-width:0; grid-template-columns:minmax(0,1fr); }",
+    );
+  });
+
+  test("renders the in-flight plan boundary as a readable responsive titanium surface", () => {
+    expect(featureCss).toContain(".os-plan-change-resolution {");
+    expect(featureCss).toContain("box-shadow: inset 3px 0 0 var(--os-accent);");
+    expect(featureCss).toContain(".os-plan-change-work-grid,");
+    expect(featureCss).toContain(".os-plan-change-resolution-options {");
+    expect(featureCss).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
+    expect(featureCss).toContain(".os-plan-change-work-grid li strong,");
+    expect(featureCss).toContain(".os-plan-change-work-grid li span,");
+    expect(featureCss).toContain(".os-plan-change-work-grid li small {");
+    expect(featureCss).toContain(".os-plan-change-resolution-options { grid-template-columns: 1fr; }");
   });
 });

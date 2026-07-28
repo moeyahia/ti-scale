@@ -1,0 +1,17 @@
+export {
+  SpecialistToolAdapterError,
+  SpecialistToolDispatchError,
+  SpecialistToolDispatchService,
+  SPECIALIST_TOOL_ADAPTER_CONTRACT_SCHEMA_VERSION,
+  assertSpecialistToolInvocationAdapterContract,
+  specialistDispatchRecordPrefix,
+  type SpecialistLocalToolBinding,
+  type SpecialistMcpToolBinding,
+  type SpecialistToolInvocationAdapterContract,
+  type SpecialistToolDispatchErrorCode,
+  type SpecialistToolDispatchServiceOptions,
+  type SpecialistToolInvocation,
+  type SpecialistToolInvocationAdapter,
+  type SpecialistToolInvocationResult,
+  type SpecialistToolInvocationResultSink,
+} from "./SpecialistToolDispatchService";

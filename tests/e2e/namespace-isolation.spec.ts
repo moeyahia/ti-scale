@@ -25,7 +25,11 @@ test.describe(`${TEST_ID} browser and asset boundary`, () => {
     const graph = page.getByRole("application", { name: /^Memory graph with /u });
     if (await graph.isVisible()) {
       await expect(graph).toHaveAttribute("aria-busy", "false");
-      await expect(page.getByText("Memory graph layout ready", { exact: true })).toBeVisible();
+      await expect(
+        page.getByRole("status").filter({
+          hasText: "Attack-knowledge brain layout ready",
+        }),
+      ).toBeVisible();
     }
     await browserAudit.waitForPageApiSettlement(page, { quietMs: 1_000 });
     const storage = await page.evaluate(({ localKey, sessionKey }) => ({

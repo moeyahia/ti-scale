@@ -16,14 +16,19 @@ import {
 import type { SqliteDatabase } from "../db";
 import { PlanChangeIdempotencyStore } from "./PlanChangeIdempotencyStore";
 import { PlanChangeService } from "./PlanChangeService";
-import type { PlanChangeActor } from "./types";
+import type {
+  PlanChangeActor,
+  PlanChangeAffectedWorkStopReceipt,
+} from "./types";
 import { PlanChangeError } from "./types";
 import {
   identifier,
   parseApplyPlanChangeInput,
   parseCreatePlanChangeInput,
   parseEditPlanChangeInput,
+  parseFinalizePlanChangeInflightInput,
   parseRejectPlanChangeInput,
+  parseResolvePlanChangeInflightInput,
   requiredIdempotencyKey,
 } from "./validation";
 
@@ -50,6 +55,16 @@ export interface PlanChangeRouterDependencies {
   readonly assertRunMutationLease?: AssertRunMutationLease;
   /** Shared local Brain boundary; the composition root must supply this in production. */
   readonly brainContext?: BrainContextService;
+  /**
+   * Trusted runtime-only cancellation. It must return only after every exact
+   * affected child process has stopped; the router verifies the receipt
+   * before canonical action status is allowed to change.
+   */
+  readonly cancelAffectedWork?: (input: {
+    readonly runId: string;
+    readonly actionIds: readonly string[];
+    readonly reason: string;
+  }) => Promise<PlanChangeAffectedWorkStopReceipt>;
 }
 
 function basePath(value: string | undefined): string {
@@ -179,8 +194,8 @@ export function createPlanChangeRouter(dependencies: PlanChangeRouterDependencie
 
   const route = (
     capability: PlanChangeCapability,
-    handler: (request: Request, response: Response, context: { readonly actor: PlanChangeActor; readonly missionId: string; readonly runId: string }) => void,
-  ) => (request: Request, response: Response): void => {
+    handler: (request: Request, response: Response, context: { readonly actor: PlanChangeActor; readonly missionId: string; readonly runId: string }) => void | Promise<void>,
+  ) => async (request: Request, response: Response): Promise<void> => {
     const traceId = attachV2RequestId(request, response);
     try {
       const resolvedActor = actor(dependencies.resolveActor(request));
@@ -195,10 +210,43 @@ export function createPlanChangeRouter(dependencies: PlanChangeRouterDependencie
           throw new PlanChangeError("plan_change_not_found", "Plan change request is not present in this run", "not_found", 404, "Use a canonical link from the selected run.");
         }
       }
-      handler(request, response, { actor: resolvedActor, ...scope });
+      await handler(request, response, { actor: resolvedActor, ...scope });
     } catch (error) {
       sendError(response, traceId, error);
     }
+  };
+
+  const mutateAsync = async (
+    request: Request,
+    response: Response,
+    context: { readonly actor: PlanChangeActor; readonly runId: string },
+    scope: string,
+    requestValue: unknown,
+    status: number,
+    operation: () => Promise<unknown>,
+  ): Promise<void> => {
+    const authority = mutationAuthority.authorize({
+      runId: context.runId,
+      actorId: context.actor.id,
+      mode: "lease",
+      ...(dependencies.assertRunMutationLease
+        ? { assertLease: dependencies.assertRunMutationLease }
+        : {}),
+    });
+    const result = await idempotency.executeAsync(
+      scope,
+      requiredIdempotencyKey(request.get("Idempotency-Key")),
+      context.actor,
+      requestValue,
+      async () => {
+        authority.assertCurrent();
+        const responseValue = await operation();
+        authority.assertCurrent();
+        return responseValue;
+      },
+    );
+    response.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+    response.status(status).json(result.response);
   };
 
   const mutate = (
@@ -248,6 +296,15 @@ export function createPlanChangeRouter(dependencies: PlanChangeRouterDependencie
     response.json({ schemaVersion: "2.4", request: service.get(identifier(request.params.requestId, "requestId")) });
   }));
 
+  router.get(`${prefix}/runs/:runId/plan-changes/:requestId/inflight-resolution`, route("read_plan_changes", (request, response) => {
+    response.json({
+      schemaVersion: "2.4",
+      resolution: service.getInflightResolution(
+        identifier(request.params.requestId, "requestId"),
+      ) ?? null,
+    });
+  }));
+
   router.post(`${prefix}/runs/:runId/plan-changes`, route("manage_plan_changes", (request, response, context) => {
     const input = parseCreatePlanChangeInput(context.missionId, context.runId, request.body);
     mutate(request, response, context, `plan_change.propose:${context.runId}`, input, 201, (brainContext) => ({
@@ -284,6 +341,85 @@ export function createPlanChangeRouter(dependencies: PlanChangeRouterDependencie
       schemaVersion: "2.4",
       request: service.reject(input, context.actor),
     }));
+  }));
+
+  router.post(`${prefix}/runs/:runId/plan-changes/:requestId/resolve-inflight`, route("manage_plan_changes", async (request, response, context) => {
+    const requestId = identifier(request.params.requestId, "requestId");
+    const input = parseResolvePlanChangeInflightInput(requestId, request.body);
+    await mutateAsync(
+      request,
+      response,
+      context,
+      `plan_change.resolve_inflight:${context.runId}:${requestId}`,
+      input,
+      200,
+      async () => {
+        let resolution = service.beginInflightResolution(input, context.actor);
+        if (input.mode === "checkpoint_cancel_affected_work") {
+          if (!dependencies.cancelAffectedWork) {
+            throw new PlanChangeError(
+              "plan_change_exact_cancellation_unavailable",
+              "The trusted runtime does not expose exact affected-child cancellation",
+              "dependency_missing",
+              503,
+              "Restore the Ti-Scale runtime cancellation port; full-run cancellation is never substituted.",
+            );
+          }
+          const runningActionIds = (dependencies.database.prepare(`
+            SELECT id FROM actions
+            WHERE run_id = ? AND status = 'running'
+              AND id IN (SELECT value FROM json_each(?))
+            ORDER BY id
+          `).all(
+            context.runId,
+            JSON.stringify(resolution.affectedActionIds),
+          ) as Array<{ readonly id: string }>).map((row) => row.id);
+          const receipt = await dependencies.cancelAffectedWork({
+            runId: context.runId,
+            actionIds: runningActionIds,
+            reason: input.reason,
+          });
+          const expected = [...runningActionIds].sort();
+          const stopped = [...new Set(receipt.stoppedActionIds)].sort();
+          if (
+            expected.length !== stopped.length
+            || expected.some((actionId, index) => actionId !== stopped[index])
+          ) {
+            throw new PlanChangeError(
+              "plan_change_cancellation_receipt_mismatch",
+              "The trusted runtime did not confirm the exact affected child set",
+              "state_conflict",
+              409,
+              "Keep the dispatch fence active and inspect the runtime cancellation receipt.",
+            );
+          }
+          resolution = service.confirmAffectedCancellation(
+            requestId,
+            resolution.version,
+            context.actor,
+            receipt,
+          );
+        }
+        return { schemaVersion: "2.4", resolution };
+      },
+    );
+  }));
+
+  router.post(`${prefix}/runs/:runId/plan-changes/:requestId/inflight-resolution/finalize`, route("manage_plan_changes", (request, response, context) => {
+    const requestId = identifier(request.params.requestId, "requestId");
+    const input = parseFinalizePlanChangeInflightInput(requestId, request.body);
+    mutate(
+      request,
+      response,
+      context,
+      `plan_change.finalize_inflight:${context.runId}:${requestId}`,
+      input,
+      200,
+      () => ({
+        schemaVersion: "2.4",
+        ...service.finalizeInflightResolution(input, context.actor),
+      }),
+    );
   }));
 
   return router;

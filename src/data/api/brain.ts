@@ -1,5 +1,7 @@
 import {
   parseBrainSummary,
+  parseAttackKnowledgeVaultPresetPreview,
+  parseAttackKnowledgeVaultScopeAmendment,
   parseCandidateRejection,
   parseForgetMutation,
   parseMemoryCandidatePage,
@@ -9,8 +11,14 @@ import {
   parseMemoryGraph,
   parseMemoryNodeDetail,
   parseMemoryNodePage,
+  parseMemoryOriginPage,
+  parseMemorySourcePage,
   parseNodeMutation,
+  parseOperationalHazardAggregateObservationResult,
+  parseOperationalHazardResetTotals,
+  parseOperatorPreferencePage,
   parseVaultConnectionMutation,
+  parseVaultDisconnectMutation,
   parseVaultHealthCheck,
   parseVaultOperation,
   parseVaultRecovery,
@@ -18,6 +26,8 @@ import {
 } from "../../domain/schemas/brain";
 import type {
   BrainSummary,
+  AttackKnowledgeVaultPresetPreview,
+  AttackKnowledgeVaultScopeAmendment,
   MemoryCandidatePage,
   MemoryContextPack,
   MemoryContextPackPage,
@@ -29,10 +39,16 @@ import type {
   MemoryNode,
   MemoryNodeDetail,
   MemoryNodePage,
+  MemoryOriginPage,
+  MemorySourcePage,
   MemoryNodeQuery,
   MemoryScope,
   MemorySensitivity,
+  OperationalHazardAggregateObservationResult,
+  OperationalHazardResetTotals,
+  OperatorPreferencePage,
   VaultConnection,
+  VaultDisconnectMutation,
   VaultHealthCheckResult,
   VaultOperationResult,
   VaultRecoveryResult,
@@ -95,6 +111,62 @@ export function fetchMemoryGraph(filters: MemoryGraphQuery, signal: AbortSignal)
 
 export function fetchMemoryNode(nodeId: string, signal: AbortSignal): Promise<MemoryNodeDetail> {
   return apiRequest(`${ROOT}/nodes/${encodeURIComponent(nodeId)}`, { signal, parse: parseMemoryNodeDetail });
+}
+
+export function fetchMemorySources(
+  nodeId: string,
+  signal: AbortSignal,
+  options: { readonly limit?: number; readonly cursor?: string } = {},
+): Promise<MemorySourcePage> {
+  return apiRequest(
+    `${ROOT}/nodes/${encodeURIComponent(nodeId)}/sources${queryString(options)}`,
+    { signal, parse: parseMemorySourcePage },
+  );
+}
+
+export function fetchMemorySourceOrigins(
+  nodeId: string,
+  sourceRecordId: string,
+  signal: AbortSignal,
+  options: { readonly limit?: number; readonly cursor?: string } = {},
+): Promise<MemoryOriginPage> {
+  return apiRequest(
+    `${ROOT}/nodes/${encodeURIComponent(nodeId)}/sources/${encodeURIComponent(sourceRecordId)}/origins${queryString(options)}`,
+    { signal, parse: parseMemoryOriginPage },
+  );
+}
+
+export function fetchOperatorPreferences(signal: AbortSignal): Promise<OperatorPreferencePage> {
+  return apiRequest(`${ROOT}/preferences`, { signal, parse: parseOperatorPreferencePage });
+}
+
+export function fetchOperationalHazardResetTotals(
+  missionId: string,
+  runId: string,
+  signal: AbortSignal,
+): Promise<OperationalHazardResetTotals> {
+  return apiRequest(
+    `/api/v2/missions/${encodeURIComponent(missionId)}/runs/${encodeURIComponent(runId)}/operational-hazards/reset-totals`,
+    { signal, parse: parseOperationalHazardResetTotals },
+  );
+}
+
+export function reportOperationalHazardResetMinimum(
+  input: { missionId: string; runId: string; reportedMinimum: number },
+  idempotencyKey = createBrainMutationKey(),
+): Promise<OperationalHazardAggregateObservationResult> {
+  if (!Number.isSafeInteger(input.reportedMinimum) || input.reportedMinimum < 1) {
+    throw new RangeError("Overall reset minimum must be a positive whole number");
+  }
+  return apiRequest(
+    `/api/v2/missions/${encodeURIComponent(input.missionId)}/runs/${encodeURIComponent(input.runId)}/operational-hazards/reset-minimum-observations`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ reportedMinimum: input.reportedMinimum }),
+      parse: parseOperationalHazardAggregateObservationResult,
+    },
+  );
 }
 
 export interface MemoryCandidateQuery {
@@ -171,6 +243,56 @@ export function fetchVaultSnapshot(signal: AbortSignal): Promise<VaultSnapshot> 
   return apiRequest(`${ROOT}/vault`, { signal, parse: parseVaultSnapshot });
 }
 
+export function fetchAttackKnowledgeVaultPreset(
+  includeConfirmed: boolean,
+  signal: AbortSignal,
+  includeOperatorProfile = false,
+): Promise<AttackKnowledgeVaultPresetPreview> {
+  if (includeOperatorProfile && !includeConfirmed) {
+    throw new TypeError("Operator Profile Vault preview requires confirmed knowledge scope");
+  }
+  return apiRequest(
+    `${ROOT}/vault/attack-knowledge-preset?includeConfirmed=${includeConfirmed ? "true" : "false"}&includeOperatorProfile=${includeOperatorProfile ? "true" : "false"}`,
+    { signal, parse: parseAttackKnowledgeVaultPresetPreview },
+  );
+}
+
+export function activateAttackKnowledgeVaultPreset(
+  input: {
+    expectedPolicyHash: string;
+    includeConfirmed: boolean;
+    permissionGranted: true;
+    activationAcknowledged: true;
+  },
+): Promise<VaultConnection> {
+  return mutation(
+    "/vault/attack-knowledge-preset/activate",
+    input,
+    parseVaultConnectionMutation,
+  );
+}
+
+export function amendAttackKnowledgeVaultPreset(
+  input: {
+    connectionId: string;
+    expectedUpdatedAt: string;
+    expectedCurrentPolicyHash: string;
+    expectedTargetPolicyHash: string;
+    includeConfirmed: true;
+    permissionGranted: true;
+    reason: string;
+  } & (
+    | { amendmentAcknowledged: true; includeOperatorProfile?: false }
+    | { includeOperatorProfile: true; operatorProfileAcknowledged: true }
+  ),
+): Promise<AttackKnowledgeVaultScopeAmendment> {
+  return mutation(
+    "/vault/attack-knowledge-preset/amend",
+    input,
+    parseAttackKnowledgeVaultScopeAmendment,
+  );
+}
+
 export function connectVault(input: {
   vaultPath: string;
   displayName: string;
@@ -178,6 +300,31 @@ export function connectVault(input: {
   syncScope?: Record<string, unknown>;
 }): Promise<VaultConnection> {
   return mutation("/vault/connect", input, parseVaultConnectionMutation);
+}
+
+export function disconnectVault(
+  input: {
+    connectionId: string;
+    expectedUpdatedAt: string;
+    reason: string;
+    disconnectAcknowledged: true;
+    allowProjectionDegraded: boolean;
+  },
+  idempotencyKey = createBrainMutationKey(),
+): Promise<VaultDisconnectMutation> {
+  return mutation(
+    `/vault/${encodeURIComponent(input.connectionId)}/disconnect`,
+    {
+      expectedUpdatedAt: input.expectedUpdatedAt,
+      reason: input.reason,
+      disconnectAcknowledged: input.disconnectAcknowledged,
+      allowProjectionDegraded: input.allowProjectionDegraded,
+      controlPlane: "ti_scale",
+    },
+    parseVaultDisconnectMutation,
+    "POST",
+    idempotencyKey,
+  );
 }
 
 export function checkVaultHealth(input:
@@ -221,10 +368,6 @@ export function reindexVault(
     expectedUpdatedAt,
     controlPlane: "ti_scale",
   }, parseVaultRecovery, "POST", idempotencyKey);
-}
-
-export function portableExportVault(connectionId: string): Promise<VaultOperationResult> {
-  return mutation("/vault/portable-export", { connectionId }, parseVaultOperation);
 }
 
 export function resolveVaultConflict(conflictId: string, resolution: "database" | "vault"): Promise<VaultOperationResult> {

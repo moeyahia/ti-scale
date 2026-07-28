@@ -7,6 +7,7 @@ import {
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
+import { DATABASE_BACKUP_DISABLED_ERROR } from "./backup";
 import type { SqliteDatabase } from "./types";
 
 export interface DatabaseConnectionOptions {
@@ -15,12 +16,25 @@ export interface DatabaseConnectionOptions {
   readonly fileMustExist?: boolean;
   readonly busyTimeoutMs?: number;
   readonly verifyIntegrity?: boolean;
+  /**
+   * Startup-only integrity implementation. Production uses SQLite quick_check;
+   * the injection point exists so boundary tests can prove slow verification
+   * never moves into an HTTP request.
+   */
+  readonly integrityChecker?: DatabaseIntegrityChecker;
   readonly verbose?: (message?: unknown, ...additionalArgs: unknown[]) => void;
 }
 
 export interface IntegrityResult {
   readonly ok: boolean;
   readonly messages: readonly string[];
+}
+
+export type DatabaseIntegrityChecker = (database: SqliteDatabase) => IntegrityResult;
+
+export interface DatabaseIntegrityAttestation extends IntegrityResult {
+  readonly checkedAt: string;
+  readonly source: "startup" | "diagnostic";
 }
 
 interface IntegrityRow {
@@ -30,11 +44,14 @@ interface IntegrityRow {
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const MAX_BUSY_TIMEOUT_MS = 120_000;
 const require = createRequire(import.meta.url);
+const integrityAttestations = new WeakMap<SqliteDatabase, DatabaseIntegrityAttestation>();
 
 interface BunStatement {
   get(...parameters: unknown[]): unknown;
   all(...parameters: unknown[]): unknown[];
+  iterate(...parameters: unknown[]): IterableIterator<unknown>;
   run(...parameters: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+  finalize(): void;
 }
 
 interface BunTransaction<T extends (...parameters: never[]) => unknown> {
@@ -44,6 +61,64 @@ interface BunTransaction<T extends (...parameters: never[]) => unknown> {
   exclusive(...parameters: Parameters<T>): ReturnType<T>;
 }
 
+export interface WeakStatementReference<T extends object> {
+  deref(): T | undefined;
+}
+
+export type WeakStatementReferenceFactory<T extends object> = (
+  statement: T,
+) => WeakStatementReference<T>;
+
+/**
+ * Tracks live Bun statements without owning their lifetime. The injectable
+ * reference factory makes the ownership rule deterministic to test; production
+ * always uses native WeakRef and never stores a statement alongside it.
+ */
+export class WeakStatementRegistry<T extends object> {
+  readonly #references = new Set<WeakStatementReference<T>>();
+  readonly #collected: FinalizationRegistry<WeakStatementReference<T>>;
+
+  constructor(
+    private readonly createReference: WeakStatementReferenceFactory<T> =
+      (statement) => new WeakRef(statement),
+  ) {
+    this.#collected = new FinalizationRegistry((reference) => {
+      this.#references.delete(reference);
+    });
+  }
+
+  track(statement: T): T {
+    const reference = this.createReference(statement);
+    this.#references.add(reference);
+    this.#collected.register(statement, reference, reference);
+    return statement;
+  }
+
+  visitLive(visitor: (statement: T) => void): void {
+    for (const reference of this.#references) {
+      const statement = reference.deref();
+      if (statement) {
+        visitor(statement);
+        continue;
+      }
+      this.#collected.unregister(reference);
+      this.#references.delete(reference);
+    }
+  }
+
+  clear(): void {
+    for (const reference of this.#references) {
+      this.#collected.unregister(reference);
+    }
+    this.#references.clear();
+  }
+
+  /** Exact count of weak reference records, never a count of retained values. */
+  get referenceCount(): number {
+    return this.#references.size;
+  }
+}
+
 interface BunDatabaseInstance {
   readonly filename: string;
   readonly inTransaction: boolean;
@@ -51,7 +126,7 @@ interface BunDatabaseInstance {
   exec(sql: string): unknown;
   transaction<T extends (...parameters: never[]) => unknown>(operation: T): BunTransaction<T>;
   serialize(): Buffer;
-  close(): void;
+  close(throwOnError?: boolean): void;
 }
 
 interface BunDatabaseConstructor {
@@ -77,7 +152,12 @@ function createBunCompatibilityDatabase(
   readonly: boolean,
   fileMustExist: boolean,
 ): SqliteDatabase {
-  const module = require("bun:sqlite") as { Database: BunDatabaseConstructor };
+  // Keep the Bun-only protocol out of Playwright's Node-side static module
+  // graph. Some fixture modules import the shared database layer before the
+  // runtime branch is evaluated; a literal `bun:` specifier makes Node's ESM
+  // loader reject the otherwise unreachable adapter.
+  const bunSqliteSpecifier = ["bun", "sqlite"].join(":");
+  const module = require(bunSqliteSpecifier) as { Database: BunDatabaseConstructor };
   const BunDatabase = module.Database;
   const inner = new BunDatabase(filename, {
     readonly,
@@ -86,6 +166,15 @@ function createBunCompatibilityDatabase(
     strict: true,
   });
   let open = true;
+  // Never retain prepared statements strongly. Most repository calls prepare a
+  // short-lived statement inline; the previous strong Set kept every Bun
+  // native query object alive until process shutdown and grew the JSC heap by
+  // gigabytes under repeated health/Brain reads. Weak references still let a
+  // graceful close finalize statements that remain live without defeating GC.
+  const statements = new WeakStatementRegistry<BunStatement>();
+  const prepareTracked = (sql: string): BunStatement => {
+    return statements.track(inner.prepare(sql));
+  };
 
   const adapter = {
     memory: isMemoryDatabase(filename),
@@ -98,7 +187,7 @@ function createBunCompatibilityDatabase(
       return inner.inTransaction;
     },
     prepare(sql: string): BunStatement {
-      return inner.prepare(sql);
+      return prepareTracked(sql);
     },
     transaction<T extends (...parameters: never[]) => unknown>(
       operation: T,
@@ -109,30 +198,37 @@ function createBunCompatibilityDatabase(
       inner.exec(sql);
     },
     pragma(source: string, options?: { simple?: boolean }): unknown {
-      const rows = inner.prepare(`PRAGMA ${source}`).all() as Record<string, unknown>[];
+      const rows = prepareTracked(`PRAGMA ${source}`).all() as Record<string, unknown>[];
       if (!options?.simple) return rows;
       const first = rows[0];
       return first ? Object.values(first)[0] : undefined;
     },
-    async backup(destinationFile: string): Promise<{
+    async backup(_destinationFile: string): Promise<{
       totalPages: number;
       remainingPages: number;
     }> {
-      const pageRows = inner.prepare("PRAGMA page_count").all() as Array<{
-        page_count: number;
-      }>;
-      const pageCount = Number(pageRows[0]?.page_count ?? 0);
-      // `serialize()` materializes the entire database in memory and can exhaust
-      // the runtime on real engagement stores. SQLite performs VACUUM INTO as a
-      // consistent file-backed snapshot without holding the database in RAM.
-      inner.prepare("VACUUM INTO ?").run(destinationFile);
-      return { totalPages: pageCount, remainingPages: 0 };
+      throw new Error(DATABASE_BACKUP_DISABLED_ERROR);
     },
     serialize(): Buffer {
       return inner.serialize();
     },
     close(): void {
-      inner.close();
+      if (!open) return;
+      if (inner.inTransaction) {
+        throw new Error("Cannot close the SQLite connection while a transaction is active");
+      }
+      statements.visitLive((statement) => {
+        // Bun documents finalize() as idempotent. Let an unexpected native
+        // finalization failure surface and leave the adapter open for recovery.
+        statement.finalize();
+      });
+      // A WeakRef can already be cleared while Bun's native query finalizer is
+      // still queued. sqlite3_close() reports SQLITE_BUSY in that safe state;
+      // sqlite3_close_v2() instead closes the public database handle and lets
+      // only those unreachable native statements finish disposal. Every still-
+      // reachable statement was finalized synchronously above.
+      inner.close(false);
+      statements.clear();
       open = false;
     },
   };
@@ -162,8 +258,24 @@ export function checkDatabaseIntegrity(database: SqliteDatabase): IntegrityResul
   };
 }
 
-export function assertDatabaseIntegrity(database: SqliteDatabase): void {
-  const result = checkDatabaseIntegrity(database);
+export function getDatabaseIntegrityAttestation(
+  database: SqliteDatabase,
+): DatabaseIntegrityAttestation | undefined {
+  return integrityAttestations.get(database);
+}
+
+export function assertDatabaseIntegrity(
+  database: SqliteDatabase,
+  checker: DatabaseIntegrityChecker = checkDatabaseIntegrity,
+  source: DatabaseIntegrityAttestation["source"] = "diagnostic",
+): void {
+  const result = checker(database);
+  integrityAttestations.set(database, Object.freeze({
+    ...result,
+    messages: Object.freeze([...result.messages]),
+    checkedAt: new Date().toISOString(),
+    source,
+  }));
   if (!result.ok) {
     throw new Error(`SQLite integrity check failed: ${result.messages.join("; ")}`);
   }
@@ -205,6 +317,17 @@ export function createDatabaseConnection(
     if (options.verbose) sqliteOptions.verbose = options.verbose;
     database = new Database(options.filename, sqliteOptions);
   }
+  // Both better-sqlite3 and the Bun compatibility adapter historically exposed
+  // a direct online-backup method. Keep that compatibility name fail-closed so
+  // an exact or dynamically typed caller cannot bypass the operator policy.
+  Object.defineProperty(database, "backup", {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: async (): Promise<never> => {
+      throw new Error(DATABASE_BACKUP_DISABLED_ERROR);
+    },
+  });
 
   try {
     database.pragma("foreign_keys = ON");
@@ -217,8 +340,12 @@ export function createDatabaseConnection(
       database.pragma("synchronous = NORMAL");
     }
 
-    if ((options.verifyIntegrity ?? true) && options.fileMustExist) {
-      assertDatabaseIntegrity(database);
+    if (options.verifyIntegrity ?? true) {
+      assertDatabaseIntegrity(
+        database,
+        options.integrityChecker ?? checkDatabaseIntegrity,
+        "startup",
+      );
     }
 
     if (!memory && !options.readonly) {

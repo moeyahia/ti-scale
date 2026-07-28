@@ -255,10 +255,11 @@ const sections: ManualSection[] = [
     summary: "Inspect real specialist capability, provider/tool policy, assignments, queue depth, heartbeat, and recorded outcomes.",
     keywords: "agents commander specialist delegation capability mcp provider health heartbeat queue assignment success retry recovery policy tool no hands",
     content: <>
-      <p>Open <AppLink href="/agents">Agents</AppLink>. Select an agent to see its role, status, declared capabilities, provider/tool policy, version, assignment health, and recent assignments. This surface is currently read-only; assignment and reassignment remain automatic.</p>
+      <p>Open <AppLink href="/agents">Agents</AppLink>. Select a specialist to see the stable product role, the exact current runtime bindings behind it, declared capabilities, provider/tool policy, assignment health, and recent outcomes. Use <strong>LLM settings</strong> on any specialist to inspect or change its provider, exact model, reasoning effort, and fallback for future runs. Running missions retain their immutable pinned model receipts; assignment and runtime reassignment remain automatic.</p>
       <ul>
         <li><strong>Commander:</strong> plans, routes, supervises, evaluates, and synthesizes. It should not silently absorb specialist execution.</li>
-        <li><strong>Specialists:</strong> perform bounded domain work using their declared tools and capabilities.</li>
+        <li><strong>Specialists:</strong> stable operator-facing roles mapped to exact runtime-manifest bindings. A role with no current binding remains visibly unavailable.</li>
+        <li><strong>Provider and model:</strong> the live catalog shows authentication, health, catalog freshness, compatible specialists, and whether a path is enforced, observe-only, advisor-only, or unavailable.</li>
         <li><strong>Status and heartbeat:</strong> distinguish available, busy, degraded, offline, and quarantined workers.</li>
         <li><strong>Queue and outcomes:</strong> show queue depth, active/completed/failed counts, success rate, mean completion time, recent assignments, and lease expiry where returned.</li>
       </ul>
@@ -274,14 +275,14 @@ const sections: ManualSection[] = [
     content: <>
       <ManualTable headings={["Surface", "Functions"]} rows={[
         ["Brain Home", "Memory health, graph growth, search across title/summary/note text, type/lifecycle/sensitivity filters, confidence, source count, and vault health."],
-        ["Memory Graph", "Global, local, mission, Operator profile, Attack path, and Lessons & failures views; visible-graph search; node/edge/scope/engagement/lifecycle/sensitivity/confidence/date filters; compact or clustered layout; label density; zoom, fit, reset, saved browser-local views, shareable links, shortest paths, bounded expansion, and an accessible table."],
+        ["Memory Graph", "Global, local, mission, Operator Preferences / Profile, Attack path, and Lessons & failures views; visible-graph search; node/edge/scope/engagement/lifecycle/sensitivity/confidence/date filters; compact or clustered layout; label density; zoom, fit, reset, saved browser-local views, shareable links, shortest paths, bounded expansion, and an accessible table."],
         ["Memory Inbox", "Inspect the source excerpt and proposal reason; edit title, summary, body, sensitivity, and global/engagement/mission scope before confirming; confirm, reject, or reject and suppress relearning."],
         ["Memory Node", "Read the note, provenance, backlinks, outgoing relationships, versions, contradictions, and usage. Correct title/summary/body/sensitivity with a reason, pin/unpin, set expiry, dispute, show in graph, open vault controls, or permanently forget."],
         ["Memory Control Center", "Enable/disable retrieval, choose candidate-only or disabled preference learning, operational-memory retention, expiry, Autonomous/Guided use, and Obsidian sync scope. Engagement isolation and secret exclusion remain enforced."],
-        ["Obsidian Vault", "Connect a relative path inside the server-configured allowed root with explicit permission; synchronize, export canonical notes, import operator edits, create a portable ZIP, use offered Obsidian links, inspect note state, and resolve conflicts by deliberately choosing the database or vault version."],
+        ["Obsidian Vault", "Connect a relative path inside the server-configured allowed root with explicit permission; synchronize or export canonical notes into that connected Vault, import operator edits, use offered Obsidian links, inspect note state, and resolve conflicts by deliberately choosing the database or vault version. Retained portable ZIP copies are disabled by the operator no-backup policy."],
       ]} />
       <Callout title="The vault path is on the Ti-Scale server">
-        <p>It is not a path on the Mac running your browser. The server accepts only a relative path inside its configured vault root. Use portable ZIP export or an administrator-approved filesystem synchronization method to move a vault to another computer.</p>
+        <p>It is not a path on the Mac running your browser. The server accepts only a relative path inside its configured vault root. Retained portable ZIP export is disabled; use an administrator-approved direct filesystem synchronization method when the connected Vault must be accessed from another computer.</p>
       </Callout>
       <h3>Lifecycle</h3>
       <ol className="manual-inline-steps"><li>Candidate</li><li>Confirmed</li><li>Verified</li><li>Disputed</li><li>Stale</li><li>Superseded</li><li>Forgotten</li></ol>

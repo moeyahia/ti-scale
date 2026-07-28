@@ -15,6 +15,7 @@ import { FollowUpRunRepository } from "../operations/FollowUpRunRepository";
 import { OperationsReviewRepository } from "../operations/OperationsReviewRepository";
 import { DecisionInboxRepository } from "../operations/DecisionInboxRepository";
 import { SecureExportService } from "../operations/SecureExportService";
+import { CanonicalMissionReportService } from "../reports";
 import { TraceRepository } from "../observability/TraceRepository";
 import {
   ControlPlaneLeaseError,
@@ -152,6 +153,18 @@ function cursor(request: Request): string | undefined {
 
 function limit(request: Request): number {
   return boundedLimit(value(request, "limit"));
+}
+
+function includeInternal(request: Request): boolean {
+  const candidate = value(request, "includeInternal");
+  if (candidate === undefined) return false;
+  if (candidate !== "1") {
+    throw new OperationsApiError(400, "invalid_filter", "includeInternal must be 1", {
+      humanMessage: "Use includeInternal=1 to request authorized internal runtime components.",
+      category: "invalid_input",
+    });
+  }
+  return true;
 }
 
 function completionExportFilename(runId: string): string {
@@ -294,6 +307,12 @@ export function createOperationsRouter(dependencies: OperationsRouterDependencie
     maximumExportRecords: dependencies.maximumSecureExportRecords,
     clock: dependencies.clock,
   });
+  const missionReports = new CanonicalMissionReportService(dependencies.database, {
+    ...(dependencies.reportArtifactRoot
+      ? { artifactRoot: dependencies.reportArtifactRoot }
+      : {}),
+    ...(dependencies.clock ? { clock: dependencies.clock } : {}),
+  });
   const router = Router();
   router.use((_request, response, next) => {
     response.setHeader("Cache-Control", "no-store");
@@ -305,15 +324,21 @@ export function createOperationsRouter(dependencies: OperationsRouterDependencie
       limit: limit(request), cursor: cursor(request),
       status: optionalEnum(value(request, "status"), AGENT_STATUSES, "status"),
       query: optionalSearch(value(request, "query")),
+      includeInternal: includeInternal(request),
     }));
   }));
   router.get("/api/v2/agents/:agentId", handle(dependencies, (request, response, { access }) => {
-    response.json(repository.getAgent(identifier(request.params.agentId, "Agent ID"), access));
+    response.json(repository.getAgent(
+      identifier(request.params.agentId, "Agent ID"),
+      access,
+      { includeInternal: includeInternal(request) },
+    ));
   }));
   router.get("/api/v2/agents/:agentId/assignments", handle(dependencies, (request, response, { access }) => {
     response.json(repository.listAgentAssignments(identifier(request.params.agentId, "Agent ID"), access, {
       limit: limit(request), cursor: cursor(request),
       status: optionalEnum(value(request, "status"), ASSIGNMENT_STATUSES, "status"),
+      includeInternal: includeInternal(request),
     }));
   }));
 
@@ -512,6 +537,14 @@ export function createOperationsRouter(dependencies: OperationsRouterDependencie
   router.post("/api/v2/operations/runs/:runId/recovery/replan", handle(dependencies, (request, response, ctx) => {
     const runId = identifier(request.params.runId, "Run ID");
     const body = object(request.body);
+    const authority = mutationAuthority.authorize({
+      runId,
+      actorId: ctx.actor.id,
+      mode: "lease",
+      ...(dependencies.assertRunMutationLease
+        ? { assertLease: dependencies.assertRunMutationLease }
+        : {}),
+    });
     const projection = recoveryMutations.requestReplan(
       runId,
       {
@@ -521,6 +554,7 @@ export function createOperationsRouter(dependencies: OperationsRouterDependencie
       requiredIdempotencyKey(request.get("Idempotency-Key")),
       ctx.actor,
       ctx.access,
+      authority.assertCurrent,
     );
     response.json(projection);
     if (projection.mutation.continuationId) {
@@ -531,9 +565,18 @@ export function createOperationsRouter(dependencies: OperationsRouterDependencie
     }
   }));
   router.post("/api/v2/operations/runs/:runId/recovery/reassign", handle(dependencies, (request, response, ctx) => {
+    const runId = identifier(request.params.runId, "Run ID");
     const body = object(request.body);
+    const authority = mutationAuthority.authorize({
+      runId,
+      actorId: ctx.actor.id,
+      mode: "lease",
+      ...(dependencies.assertRunMutationLease
+        ? { assertLease: dependencies.assertRunMutationLease }
+        : {}),
+    });
     response.json(recoveryMutations.reassignSpecialist(
-      identifier(request.params.runId, "Run ID"),
+      runId,
       {
         ...exactRecoveryExpectation(body),
         targetAgentId: identifier(body.targetAgentId, "Target specialist ID"),
@@ -545,15 +588,36 @@ export function createOperationsRouter(dependencies: OperationsRouterDependencie
       requiredIdempotencyKey(request.get("Idempotency-Key")),
       ctx.actor,
       ctx.access,
+      authority.assertCurrent,
     ));
   }));
   router.post("/api/v2/operations/runs/:runId/recovery/provider", handle(dependencies, (request, response, ctx) => {
+    const runId = identifier(request.params.runId, "Run ID");
     const body = object(request.body);
+    const authority = mutationAuthority.authorize({
+      runId,
+      actorId: ctx.actor.id,
+      mode: "lease",
+      ...(dependencies.assertRunMutationLease
+        ? { assertLease: dependencies.assertRunMutationLease }
+        : {}),
+    });
     response.json(recoveryMutations.changeProvider(
-      identifier(request.params.runId, "Run ID"),
+      runId,
       {
         ...exactRecoveryExpectation(body),
         providerId: identifier(body.providerId, "Provider route ID"),
+        modelId: identifier(body.modelId, "Provider model ID"),
+        modelConfigurationHash: (() => {
+          const hash = requiredText(body.modelConfigurationHash, "Provider model configuration hash", 64);
+          if (!/^[a-f0-9]{64}$/u.test(hash)) {
+            throw new OperationsApiError(400, "invalid_request", "Provider model configuration hash is invalid", {
+              humanMessage: "Provider model configuration hash must be the exact lowercase SHA-256 digest from live readiness.",
+              category: "invalid_input",
+            });
+          }
+          return hash;
+        })(),
         guidedDecisionId: optionalIdentifier(body.guidedDecisionId, "Guided decision ID"),
         expectedDecisionFingerprint: optionalIdentifier(body.expectedDecisionFingerprint, "Expected decision fingerprint"),
         reason: requiredSafeReason(body.reason, "Provider routing reason", 2_000),
@@ -561,6 +625,7 @@ export function createOperationsRouter(dependencies: OperationsRouterDependencie
       requiredIdempotencyKey(request.get("Idempotency-Key")),
       ctx.actor,
       ctx.access,
+      authority.assertCurrent,
     ));
   }));
   router.post("/api/v2/operations/runs/:runId/follow-up", handle(dependencies, (request, response, ctx) => {
@@ -639,6 +704,20 @@ export function createOperationsRouter(dependencies: OperationsRouterDependencie
       runId: optionalIdentifier(value(request, "runId"), "Run ID"),
     }));
   }));
+  router.post("/api/v2/reports/runs/:runId/generate", handle(dependencies, (request, response, ctx) => {
+    const body = object(request.body);
+    const reportVersion = body.reportVersion === undefined
+      ? 1
+      : requiredPositiveInteger(body.reportVersion, "Report version");
+    const generated = missionReports.generate(
+      identifier(request.params.runId, "Run ID"),
+      reportVersion,
+      ctx.actor,
+      ctx.access,
+      requiredIdempotencyKey(request.get("Idempotency-Key")),
+    );
+    response.status(201).json(generated);
+  }));
   router.get("/api/v2/reports/runs/:runId/export", handle(dependencies, (request, response, ctx) => {
     const runId = identifier(request.params.runId, "Run ID");
     const reportingScope = repository.getRunCompletionReportingScope(runId, ctx.access);
@@ -689,6 +768,15 @@ export function createOperationsRouter(dependencies: OperationsRouterDependencie
     response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
     response.setHeader("Content-Security-Policy", "sandbox");
     response.send(`${JSON.stringify(exported, null, 2)}\n`);
+  }));
+  router.get("/api/v2/reports/:artifactId/download", handle(dependencies, (request, response, { access }) => {
+    const download = missionReports.download(
+      identifier(request.params.artifactId, "Report artifact ID"),
+      access,
+    );
+    inertDownloadHeaders(response, download.filename, download.mediaType, download.byteSize);
+    response.setHeader("Digest", `sha-256=${Buffer.from(download.contentHash, "hex").toString("base64")}`);
+    response.status(200).send(download.body);
   }));
   router.get("/api/v2/reports/:artifactId", handle(dependencies, (request, response, { access }) => {
     response.json(repository.getReport(identifier(request.params.artifactId, "Report artifact ID"), access));

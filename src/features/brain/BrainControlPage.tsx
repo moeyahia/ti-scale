@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { fetchMemoryControl, updateMemoryControl } from "../../data/api/brain";
 import { useQuery, useQueryCache } from "../../data/cache/QueryProvider";
 import { Button, ButtonLink, Card, ErrorPanel, LoadingPanel, PageHeader, StatusPill } from "../../design-system/components/Primitives";
+import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
 import type { MemoryControlPolicy } from "../../domain/types/brain";
 import { BrainNav, formatBrainDate } from "./BrainNav";
 import "./brain-control.css";
@@ -123,9 +124,9 @@ export default function BrainControlPage() {
             <Card>
               <fieldset disabled={!draft.enabled}>
                 <legend>Learning and retention</legend>
-                <label>Personal preference learning<select value={draft.personalPreferencePolicy} onChange={(event) => set("personalPreferencePolicy", event.target.value as EditableMemoryControlPolicy["personalPreferencePolicy"])}><option value="candidate_only">Candidate only — always review</option><option value="disabled">Disabled</option></select></label>
+                <label>Personal preference learning<TitaniumSelect value={draft.personalPreferencePolicy} onChange={(event) => set("personalPreferencePolicy", event.target.value as EditableMemoryControlPolicy["personalPreferencePolicy"])}><option value="candidate_only">Candidate only — always review</option><option value="disabled">Disabled</option></TitaniumSelect></label>
                 <label className="brain-control-switch"><input type="checkbox" checked={draft.operationalMemoryEnabled} onChange={(event) => set("operationalMemoryEnabled", event.target.checked)} /><span>Retain evidence-backed operational knowledge</span></label>
-                <label>Default retention<select value={draft.defaultRetentionDays ?? "never"} onChange={(event) => set("defaultRetentionDays", event.target.value === "never" ? null : Number(event.target.value))}><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option><option value="1095">3 years</option><option value="never">No automatic expiry</option></select></label>
+                <label>Default retention<TitaniumSelect value={draft.defaultRetentionDays ?? "never"} onChange={(event) => set("defaultRetentionDays", event.target.value === "never" ? null : Number(event.target.value))}><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option><option value="1095">3 years</option><option value="never">No automatic expiry</option></TitaniumSelect></label>
               </fieldset>
             </Card>
 
@@ -141,7 +142,7 @@ export default function BrainControlPage() {
             <Card>
               <fieldset disabled={!draft.enabled}>
                 <legend>Obsidian projection</legend>
-                <label>Synchronization scope<select value={draft.obsidianSyncScope} onChange={(event) => set("obsidianSyncScope", event.target.value as EditableMemoryControlPolicy["obsidianSyncScope"])}><option value="disabled">Disabled</option><option value="confirmed">Confirmed nodes</option><option value="confirmed_and_verified">Confirmed and verified nodes</option></select></label>
+                <label>Synchronization scope<TitaniumSelect value={draft.obsidianSyncScope} onChange={(event) => set("obsidianSyncScope", event.target.value as EditableMemoryControlPolicy["obsidianSyncScope"])}><option value="disabled">Disabled</option><option value="confirmed">Confirmed nodes</option><option value="confirmed_and_verified">Confirmed and verified nodes</option></TitaniumSelect></label>
                 <p className="os-muted">Vault access still requires an explicit sandboxed connection. Ti-Scale never edits the vault’s <span className="os-mono">.obsidian</span> settings.</p>
               </fieldset>
             </Card>

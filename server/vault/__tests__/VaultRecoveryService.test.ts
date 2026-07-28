@@ -32,13 +32,25 @@ function provenance(id: string): MemoryProvenance {
   };
 }
 
-function setup(bridgeOptions: BridgeOptions = {}) {
+class RecordingVaultPathPolicy extends VaultPathPolicy {
+  verifyExistingRoundTripCalls = 0;
+
+  override verifyExistingRoundTrip(vaultPath: string) {
+    this.verifyExistingRoundTripCalls += 1;
+    return super.verifyExistingRoundTrip(vaultPath);
+  }
+}
+
+function setup(
+  bridgeOptions: BridgeOptions = {},
+  pathPolicyFactory: (root: string) => VaultPathPolicy = (root) => new VaultPathPolicy(root),
+) {
   const directory = mkdtempSync(join(tmpdir(), "vault-recovery-test-"));
   directories.push(directory);
   const database = createDatabaseConnection({ filename: join(directory, "recovery.sqlite") });
   migrateDatabase(database);
   const memory = new MemoryRepository(database);
-  const paths = new VaultPathPolicy(join(directory, "vaults"));
+  const paths = pathPolicyFactory(join(directory, "vaults"));
   const bridge = new ObsidianVaultBridge(database, memory, paths, bridgeOptions);
   const connection = bridge.connect({
     id: "vault-recovery",
@@ -47,8 +59,8 @@ function setup(bridgeOptions: BridgeOptions = {}) {
     permissionGranted: true,
   });
   const node = memory.createNode({
-    id: "mem-recovery",
-    nodeType: "procedure",
+    id: "mem_dddddddddddddddddddddddddddddddd",
+    nodeType: "attack_procedure",
     title: "Indexable recovery procedure",
     summary: "Canonical recovery search projection",
     body: "The canonical body must never be replaced by repair or reindex.",
@@ -161,19 +173,19 @@ describe("VaultRecoveryService", () => {
     }
   });
 
-  test("copies malformed managed notes to durable quarantine without removing the operator source", () => {
+  test("moves malformed managed notes to durable quarantine without retaining a backup copy", () => {
     const fixture = setup();
     try {
       const malformed = "not valid Obsidian frontmatter\noperator text remains recoverable\n";
       writeFileSync(fixture.notePath, malformed, "utf8");
       const result = run(fixture, "repair");
       expect(result).toMatchObject({ status: "partial", counts: { quarantined: 1 } });
-      expect(readFileSync(fixture.notePath, "utf8")).toBe(malformed);
+      expect(existsSync(fixture.notePath)).toBe(false);
       const quarantined = fixture.database.prepare(`
         SELECT status, error_message FROM vault_sync_state WHERE connection_id = ? AND relative_path = ?
       `).get(fixture.connectionId, fixture.relativePath) as { status: string; error_message: string };
       expect(quarantined.status).toBe("quarantined");
-      expect(quarantined.error_message).toContain("exact-byte guarded private quarantine copy");
+      expect(quarantined.error_message).toContain("no duplicate or restorable backup was created");
       expect(quarantined.error_message).toContain("recovery metadata is content-free");
       const quarantineFiles = readdirSync(join(fixture.vaultPath, ".ti-scale", "quarantine"));
       expect(quarantineFiles.filter((name) => name.endsWith(".md"))).toHaveLength(1);
@@ -208,13 +220,13 @@ describe("VaultRecoveryService", () => {
     }
   });
 
-  test("reconciles a verified quarantine copy after failure between copy and marker commit", () => {
+  test("reconciles a verified quarantine move after failure between rename and marker commit", () => {
     let failAfterCopy = true;
     const fixture = setup({
       afterQuarantineCopy: () => {
         if (failAfterCopy) {
           failAfterCopy = false;
-          throw new Error("simulated process loss after durable copy");
+          throw new Error("simulated process loss after durable move");
         }
       },
     });
@@ -224,7 +236,7 @@ describe("VaultRecoveryService", () => {
       const first = run(fixture, "repair");
       expect(first).toMatchObject({ status: "partial", counts: { quarantined: 0, errors: 1 } });
       expect(first.issues).toContainEqual(expect.objectContaining({ category: "quarantine_recovery" }));
-      expect(readFileSync(fixture.notePath, "utf8")).toBe(malformed);
+      expect(existsSync(fixture.notePath)).toBe(false);
 
       const second = run(fixture, "repair");
       expect(second).toMatchObject({ status: "partial", counts: { quarantined: 1, errors: 0 } });
@@ -232,7 +244,7 @@ describe("VaultRecoveryService", () => {
         SELECT value_json FROM settings WHERE key LIKE 'brain.vault.quarantine_intent.%'
       `).get() as { value_json: string };
       expect(JSON.parse(intent.value_json)).toMatchObject({ status: "committed", connectionId: fixture.connectionId });
-      expect(readFileSync(fixture.notePath, "utf8")).toBe(malformed);
+      expect(existsSync(fixture.notePath)).toBe(false);
     } finally {
       fixture.database.close();
     }
@@ -241,7 +253,7 @@ describe("VaultRecoveryService", () => {
   test("flags every duplicate stable-ID projection without choosing a winner", () => {
     const fixture = setup();
     try {
-      const duplicateRelative = "10 Operator/duplicate-projection.md";
+      const duplicateRelative = "42 Techniques and Procedures/duplicate-projection.md";
       const duplicatePath = join(fixture.vaultPath, duplicateRelative);
       const original = readFileSync(fixture.notePath, "utf8");
       writeFileSync(duplicatePath, original, "utf8");
@@ -265,7 +277,7 @@ describe("VaultRecoveryService", () => {
       fixture.database.prepare(`
         INSERT INTO vault_sync_state (
           id, connection_id, node_id, relative_path, status
-        ) VALUES ('vsync-duplicate-race', ?, ?, '10 Operator/race-duplicate.md', 'pending')
+        ) VALUES ('vsync-duplicate-race', ?, ?, '42 Techniques and Procedures/race-duplicate.md', 'pending')
       `).run(fixture.connectionId, fixture.nodeId);
       const version = currentVersion(fixture.database);
       expect(() => fixture.repository.complete({
@@ -340,13 +352,13 @@ describe("VaultRecoveryService", () => {
     const fixture = setup();
     try {
       const outside = join(fixture.vaultPath, "outside-note.md");
-      const linked = join(fixture.vaultPath, "10 Operator", "linked-note.md");
+      const linked = join(fixture.vaultPath, "42 Techniques and Procedures", "linked-note.md");
       writeFileSync(outside, "outside target must remain unchanged", "utf8");
       symlinkSync(outside, linked);
       const result = run(fixture, "repair");
       expect(result.status).toBe("partial");
       expect(result.counts.errors).toBe(1);
-      expect(result.issues).toContainEqual(expect.objectContaining({ category: "unsafe_path", relativePath: "10 Operator/linked-note.md" }));
+      expect(result.issues).toContainEqual(expect.objectContaining({ category: "unsafe_path", relativePath: "42 Techniques and Procedures/linked-note.md" }));
       expect(readFileSync(outside, "utf8")).toBe("outside target must remain unchanged");
       expect(existsSync(linked)).toBe(true);
     } finally {
@@ -372,6 +384,25 @@ describe("VaultRecoveryService", () => {
       expect(() => run(fixture, "repair")).toThrow("Configured vault is not an existing directory");
       expect(existsSync(fixture.vaultPath)).toBe(false);
       expect(existsSync(offline)).toBe(true);
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  test("rejects a disconnected Vault before the temporary filesystem health proof", () => {
+    let paths: RecordingVaultPathPolicy | undefined;
+    const fixture = setup({}, (root) => {
+      paths = new RecordingVaultPathPolicy(root);
+      return paths;
+    });
+    try {
+      fixture.database.prepare(`
+        UPDATE vault_connections
+        SET status = 'disconnected', updated_at = '2026-07-20T22:00:00.000Z'
+        WHERE id = ?
+      `).run(fixture.connectionId);
+      expect(() => run(fixture, "repair")).toThrow("disconnected");
+      expect(paths?.verifyExistingRoundTripCalls).toBe(0);
     } finally {
       fixture.database.close();
     }

@@ -5,6 +5,7 @@ import { RouteView } from "./app/router/RouteView";
 import { AppShell } from "./app/shell/AppShell";
 import "./design-system/tokens/ti-scale.css";
 import "./design-system/tokens/feature-surfaces.css";
+import "./design-system/tokens/titanium-controls.css";
 import "./app/router/mechanical-transitions.css";
 
 function ApplicationRoute() {

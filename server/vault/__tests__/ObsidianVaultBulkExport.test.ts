@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { createDatabaseConnection, migrateDatabase } from "../../db";
 import {
   getMemoryControlPolicy,
+  isAttackCentricReusableNodeType,
   MemoryRepository,
   type MemoryNodeType,
   updateMemoryControlPolicy,
@@ -55,9 +56,12 @@ function setup(syncScope: Record<string, unknown> = {}) {
   return { directory, databasePath, allowedRoot, database, memory, paths, bridge, connection };
 }
 
-function addNode(memory: MemoryRepository, index: number, nodeType: MemoryNodeType = "technique") {
+function addNode(memory: MemoryRepository, index: number, nodeType: MemoryNodeType = "attack_technique") {
+  const attackKnowledge = isAttackCentricReusableNodeType(nodeType);
   return memory.createNode({
-    id: `bulk-node-${String(index).padStart(4, "0")}`,
+    id: attackKnowledge
+      ? `mem_${index.toString(16).padStart(32, "0")}`
+      : `bulk-node-${String(index).padStart(4, "0")}`,
     nodeType,
     title: `Bulk node ${index}`,
     summary: `Bounded export fixture ${index}`,
@@ -76,13 +80,34 @@ function addNode(memory: MemoryRepository, index: number, nodeType: MemoryNodeTy
         acquiredAt: "2026-07-15T00:00:00.000Z",
       }],
     },
-    authorType: "system",
-    authorId: "bulk-export-test",
+    authorType: attackKnowledge ? "operator" : "system",
+    authorId: attackKnowledge ? "operator-1" : "bulk-export-test",
   });
 }
 
 describe("Obsidian vault bulk export", () => {
-  test("projects high-fanout produced edges as safe artifact backlinks", () => {
+  test("an exact node allowlist narrows both bulk and targeted projection without bypassing policy", () => {
+    const includedId = `mem_${(93_000).toString(16).padStart(32, "0")}`;
+    const { database, memory, bridge, connection } = setup({
+      nodeIds: [includedId],
+      nodeTypes: ["attack_technique"],
+      lifecycleStatuses: ["confirmed"],
+      scopeKinds: ["global"],
+      sensitivities: ["private"],
+    });
+    try {
+      const included = addNode(memory, 93_000);
+      const excluded = addNode(memory, 93_001);
+      expect(bridge.exportableNodeIds(connection.id)).toEqual([included.id]);
+      expect(bridge.assertConnectionNodeAllowed(connection.id, included.id).id).toBe(included.id);
+      expect(() => bridge.assertConnectionNodeAllowed(connection.id, excluded.id))
+        .toThrow("outside the vault connection nodeIds scope");
+    } finally {
+      database.close();
+    }
+  });
+
+  test("does not project private run and artifact backlinks into reusable attack knowledge", () => {
     const { database, memory, bridge, connection } = setup();
     try {
       const run = addNode(memory, 90_000, "run");
@@ -111,8 +136,8 @@ describe("Obsidian vault bulk export", () => {
       expect(runText).not.toContain("ti-scale-edge:produced");
 
       const artifactText = bridge.renderNode(artifacts[0]!.id, connection).text;
-      expect(artifactText).toContain(`ti-scale-backlink:produced:${run.id}`);
-      expect(artifactText).toContain("[[22 Runs/");
+      expect(artifactText).not.toContain(`ti-scale-backlink:produced:${run.id}`);
+      expect(artifactText).not.toContain("[[22 Runs/");
       expect(parseObsidianNote(artifactText).edges).toHaveLength(0);
 
       const portableText = bridge.renderNode(
@@ -315,8 +340,8 @@ describe("Obsidian vault bulk export", () => {
       writeFileSync(existingPath, existingProjection.text.replace("Canonical body 1.", "Operator vault edit."));
       memory.correctNode(existing.id, {
         body: "New canonical database edit.",
-        authorType: "agent",
-        authorId: "bulk-export-test",
+        authorType: "operator",
+        authorId: "operator-1",
         changeReason: "Create a two-sided conflict fixture",
       });
 
@@ -344,17 +369,17 @@ describe("Obsidian vault bulk export", () => {
   test("enforces connection scope and rejects symlinked projection paths", async () => {
     const { directory, database, memory, bridge, connection } = setup({
       lifecycleStatuses: ["confirmed"],
-      nodeTypes: ["technique"],
+      nodeTypes: ["attack_technique"],
     });
     try {
-      const allowed = addNode(memory, 1, "technique");
+      const allowed = addNode(memory, 1, "attack_technique");
       const denied = addNode(memory, 2, "report");
       expect(bridge.exportableNodeIds(connection.id)).toEqual([allowed.id]);
       const deniedResult = await bridge.exportNodes(connection.id, [denied.id]);
       expect(deniedResult.counts.failed).toBe(1);
-      expect(deniedResult.issues[0]?.message).toContain("outside this vault connection");
+      expect(deniedResult.issues[0]?.message).toContain("not exportable");
 
-      const attackFolder = join(connection.vaultPath, "41 Attack Paths");
+      const attackFolder = join(connection.vaultPath, "42 Techniques and Procedures");
       rmSync(attackFolder, { recursive: true, force: true });
       const outside = join(directory, "outside-projection");
       mkdirSync(outside);
@@ -378,8 +403,8 @@ describe("Obsidian vault bulk export", () => {
       const path = join(connection.vaultPath, projection.relativePath);
       memory.correctNode(node.id, {
         body: "Canonical edit racing with the vault.",
-        authorType: "agent",
-        authorId: "bulk-export-test",
+        authorType: "operator",
+        authorId: "operator-1",
         changeReason: "Exercise async destination race guard",
       });
 
@@ -431,8 +456,8 @@ describe("Obsidian vault bulk export", () => {
       const path = join(connection.vaultPath, projection.relativePath);
       memory.correctNode(node.id, {
         body: "Canonical synchronous update.",
-        authorType: "agent",
-        authorId: "bulk-export-test",
+        authorType: "operator",
+        authorId: "operator-1",
         changeReason: "Exercise synchronous no-clobber publication",
       });
 
@@ -567,8 +592,8 @@ describe("Obsidian vault bulk export", () => {
                 this.changed = true;
                 memory.correctNode(node.id, {
                   body: "Concurrent canonical edit created after the vault import.",
-                  authorType: "agent",
-                  authorId: "bulk-export-test",
+                  authorType: "operator",
+                  authorId: "operator-1",
                   changeReason: "Exercise watcher canonical publication race",
                 });
               }
@@ -633,8 +658,8 @@ describe("Obsidian vault bulk export", () => {
       writeFileSync(path, reviewedVaultText);
       memory.correctNode(node.id, {
         body: "Database edit before conflict review.",
-        authorType: "agent",
-        authorId: "bulk-export-test",
+        authorType: "operator",
+        authorId: "operator-1",
         changeReason: "Create stale conflict-resolution fixture",
       });
       const conflict = fixture.bridge.syncNode(connection.id, node.id, "operator:bulk-export-test");
@@ -708,8 +733,8 @@ describe("Obsidian vault bulk export", () => {
       const path = join(connection.vaultPath, projection.relativePath);
       memory.correctNode(node.id, {
         body: "Canonical version queued for bulk projection.",
-        authorType: "agent",
-        authorId: "bulk-export-test",
+        authorType: "operator",
+        authorId: "operator-1",
         changeReason: "Ensure the bulk path enters an atomic write",
       });
 
@@ -725,8 +750,8 @@ describe("Obsidian vault bulk export", () => {
                 this.changed = true;
                 memory.correctNode(node.id, {
                   body: "Canonical version created during async fsync.",
-                  authorType: "agent",
-                  authorId: "bulk-export-test",
+                  authorType: "operator",
+                  authorId: "operator-1",
                   changeReason: "Exercise canonical pre-rename version guard",
                 });
               }
@@ -812,8 +837,8 @@ describe("Obsidian vault bulk export", () => {
       const confirmedTarget = addNode(memory, 21);
       const candidateEdgeTarget = addNode(memory, 22);
       const candidateTarget = memory.createNode({
-        id: "bulk-candidate-target",
-        nodeType: "technique",
+        id: "mem_cccccccccccccccccccccccccccccccc",
+        nodeType: "attack_technique",
         title: "Candidate target",
         summary: "This target is not confirmed",
         body: "Candidate targets must not enter confirmed projections.",

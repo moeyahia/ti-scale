@@ -1,4 +1,4 @@
-import { createContext, type ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, type ReactNode, useContext, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { parseOperationalEvent } from "../../domain/schemas/commandOs";
 import type { OperationalEvent } from "../../domain/types/commandOs";
 import { isActionableNotificationEvent } from "../../domain/notificationEventRegistry";
@@ -83,9 +83,13 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
   const [fallbackActive, setFallbackActive] = useState(false);
   const [lastFallbackRefreshAt, setLastFallbackRefreshAt] = useState<string>();
   const retries = useRef(0);
+  const sourceRef = useRef<EventSource | undefined>(undefined);
+  const effectGenerationRef = useRef(0);
 
-  useEffect(() => {
-    let source: EventSource | undefined;
+  useLayoutEffect(() => {
+    const effectGeneration = effectGenerationRef.current + 1;
+    effectGenerationRef.current = effectGeneration;
+    let source = sourceRef.current;
     let reconnectTimer: number | undefined;
     let fallbackTimer: number | undefined;
     let fallbackRunning = false;
@@ -217,17 +221,13 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
       }
     };
 
-    const connect = () => {
-      if (stopped || document.visibilityState === "hidden") return;
-      if (reconnectTimer !== undefined) {
-        window.clearTimeout(reconnectTimer);
-        reconnectTimer = undefined;
-      }
-      source?.close();
-      if (!fallbackRunning) setState(retries.current === 0 ? "connecting" : "reconnecting");
-      const query = lastEventId ? `?lastEventId=${encodeURIComponent(lastEventId)}` : "";
-      const currentSource = new EventSource(`/api/v2/events/stream${query}`, { withCredentials: true });
-      source = currentSource;
+    const retainSource = (next: EventSource | undefined) => {
+      source = next;
+      sourceRef.current = next;
+    };
+
+    const bindSource = (currentSource: EventSource) => {
+      retainSource(currentSource);
       currentSource.onopen = () => {
         if (source !== currentSource || stopped) return;
         retries.current = 0;
@@ -248,7 +248,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
       currentSource.onerror = () => {
         if (source !== currentSource || stopped) return;
         currentSource.close();
-        source = undefined;
+        retainSource(undefined);
         retries.current += 1;
         if (retries.current === STREAM_FAILURES_BEFORE_FALLBACK && lastEventId) {
           // The retained event may have aged out. Clear it after bounded retry
@@ -270,12 +270,31 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
           reconnectTimer = window.setTimeout(connect, reconnectDelayMs(retries.current));
         }
       };
+      if (currentSource.readyState === EventSource.OPEN) {
+        retries.current = 0;
+        stopFallback();
+        setState("connected");
+      }
+    };
+
+    const connect = () => {
+      if (stopped || document.visibilityState === "hidden") return;
+      if (reconnectTimer !== undefined) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      source?.close();
+      retainSource(undefined);
+      if (!fallbackRunning) setState(retries.current === 0 ? "connecting" : "reconnecting");
+      const query = lastEventId ? `?lastEventId=${encodeURIComponent(lastEventId)}` : "";
+      const currentSource = new EventSource(`/api/v2/events/stream${query}`, { withCredentials: true });
+      bindSource(currentSource);
     };
 
     const onVisibility = () => {
       if (document.visibilityState === "hidden") {
         source?.close();
-        source = undefined;
+        retainSource(undefined);
         if (reconnectTimer !== undefined) {
           window.clearTimeout(reconnectTimer);
           reconnectTimer = undefined;
@@ -288,7 +307,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
     };
     const onOffline = () => {
       source?.close();
-      source = undefined;
+      retainSource(undefined);
       if (reconnectTimer !== undefined) {
         window.clearTimeout(reconnectTimer);
         reconnectTimer = undefined;
@@ -298,7 +317,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
     };
     const onOnline = () => {
       source?.close();
-      source = undefined;
+      retainSource(undefined);
       if (reconnectTimer !== undefined) {
         window.clearTimeout(reconnectTimer);
         reconnectTimer = undefined;
@@ -308,7 +327,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
     };
     const onPageHide = () => {
       source?.close();
-      source = undefined;
+      retainSource(undefined);
       if (reconnectTimer !== undefined) {
         window.clearTimeout(reconnectTimer);
         reconnectTimer = undefined;
@@ -316,26 +335,31 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
       stopFallback();
     };
 
-    // Defer the first connection by one task. React development Strict Mode
-    // deliberately mounts, cleans up, and mounts effects again; connecting
-    // synchronously makes that probe create a throwaway EventSource whose
-    // HTTP request can begin after its explicit close. Cancelling this timer
-    // in cleanup keeps one real stream per mounted provider in development
-    // without changing production reconnect behavior.
-    reconnectTimer = window.setTimeout(connect, 0);
+    // Establish the one retained stream in the pre-paint layout phase so
+    // noncritical same-origin media cannot consume every HTTP/1.1 slot first.
+    // React Strict Mode's setup -> cleanup -> setup probe reuses this exact
+    // EventSource through sourceRef; the generation-bound deferred cleanup
+    // below closes it only for a real unmount, never to create a ghost request.
+    if (source && source.readyState !== EventSource.CLOSED) bindSource(source);
+    else connect();
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("offline", onOffline);
     window.addEventListener("online", onOnline);
     window.addEventListener("pagehide", onPageHide, { capture: true });
     return () => {
       stopped = true;
-      source?.close();
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
       if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("offline", onOffline);
       window.removeEventListener("online", onOnline);
       window.removeEventListener("pagehide", onPageHide, { capture: true });
+      queueMicrotask(() => {
+        if (effectGenerationRef.current !== effectGeneration) return;
+        const retainedSource = sourceRef.current;
+        retainedSource?.close();
+        if (sourceRef.current === retainedSource) sourceRef.current = undefined;
+      });
     };
   }, [cache]);
 

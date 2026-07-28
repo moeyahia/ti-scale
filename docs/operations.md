@@ -14,6 +14,12 @@ GET /api/v2/contracts/events
 GET /api/v2/auth/session
 ```
 
+`/api/v2/health` is a constant-time process probe. Its database result is the
+immutable integrity attestation captured during startup; it never runs
+`PRAGMA quick_check` or dependency probes from an HTTP request. Use
+`/api/v2/system/readiness` for the current provider, specialist, tool, Brain,
+and Vault projection. Use `db:verify` for an explicit full database scan.
+
 All operational data routes require authentication.
 
 ## Start and stop
@@ -49,33 +55,37 @@ bun run brain:sync-verify --db ./data/ti-scale.sqlite \
   --vault-root /absolute/vault/root --connection <connection-id>
 ```
 
-## Database backup and restore
+## Forward-only database operations
 
-Create a timestamped backup:
+This installation does not create or retain database backups, migration
+snapshots, restore targets, or rollback archives. Database migration is
+forward-only by default:
 
 ```bash
-bun run db:backup --db ./data/ti-scale.sqlite --output ./backups
+bun run db:migrate --db ./data/ti-scale.sqlite
+bun run db:verify --db ./data/ti-scale.sqlite
 ```
 
-Record the reported path and SHA-256. Verify both database integrity and foreign keys after any copy or restore.
-
-Restore is deliberately guarded. Stop the service, verify the expected backup hash, and use the restore command with its explicit stopped-service acknowledgment. Never overwrite a running database.
+The legacy paired `--no-backup --acknowledge-no-backup-risk` spelling remains
+accepted for command compatibility, while `--backup-dir` is rejected. Before
+commit, SQLite transaction semantics preserve the original state. After
+commit, recovery is forward-only. The release journal retains hashes and
+phases, never database bytes.
 
 ## Static client releases
 
-The static release commands stage immutable build output, verify hashes, switch a small active pointer, pin the active release, and roll the pointer back:
+Direct static staging, activation, and rollback commands are disabled. A
+release is built, verified, activated, and pruned only inside the bounded
+forward-only deployment controller. Read-only inspection remains available:
 
 ```bash
-bun run build
-bun run release:static:stage --root /var/lib/ti-scale/static-releases \
-  --release-id "$(date -u +%Y%m%dT%H%M%SZ)" --dist ./dist
 bun run release:static:verify --root /var/lib/ti-scale/static-releases \
   --release-id <release-id>
-bun run release:static:activate --root /var/lib/ti-scale/static-releases \
-  --release-id <release-id>
+bun run release:static:pin --root /var/lib/ti-scale/static-releases
 ```
 
-A static pointer rollback changes browser assets only. It does not restore the database, cancel runs, revert provider configuration, or reverse artifact writes.
+The controller removes the superseded static tree in the same controlled
+release window. It must never be retained as a rollback copy.
 
 ## Blocked and failed work
 
@@ -98,7 +108,7 @@ Use the semantic event stream for live state and the structured log views for tr
 ## Routine maintenance
 
 - Review database and artifact growth.
-- Verify recent backups by opening them read-only and running integrity checks.
+- Verify the canonical database directly with integrity and foreign-key checks.
 - Resolve vault conflicts and quarantined notes.
 - Review stale or disputed memory.
 - Review circuit-breaker and dependency health.

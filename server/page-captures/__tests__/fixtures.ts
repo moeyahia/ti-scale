@@ -40,8 +40,8 @@ function insertRun(database: SqliteDatabase, missionId: string, runId: string): 
   `).run(runId, missionId, NOW, NOW);
 }
 
-export function createPageCaptureFixtureDatabase(): SqliteDatabase {
-  const database = createDatabaseConnection({ filename: ":memory:" });
+export function createPageCaptureFixtureDatabase(filename = ":memory:"): SqliteDatabase {
+  const database = createDatabaseConnection({ filename });
   migrateDatabase(database);
   insertMission(database, MISSION_ID);
   insertMission(database, FOREIGN_MISSION_ID);

@@ -7,6 +7,7 @@ import {
   isExpectedOptionalMediaNavigationTeardown,
   isExpectedWebKitDocumentFetchTeardown,
   isExpectedVerifiedDownloadNavigation,
+  isExactWebKitCoopProvisionalDocumentReplacement,
   isResolvedDocumentNavigationStatus,
   type BrowserIssueLike,
 } from "../../e2e/support/browserAuditPolicy";
@@ -267,6 +268,54 @@ describe("cross-browser-safe browser audit policy", () => {
       ...issue,
       message: "/127.0.0.1:43140/api/v2/runs/run-one due to access control checks.\nreal error",
     }, valid)).toBe(false);
+  });
+
+  test("reconciles only an exact completed WebKit COOP provisional fragment replacement", () => {
+    const valid = {
+      browserName: "webkit",
+      samePage: true,
+      sameFrame: true,
+      predecessor: {
+        method: "GET",
+        url: "http://127.0.0.1:43140/agents/ReconScout",
+        resourceType: "document",
+        navigationRequest: true,
+        startingPageUrl: "about:blank",
+      },
+      successor: {
+        method: "GET",
+        url: "http://127.0.0.1:43140/agents/ReconScout",
+        resourceType: "document",
+        navigationRequest: true,
+        startingPageUrl: "about:blank",
+      },
+      response: {
+        status: 200,
+        url: "http://127.0.0.1:43140/agents/ReconScout",
+        crossOriginOpenerPolicy: "same-origin",
+      },
+      successorFinished: true,
+      resolvedPageUrl: "http://127.0.0.1:43140/agents/ReconScout#agent-model-configuration",
+    } as const;
+    expect(isExactWebKitCoopProvisionalDocumentReplacement(valid)).toBe(true);
+    for (const candidate of [
+      { ...valid, browserName: "chromium" },
+      { ...valid, samePage: false },
+      { ...valid, sameFrame: false },
+      { ...valid, predecessor: { ...valid.predecessor, method: "POST" } },
+      { ...valid, successor: { ...valid.successor, method: "POST" } },
+      { ...valid, predecessor: { ...valid.predecessor, url: "http://127.0.0.1:43140/agents/Other" } },
+      { ...valid, predecessor: { ...valid.predecessor, resourceType: "fetch" } },
+      { ...valid, successor: { ...valid.successor, navigationRequest: false } },
+      { ...valid, predecessor: { ...valid.predecessor, startingPageUrl: "http://127.0.0.1:43140/" } },
+      { ...valid, response: { ...valid.response, status: 404 } },
+      { ...valid, response: { ...valid.response, url: "http://127.0.0.1:43140/agents/Other" } },
+      { ...valid, response: { ...valid.response, crossOriginOpenerPolicy: "same-origin-allow-popups" } },
+      { ...valid, successorFinished: false },
+      { ...valid, resolvedPageUrl: "http://127.0.0.1:43140/agents/ReconScout" },
+      { ...valid, resolvedPageUrl: "http://127.0.0.1:43140/agents/Other#agent-model-configuration" },
+      { ...valid, resolvedPageUrl: "not a URL" },
+    ]) expect(isExactWebKitCoopProvisionalDocumentReplacement(candidate)).toBe(false);
   });
 
   test("binds only the exact prospectively declared old-document image request", () => {

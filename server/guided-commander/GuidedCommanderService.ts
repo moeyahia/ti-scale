@@ -1,6 +1,7 @@
 import type { JsonValue } from "../events";
 import {
   BrainContextService,
+  retrieveMissionBrainContext,
   type BrainContextResult,
   type BrainProviderContextEnvelope,
 } from "../brain-runtime";
@@ -13,9 +14,10 @@ import {
   type ContextPackItemDisposition,
   type MemorySensitivity,
   type MemoryScope,
-  type RetrievalPolicy,
 } from "../memory";
-import { hashCanonical } from "../missions/canonical";
+import { RuntimeRepository } from "../command-runtime/RuntimeRepository";
+import { CommandRuntimeError } from "../command-runtime/types";
+import { canonicalJson, hashCanonical } from "../missions/canonical";
 import { GuidedCommanderRepository, type GuidedScope } from "./GuidedCommanderRepository";
 import type {
   GuidedCommanderAction,
@@ -24,6 +26,8 @@ import type {
   GuidedCommanderPort,
   GuidedCommanderPortInput,
   GuidedCommanderReply,
+  GuidedCommanderRuntimeBinding,
+  GuidedCommanderRuntimeBindingResolver,
   GuidedMessage,
   GuidedTextResult,
   GuidedTranscriptPage,
@@ -34,12 +38,15 @@ import {
   GuidedCommanderError,
   redactSensitiveText,
   resultRequestIdentity,
-  validatePortResponse,
+  validatePortResult,
   type ContextualActionRequest,
   type DoNotRememberRequest,
   type InterpretResultRequest,
   type RememberRequest,
 } from "./validation";
+import {
+  GUIDED_COMMANDER_PROMPT_TEMPLATE_HASH,
+} from "./GuidedCommanderProviderContract";
 
 const TERMINAL_RUN_STATES = new Set(["completed", "failed", "cancelled"]);
 const MAX_IN_FLIGHT_PROVIDER_MUTATIONS = 256;
@@ -49,6 +56,8 @@ interface ServiceDependencies {
   readonly repository: GuidedCommanderRepository;
   /** Omitted for the local-only memory-candidate boundary. */
   readonly port?: GuidedCommanderPort;
+  /** Resolves the exact pinned per-step agent/model binding at dispatch time. */
+  readonly resolveRuntimeBinding?: GuidedCommanderRuntimeBindingResolver;
   readonly secondBrain?: SecondBrainService;
   readonly brainContext?: BrainContextService;
   readonly options?: GuidedCommanderOptions;
@@ -57,7 +66,7 @@ interface ServiceDependencies {
 interface PreparedContext {
   readonly pack: ContextPack;
   readonly nodes: readonly GuidedCommanderMemoryContext[];
-  readonly lifecycleResult?: BrainContextResult;
+  readonly lifecycleResult: BrainContextResult;
 }
 
 interface ProviderMutationFlight {
@@ -118,9 +127,11 @@ function actionOperatorBody(action: GuidedCommanderAction, note?: string): strin
  */
 export class GuidedCommanderService {
   readonly repository: GuidedCommanderRepository;
+  readonly runtimeRepository: RuntimeRepository;
   readonly secondBrain: SecondBrainService;
   readonly brainContext: BrainContextService;
   readonly #port?: GuidedCommanderPort;
+  readonly #resolveRuntimeBinding?: GuidedCommanderRuntimeBindingResolver;
   readonly #maximumMemorySensitivity: Exclude<MemorySensitivity, "restricted">;
   readonly #memoryContextBudget: number;
   readonly #memoryContextLimit: number;
@@ -129,6 +140,9 @@ export class GuidedCommanderService {
   readonly #providerMutationFlights = new Map<string, ProviderMutationFlight>();
 
   constructor(dependencies: ServiceDependencies) {
+    if (dependencies.port && dependencies.resolveRuntimeBinding) {
+      throw new TypeError("Guided Commander accepts either one fixed port or a runtime binding resolver, not both");
+    }
     if (dependencies.port && (
       dependencies.port.kind !== "planning_only" ||
       dependencies.port.supportsToolExecution !== false
@@ -136,7 +150,9 @@ export class GuidedCommanderService {
       throw new TypeError("Guided Commander requires a planning-only provider with tool execution disabled");
     }
     this.repository = dependencies.repository;
+    this.runtimeRepository = new RuntimeRepository(dependencies.repository.database);
     this.#port = dependencies.port;
+    this.#resolveRuntimeBinding = dependencies.resolveRuntimeBinding;
     this.secondBrain = dependencies.secondBrain ?? new SecondBrainService(
       new MemoryRepository(dependencies.repository.database),
     );
@@ -194,6 +210,11 @@ export class GuidedCommanderService {
     const identity = contextualIdentity(input.missionId, input.action, input.request);
     const requestHash = hashCanonical(identity);
     const idempotencyScope = `${input.action}:${input.missionId}`;
+    // Do not create a durable provider reservation for a stale or ambiguous
+    // decision. The exact current Guided boundary is checked again after the
+    // provider returns, inside the atomic completion transaction.
+    input.assertMutationAuthority();
+    const scope = this.requireActiveScope(input.missionId, input.request);
     return this.runProviderMutationSingleFlight({
       idempotencyScope,
       idempotencyKey: input.idempotencyKey,
@@ -209,6 +230,7 @@ export class GuidedCommanderService {
         actorId: input.actorId,
         signal: input.signal,
         reservation,
+        existingScope: scope,
         assertMutationAuthority: input.assertMutationAuthority,
       }),
     });
@@ -228,6 +250,8 @@ export class GuidedCommanderService {
       ...resultRequestIdentity(input.request),
     });
     const idempotencyScope = `interpret_result:${input.missionId}`;
+    input.assertMutationAuthority();
+    const initialScope = this.requireActiveScope(input.missionId, input.request);
     return this.runProviderMutationSingleFlight({
       idempotencyScope,
       idempotencyKey: input.idempotencyKey,
@@ -237,6 +261,18 @@ export class GuidedCommanderService {
       operation: (reservation) => {
         input.assertMutationAuthority();
         const scope = this.requireActiveScope(input.missionId, input.request);
+        if (scope.step.guidedDecisionId !== initialScope.step.guidedDecisionId) {
+          throw new GuidedCommanderError(
+            409,
+            "guided_action_changed",
+            "The represented Guided decision changed before result ingestion",
+            {
+              humanMessage: "The Guided action changed before this result could be attached.",
+              category: "conflict",
+              remediation: "Refresh the Guided workspace and submit output only for its current exact step.",
+            },
+          );
+        }
         const result = safeTextResult(input.request.result);
         const evidence = this.repository.acquireTextEvidence(
           scope,
@@ -473,7 +509,52 @@ export class GuidedCommanderService {
     evidenceId?: string;
     assertMutationAuthority: () => void;
   }): Promise<GuidedCommanderReply> {
-    const port = this.#port;
+    const idempotencyScope = `${input.action}:${input.missionId}`;
+    input.assertMutationAuthority();
+    const scope = this.requireActiveScope(input.missionId, input.request);
+    if (
+      input.existingScope &&
+      input.existingScope.step.guidedDecisionId !== scope.step.guidedDecisionId
+    ) {
+      throw new GuidedCommanderError(
+        409,
+        "guided_action_changed",
+        "The represented Guided decision changed before provider dispatch",
+        {
+          humanMessage: "The Guided action changed before the explanation provider was called.",
+          category: "conflict",
+          remediation: "Refresh the Guided workspace and request a response for the current exact step.",
+        },
+      );
+    }
+    let runtimeBinding: GuidedCommanderRuntimeBinding | undefined;
+    try {
+      const representedActionClass = scope.step.representedAction.actionClass;
+      runtimeBinding = this.#resolveRuntimeBinding?.({
+        missionId: scope.mission.id,
+        runId: scope.run.id,
+        stepId: scope.step.id,
+        assignedAgentId: scope.step.assignedAgentId,
+        actionClassId: typeof representedActionClass === "string"
+          && representedActionClass.trim()
+          ? representedActionClass.trim()
+          : null,
+      });
+    } catch (error) {
+      if (error instanceof GuidedCommanderError) throw error;
+      throw new GuidedCommanderError(
+        503,
+        "guided_commander_model_binding_unavailable",
+        "The current step has no usable pinned agent model binding",
+        {
+          humanMessage: "This step could not resolve its reviewed agent and model configuration. No provider was contacted and the step remains paused.",
+          category: "dependency_missing",
+          retryable: false,
+          remediation: "Configure the current product agent from the live model catalog, start a new run so the assignment is pinned, and retry the unchanged step.",
+        },
+      );
+    }
+    const port = runtimeBinding?.port ?? this.#port;
     if (!port) {
       throw new GuidedCommanderError(503, "guided_commander_runtime_unavailable", "Guided Commander mutation runtime is unavailable", {
         humanMessage: "This V2 process has no callable planning-only Guided provider. The represented step remains paused and no Commander result was created.",
@@ -481,9 +562,19 @@ export class GuidedCommanderService {
         remediation: "Connect a policy-compatible Guided provider and mount its planning-only runtime boundary, then recheck System readiness.",
       });
     }
-    const idempotencyScope = `${input.action}:${input.missionId}`;
-    input.assertMutationAuthority();
-    const scope = input.existingScope ?? this.requireActiveScope(input.missionId, input.request);
+    if (port.kind !== "planning_only" || port.supportsToolExecution !== false) {
+      throw new GuidedCommanderError(
+        503,
+        "guided_commander_runtime_binding_invalid",
+        "The resolved agent model binding is not planning-only",
+        {
+          humanMessage: "The selected model route cannot be used for a represented Guided explanation. No provider was contacted.",
+          category: "policy_denied",
+          retryable: false,
+          remediation: "Choose a provider/model configuration with an audited planning-only Guided boundary.",
+        },
+      );
+    }
     const context = this.prepareMemoryContext(scope, input.action);
     const recentTranscript = this.repository.recentTranscript(
       scope.mission.id,
@@ -491,21 +582,36 @@ export class GuidedCommanderService {
       this.#transcriptContextLimit,
     );
     const providerModel = port.model?.trim() || "unspecified";
-    const turn = this.repository.startProviderTurn(scope, port.providerId, providerModel);
+    const turn = this.repository.startProviderTurn(
+      scope,
+      port.providerId,
+      providerModel,
+      port.modelConfigurationHash,
+      {
+        ...(runtimeBinding
+          ? {
+              agentId: runtimeBinding.productAgentId,
+              modelAssignmentId: runtimeBinding.modelAssignmentId,
+              modelConfigurationId: runtimeBinding.modelConfigurationId,
+            }
+          : {}),
+        promptTemplateHash: GUIDED_COMMANDER_PROMPT_TEMPLATE_HASH,
+        contextPackId: context.pack.id,
+      },
+    );
     let response;
     let contextDispositions: readonly ContextPackItemDisposition[];
     let providerBrainContext: BrainProviderContextEnvelope;
     try {
-      providerBrainContext = context.lifecycleResult
-        ? this.brainContext.prepareProviderContext(context.lifecycleResult, {
+      providerBrainContext = port.contextBoundary === "trusted_local"
+        ? this.brainContext.localContext(context.lifecycleResult)
+        : this.brainContext.prepareProviderContext(context.lifecycleResult, {
             providerTurnId: turn.id,
             providerId: port.providerId,
             modelId: providerModel,
-          })
-        : this.brainContext.preparePersistedContextPack(context.pack, {
-            providerTurnId: turn.id,
-            providerId: port.providerId,
-            modelId: providerModel,
+            ...(port.modelConfigurationHash
+              ? { modelConfigurationHash: port.modelConfigurationHash }
+              : {}),
           });
       const providerInput: GuidedCommanderPortInput = {
         action: input.action,
@@ -523,8 +629,15 @@ export class GuidedCommanderService {
           consequentialNextStepRequiresOperatorDecision: true,
         },
       };
-      response = validatePortResponse(await port.respond(providerInput, input.signal));
-      contextDispositions = this.validateContextUse(context, response.contextUse ?? []);
+      response = validatePortResult(await port.respond(providerInput, input.signal));
+      contextDispositions = this.validateContextUse(
+        context,
+        response.contextUse ?? [],
+        providerBrainContext.items.map((item) => item.nodeId),
+        port.contextBoundary === "trusted_local"
+          ? "trusted_local"
+          : "public_provider",
+      );
     } catch (error) {
       const aborted = input.signal.aborted || (error instanceof DOMException && error.name === "AbortError");
       this.repository.finishProviderTurn(
@@ -557,33 +670,52 @@ export class GuidedCommanderService {
         actorId: input.actorId,
         assertMutationAuthority: input.assertMutationAuthority,
         operation: () => {
+          // The provider is an untrusted, potentially slow dependency. Rebind
+          // its response to the one exact pending decision at commit time so
+          // reject/skip/expiry, plan replacement, parameter tampering, or a
+          // duplicate pending decision cannot race a stale response into the
+          // durable conversation/evidence interpretation.
+          const committedScope = this.requireActiveScope(input.missionId, input.request);
+          if (committedScope.step.guidedDecisionId !== scope.step.guidedDecisionId) {
+            throw new GuidedCommanderError(
+              409,
+              "guided_action_changed",
+              "The represented Guided decision changed while the provider was running",
+              {
+                humanMessage: "The Guided action changed while the explanation provider was working, so its stale response was not recorded.",
+                category: "conflict",
+                remediation: "Refresh the Guided workspace and request a response for the current exact step.",
+              },
+            );
+          }
           // Context attribution belongs to the durable response, not merely to a
           // provider attempt. The reservation owner is fenced before this
           // callback runs, so a stale worker cannot mark memory as used for a
           // response that it did not commit.
-          for (const disposition of contextDispositions) {
-            this.secondBrain.recordContextUse(context.pack.id, disposition);
-          }
+          this.brainContext.recordContextDispositions(
+            context.lifecycleResult,
+            contextDispositions,
+          );
           const exchange = this.repository.insertExchange({
-            scope,
+            scope: committedScope,
             actorId: input.actorId,
             action: input.action,
             operatorBody: actionOperatorBody(input.action, input.request.note),
             operatorStructured: asJsonValue({
               kind: "guided_commander_request",
               action: input.action,
-              stepId: scope.step.id,
-              decisionId: scope.step.guidedDecisionId,
-              actionFingerprint: scope.step.actionFingerprint,
+              stepId: committedScope.step.id,
+              decisionId: committedScope.step.guidedDecisionId,
+              actionFingerprint: committedScope.step.actionFingerprint,
               evidenceId: input.evidenceId ?? null,
             }),
             assistantBody: response.body,
             assistantStructured: asJsonValue({
               kind: "guided_commander_response",
               action: input.action,
-              stepId: scope.step.id,
-              decisionId: scope.step.guidedDecisionId,
-              actionFingerprint: scope.step.actionFingerprint,
+              stepId: committedScope.step.id,
+              decisionId: committedScope.step.guidedDecisionId,
+              actionFingerprint: committedScope.step.actionFingerprint,
               summary: response.summary,
               confidence: response.confidence,
               observations: response.observations ?? [],
@@ -592,6 +724,11 @@ export class GuidedCommanderService {
               providerExposureReceiptId: providerBrainContext.exposureReceiptId ?? null,
               memoryStatus: providerBrainContext.status,
               memoryDegradation: providerBrainContext.degradation ?? null,
+              productAgentId: runtimeBinding?.productAgentId ?? null,
+              modelAssignmentId: runtimeBinding?.modelAssignmentId ?? null,
+              modelConfigurationId: runtimeBinding?.modelConfigurationId ?? null,
+              usedFallbackModel: runtimeBinding?.usedFallback ?? false,
+              promptTemplateHash: GUIDED_COMMANDER_PROMPT_TEMPLATE_HASH,
               evidenceId: input.evidenceId ?? null,
               executionPerformed: false,
               planMutated: false,
@@ -603,7 +740,7 @@ export class GuidedCommanderService {
           });
           if (input.evidenceId) {
             this.repository.recordTextEvidenceInterpretation({
-              scope,
+              scope: committedScope,
               evidenceId: input.evidenceId,
               assistantMessageId: exchange.assistantMessage.id,
               contextPackId: context.pack.id,
@@ -614,13 +751,33 @@ export class GuidedCommanderService {
           // The winning provider turn and its durable response are one
           // aggregate. A process crash must not leave a committed message with
           // a permanently "started" provider turn.
-          this.repository.finishProviderTurn(turn.id, "completed", turn.startedAt);
+          this.repository.finishProviderTurn(
+            turn.id,
+            "completed",
+            turn.startedAt,
+            undefined,
+            response.providerUsage,
+          );
           return {
             action: input.action,
             ...exchange,
             contextPackId: context.pack.id,
             ...(input.evidenceId ? { evidenceId: input.evidenceId } : {}),
-            actionFingerprint: scope.step.actionFingerprint,
+            actionFingerprint: committedScope.step.actionFingerprint,
+            ...(runtimeBinding
+              ? {
+                  runtimeBinding: {
+                    productAgentId: runtimeBinding.productAgentId,
+                    modelAssignmentId: runtimeBinding.modelAssignmentId,
+                    modelConfigurationId: runtimeBinding.modelConfigurationId,
+                    providerId: port.providerId,
+                    modelId: providerModel,
+                    usedFallback: runtimeBinding.usedFallback,
+                    providerContacted:
+                      port.contextBoundary !== "trusted_local",
+                  },
+                }
+              : {}),
           } satisfies GuidedCommanderReply;
         },
       });
@@ -749,6 +906,7 @@ export class GuidedCommanderService {
             requestHash: input.requestHash,
             ownerToken: reservation.ownerToken,
             leaseMs: this.#providerMutationLeaseMs,
+            assertMutationAuthority: input.assertMutationAuthority,
           });
         } catch {
           // Completion remains owner-fenced. A failed heartbeat cannot grant
@@ -796,6 +954,46 @@ export class GuidedCommanderService {
         category: "conflict",
       });
     }
+    let current;
+    try {
+      current = this.runtimeRepository.requireCurrentPendingDecision(
+        scope.step.guidedDecisionId,
+        this.repository.now(),
+      );
+    } catch (error) {
+      if (error instanceof CommandRuntimeError) {
+        const details = error.options.details;
+        throw new GuidedCommanderError(error.status, error.code, error.message, {
+          ...(error.options.humanMessage ? { humanMessage: error.options.humanMessage } : {}),
+          ...(error.options.category ? { category: error.options.category } : {}),
+          ...(error.options.remediation ? { remediation: error.options.remediation } : {}),
+          ...(error.options.retryable === undefined ? {} : { retryable: error.options.retryable }),
+          ...(details && typeof details === "object" && !Array.isArray(details)
+            ? { details: details as Readonly<Record<string, unknown>> }
+            : {}),
+        });
+      }
+      throw error;
+    }
+    if (
+      current.id !== scope.step.guidedDecisionId ||
+      current.missionId !== scope.mission.id ||
+      current.runId !== scope.run.id ||
+      current.stepId !== scope.step.id ||
+      current.actionFingerprint !== scope.step.actionFingerprint ||
+      canonicalJson(current.requestedParameters) !== canonicalJson(scope.step.decisionParameters)
+    ) {
+      throw new GuidedCommanderError(
+        409,
+        "guided_action_changed",
+        "The represented Guided decision no longer matches its canonical runtime boundary",
+        {
+          humanMessage: "The exact Guided action or its parameters changed. No provider response was recorded.",
+          category: "conflict",
+          remediation: "Refresh the Guided workspace and use the one current decision card.",
+        },
+      );
+    }
     return scope;
   }
 
@@ -810,48 +1008,29 @@ export class GuidedCommanderService {
       scope.step.objective,
       action.replaceAll("_", " "),
     ].join(" ");
-    // Result interpretation is the existing, truthful material-result seam:
-    // it must refresh phase context before explaining what changed. Ordinary
-    // same-step explanation remains a Context Pack retrieval, but is not
-    // mislabeled as a phase-transition lifecycle receipt.
-    let lifecycleResult: BrainContextResult | undefined;
-    const pack = action === "interpret_result"
-      ? (lifecycleResult = this.brainContext.retrieve({
-          hook: "phase_transition",
-          journey: "guided",
-          availabilityPolicy: "degraded_allowed",
-          query,
-          queryRedacted: `${scope.step.phase}: ${scope.step.title} — interpret result`,
-          actorId: "guided-commander",
-          actorType: "agent",
-          missionId: scope.mission.id,
-          runId: scope.run.id,
-          stepId: scope.step.id,
-          allowGlobal: true,
-          maximumSensitivity: this.#maximumMemorySensitivity,
-          contextBudget: this.#memoryContextBudget,
-          limit: this.#memoryContextLimit,
-        })).contextPack
-      : this.secondBrain.retrieveAndPersistContext({
-          query,
-          queryRedacted: `${scope.step.phase}: ${scope.step.title} — ${action.replaceAll("_", " ")}`,
-          policy: {
-            ...(scope.mission.engagementId ? { engagementId: scope.mission.engagementId } : {}),
-            missionId: scope.mission.id,
-            allowGlobal: true,
-            journey: "guided",
-            maximumSensitivity: this.#maximumMemorySensitivity,
-            allowedStatuses: ["confirmed", "verified"],
-            contextBudget: this.#memoryContextBudget,
-            limit: this.#memoryContextLimit,
-            graphDepth: 1,
-          } satisfies RetrievalPolicy,
-          purpose: `Guided Commander ${action.replaceAll("_", " ")}`,
-          createdBy: "guided-commander",
-          missionId: scope.mission.id,
-          runId: scope.run.id,
-          stepId: scope.step.id,
-        });
+    // Result interpretation refreshes phase context after a material result.
+    // Ordinary same-step explanation has its own typed lifecycle hook. Both
+    // paths use the canonical mission policy compiler and audited Context Pack
+    // service; the Commander never reads the Vault or constructs a parallel
+    // retrieval policy.
+    const mission = this.runtimeRepository.getMission(scope.mission.id);
+    const lifecycleResult = retrieveMissionBrainContext({
+      brainContext: this.brainContext,
+      hook: action === "interpret_result" ? "phase_transition" : "guided_briefing",
+      journey: "guided",
+      missionId: scope.mission.id,
+      runId: scope.run.id,
+      stepId: scope.step.id,
+      actorId: "guided-commander",
+      actorType: "agent",
+      query,
+      queryRedacted: `${scope.step.phase}: ${scope.step.title} — ${action.replaceAll("_", " ")}`,
+      memoryPolicy: mission.memoryPolicy,
+      maximumSensitivity: this.#maximumMemorySensitivity,
+      contextBudget: this.#memoryContextBudget,
+      limit: this.#memoryContextLimit,
+    });
+    const pack = lifecycleResult.contextPack;
     const nodes = pack.items.map((item) => {
       const node = this.secondBrain.repository.requireNode(item.nodeId);
       return {
@@ -865,7 +1044,7 @@ export class GuidedCommanderService {
         lifecycleStatus: node.lifecycleStatus,
       } satisfies GuidedCommanderMemoryContext;
     });
-    return { pack, nodes, ...(lifecycleResult ? { lifecycleResult } : {}) };
+    return { pack, nodes, lifecycleResult };
   }
 
   private validateContextUse(
@@ -877,8 +1056,10 @@ export class GuidedCommanderService {
       influenceSummary?: string;
       ignoredReason?: string;
     }[],
+    disclosedNodeIds: readonly string[],
+    contextBoundary: "trusted_local" | "public_provider",
   ): readonly ContextPackItemDisposition[] {
-    const available = new Set(context.nodes.map((node) => node.id));
+    const available = new Set(disclosedNodeIds);
     const seen = new Set<string>();
     const normalized: ContextPackItemDisposition[] = [];
     for (const disposition of dispositions) {
@@ -904,11 +1085,16 @@ export class GuidedCommanderService {
     }
     for (const node of context.nodes) {
       if (seen.has(node.id)) continue;
+      const disclosed = available.has(node.id);
       normalized.push({
         nodeId: node.id,
         used: false,
         relevanceReason: "Retrieved for the current mission and represented step",
-        ignoredReason: "The planning-only provider did not use this memory in its response",
+        ignoredReason: disclosed
+          ? "The planning-only runtime did not use this memory in its response"
+          : contextBoundary === "public_provider"
+            ? "Memory was withheld from the public provider by the disclosure policy"
+            : "Memory was quarantined or empty after local sanitization",
       });
     }
     return normalized;

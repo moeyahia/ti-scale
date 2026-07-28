@@ -3,12 +3,13 @@ import type { SqliteDatabase } from "../db";
 import { inImmediateTransaction } from "../db";
 import type { JsonValue } from "../events";
 import { EventRepository } from "../events";
-import { evaluateDestructiveAuthorization } from "../domain";
+import { ACTION_CLASS_DEFINITIONS, evaluateDestructiveAuthorization } from "../domain";
 import { verifiedEvidenceSql } from "../domain/evidence-semantics";
 import { redactSensitiveText } from "../guided-commander/validation";
 import type { DurableActionIntent, RunLeaseToken } from "../orchestration";
 import {
   fingerprintAction,
+  projectRunNextAction,
   progressSignature,
   stableSerialize,
   type FailureCategory,
@@ -27,10 +28,13 @@ import type {
   StoredPlan,
   StoredPlanStep,
 } from "./types";
+import { parseGuidedReconnaissanceSelection } from "../missions/GuidedReconnaissance";
 import { CommandRuntimeError } from "./types";
+import { planContentFingerprint, planVersionReceiptHash } from "./PlanFingerprint";
 
 interface MissionRow {
   readonly id: string;
+  readonly created_by: string;
   readonly name: string;
   readonly objective: string;
   readonly journey: Journey;
@@ -38,6 +42,7 @@ interface MissionRow {
   readonly authorization_status: PlanningMission["authorizationStatus"];
   readonly success_criteria_json: string;
   readonly memory_policy_json: string;
+  readonly guided_collaboration_json: string | null;
 }
 
 interface RunRow {
@@ -63,6 +68,23 @@ interface PlanRow {
   readonly created_at: string;
   readonly activated_at: string | null;
   readonly plan_hash: string;
+  readonly content_hash: string | null;
+  readonly content_hash_version: number;
+}
+
+const REGISTERED_ACTION_CLASSES: ReadonlySet<string> = new Set(
+  ACTION_CLASS_DEFINITIONS.map((definition) => definition.id),
+);
+
+function normalizeScopeTarget(target: string): string {
+  const trimmed = target.trim().normalize("NFKC");
+  try {
+    const url = new URL(trimmed);
+    url.hostname = url.hostname.toLocaleLowerCase("en-US");
+    return url.toString();
+  } catch {
+    return trimmed.toLocaleLowerCase("en-US");
+  }
 }
 
 interface StepRow {
@@ -152,6 +174,25 @@ export interface RuntimeRunProjection {
   readonly version: number;
 }
 
+export interface RuntimeRunProjectionCursor {
+  readonly updatedAt: string;
+  readonly id: string;
+}
+
+export interface RuntimeRunProjectionPage {
+  readonly items: readonly RuntimeRunProjection[];
+  readonly nextCursor: RuntimeRunProjectionCursor | null;
+}
+
+export interface ListRuntimeRunProjectionOptions {
+  readonly query?: string;
+  readonly journey?: Journey;
+  readonly status?: RunState;
+  readonly statuses?: readonly RunState[];
+  readonly cursor?: RuntimeRunProjectionCursor;
+  readonly limit?: number;
+}
+
 export interface StepAdvanceResult {
   readonly completed: boolean;
   readonly nextStepId: string | null;
@@ -225,6 +266,7 @@ function parseRepresentation(value: string | null): {
   rationale: string;
   reversibility: string;
   dependencies: readonly string[];
+  runtimeModelBinding: MissionPlanDraft["steps"][number]["runtimeModelBinding"];
 } {
   if (!value) throw new CommandRuntimeError(500, "plan_representation_missing", "Plan step representation is missing");
   const parsed = parseObject(value);
@@ -240,6 +282,13 @@ function parseRepresentation(value: string | null): {
     dependencies: Array.isArray(parsed.dependencies)
       ? parsed.dependencies.filter((candidate): candidate is string => typeof candidate === "string")
       : [],
+    runtimeModelBinding: parsed.runtimeModelBinding
+      && typeof parsed.runtimeModelBinding === "object"
+      && !Array.isArray(parsed.runtimeModelBinding)
+      ? parsed.runtimeModelBinding as NonNullable<
+          MissionPlanDraft["steps"][number]["runtimeModelBinding"]
+        >
+      : undefined,
   };
 }
 
@@ -270,6 +319,9 @@ function mapPlan(row: PlanRow, steps: StepRow[]): StoredPlan {
         explanation: represented.explanation,
         rationale: represented.rationale,
         reversibility: represented.reversibility,
+        ...(represented.runtimeModelBinding
+          ? { runtimeModelBinding: represented.runtimeModelBinding }
+          : {}),
       };
     }),
   };
@@ -293,16 +345,22 @@ function mapDecision(row: DecisionRow): GuidedDecisionProjection {
 }
 
 function mapRunProjection(row: Record<string, unknown>): RuntimeRunProjection {
+  const journey = row.journey as Journey;
+  const status = row.status as RunState;
   return {
     id: String(row.id),
     missionId: String(row.mission_id),
     missionName: String(row.mission_name),
     objective: String(row.objective),
-    journey: row.journey as Journey,
-    status: row.status as RunState,
+    journey,
+    status,
     statusReason: typeof row.status_reason === "string" ? row.status_reason : null,
     progress: typeof row.progress === "number" ? row.progress : 0,
-    nextAction: typeof row.next_action_summary === "string" ? row.next_action_summary : null,
+    nextAction: projectRunNextAction({
+      state: status,
+      journey,
+      persisted: row.next_action_summary,
+    }),
     currentPlanId: typeof row.current_plan_id === "string" ? row.current_plan_id : null,
     currentStepId: typeof row.current_step_id === "string" ? row.current_step_id : null,
     currentOwnerId: typeof row.current_owner_id === "string" ? row.current_owner_id : null,
@@ -429,33 +487,291 @@ export class RuntimeRepository {
     return { stepsFailed, assignmentsFailed };
   }
 
-  listRunnableRuns(now: string, limit = 20): string[] {
+  listRunnableRuns(
+    now: string,
+    limit = 20,
+    supportedJourneys: readonly Journey[] = ["autonomous", "guided"],
+  ): string[] {
+    const journeys = [...new Set(supportedJourneys)];
+    if (journeys.length === 0) return [];
+    const placeholders = journeys.map(() => "?").join(", ");
     return (this.database.prepare(`
-      SELECT id FROM runs
-      WHERE status IN ('planning', 'recovering')
-        AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+      SELECT r.id FROM runs r
+      JOIN missions m ON m.id = r.mission_id
+      WHERE r.status IN ('planning', 'recovering')
+        AND r.control_plane = 'ti_scale'
+        AND m.control_plane = 'ti_scale'
+        AND r.journey IN (${placeholders})
+        AND (r.lease_expires_at IS NULL OR r.lease_expires_at <= ?)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM plan_change_inflight_resolutions gate
+          LEFT JOIN plan_change_requests fresh
+            ON fresh.id = gate.fresh_request_id
+          WHERE gate.run_id = r.id
+            AND (
+              gate.status IN ('waiting_for_terminal_work', 'failed')
+              OR (
+                gate.status = 'ready_for_review'
+                AND COALESCE(fresh.status, 'proposed')
+                  IN ('proposed', 'validated')
+              )
+            )
+        )
         AND NOT EXISTS (
           SELECT 1 FROM runtime_continuations continuation
-          WHERE continuation.run_id = runs.id
+          WHERE continuation.run_id = r.id
             AND continuation.kind = 'planning_retry_to_dispatch'
             AND continuation.status IN ('pending', 'processing')
         )
-      ORDER BY updated_at ASC, id ASC LIMIT ?
+      ORDER BY r.updated_at ASC, r.id ASC LIMIT ?
+    `).all(...journeys, now, limit) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /**
+   * Waiting Guided decisions remain under one server-owned Ti-Scale control
+   * plane while the operator is away. This query deliberately excludes
+   * legacy runs and stale/expired decisions; it grants no authority itself.
+   */
+  listWaitingGuidedDecisionRuns(now: string, limit = 500): string[] {
+    return (this.database.prepare(`
+      SELECT r.id
+      FROM runs r
+      JOIN missions m ON m.id = r.mission_id
+      JOIN plans p ON p.id = r.current_plan_id
+        AND p.run_id = r.id AND p.status = 'active'
+      JOIN plan_steps ps ON ps.id = r.current_step_id
+        AND ps.run_id = r.id AND ps.plan_id = p.id
+        AND ps.status = 'waiting_guided_decision'
+      WHERE r.control_plane = 'ti_scale'
+        AND m.control_plane = 'ti_scale'
+        AND r.journey = 'guided'
+        AND r.status = 'waiting_guided_decision'
+        AND (SELECT COUNT(*) FROM guided_decisions gd
+          WHERE gd.run_id = r.id AND gd.status = 'pending') = 1
+        AND (SELECT COUNT(*) FROM guided_decisions gd
+          WHERE gd.run_id = r.id AND gd.mission_id = r.mission_id
+            AND gd.step_id = r.current_step_id AND gd.status = 'pending'
+            AND gd.expires_at > ?) = 1
+      ORDER BY r.updated_at, r.id
+      LIMIT ?
     `).all(now, limit) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /**
+   * Waiting Guided checkpoints that cannot accept a consequential decision.
+   * A valid wait has one active current plan, one current waiting step, and
+   * exactly one unexpired pending decision across the entire run. Returning
+   * the whole boundary lets the runtime checkpoint a precise, non-retryable
+   * block instead of silently dropping corrupt state from heartbeat upkeep.
+   */
+  listUnusableWaitingGuidedDecisionBoundaries(
+    now: string,
+    limit = 500,
+    runId?: string,
+  ): Array<{
+    readonly missionId: string;
+    readonly runId: string;
+    readonly stepId: string | null;
+    readonly currentPlanId: string | null;
+    readonly pendingDecisionIds: readonly string[];
+    readonly currentPendingDecisionIds: readonly string[];
+    readonly expiredDecisionIds: readonly string[];
+    readonly pendingCount: number;
+    readonly currentPendingCount: number;
+    readonly unexpiredCount: number;
+    readonly integrityIssues: readonly (
+      | "active_plan_missing_or_stale"
+      | "current_step_missing_or_stale"
+      | "pending_decision_count_invalid"
+      | "current_decision_missing_or_ambiguous"
+      | "current_decision_expired"
+    )[];
+  }> {
+    const rows = this.database.prepare(`
+      WITH boundaries AS (
+        SELECT r.mission_id, r.id AS run_id,
+          r.current_plan_id, r.current_step_id AS step_id,
+          CASE WHEN p.id IS NOT NULL AND p.run_id = r.id AND p.status = 'active'
+            THEN 1 ELSE 0 END AS plan_usable,
+          CASE WHEN ps.id IS NOT NULL AND ps.run_id = r.id
+            AND ps.plan_id = r.current_plan_id
+            AND ps.status = 'waiting_guided_decision'
+            THEN 1 ELSE 0 END AS step_usable,
+          COALESCE((SELECT GROUP_CONCAT(gd.id, char(31))
+            FROM guided_decisions gd
+            WHERE gd.run_id = r.id AND gd.status = 'pending'), '') AS pending_ids,
+          COALESCE((SELECT GROUP_CONCAT(gd.id, char(31))
+            FROM guided_decisions gd
+            WHERE gd.run_id = r.id AND gd.mission_id = r.mission_id
+              AND gd.step_id = r.current_step_id AND gd.status = 'pending'), '') AS current_pending_ids,
+          COALESCE((SELECT GROUP_CONCAT(gd.id, char(31))
+            FROM guided_decisions gd
+            WHERE gd.run_id = r.id AND gd.status = 'pending'
+              AND gd.expires_at <= ?), '') AS expired_ids,
+          (SELECT COUNT(*) FROM guided_decisions gd
+            WHERE gd.run_id = r.id AND gd.status = 'pending') AS pending_count,
+          (SELECT COUNT(*) FROM guided_decisions gd
+            WHERE gd.run_id = r.id AND gd.mission_id = r.mission_id
+              AND gd.step_id = r.current_step_id AND gd.status = 'pending') AS current_pending_count,
+          (SELECT COUNT(*) FROM guided_decisions gd
+            WHERE gd.run_id = r.id AND gd.mission_id = r.mission_id
+              AND gd.step_id = r.current_step_id AND gd.status = 'pending'
+              AND gd.expires_at > ?) AS unexpired_count,
+          r.updated_at
+        FROM runs r
+        JOIN missions m ON m.id = r.mission_id
+        LEFT JOIN plans p ON p.id = r.current_plan_id
+        LEFT JOIN plan_steps ps ON ps.id = r.current_step_id
+        WHERE r.control_plane = 'ti_scale'
+          AND m.control_plane = 'ti_scale'
+          AND r.journey = 'guided'
+          AND r.status = 'waiting_guided_decision'
+          AND (? IS NULL OR r.id = ?)
+      )
+      SELECT * FROM boundaries
+      WHERE plan_usable <> 1 OR step_usable <> 1
+        OR pending_count <> 1 OR current_pending_count <> 1
+        OR unexpired_count <> 1
+      ORDER BY updated_at, run_id
+      LIMIT ?
+    `).all(now, now, runId ?? null, runId ?? null, limit) as Array<{
+      mission_id: string;
+      run_id: string;
+      current_plan_id: string | null;
+      step_id: string | null;
+      plan_usable: number;
+      step_usable: number;
+      pending_ids: string;
+      current_pending_ids: string;
+      expired_ids: string;
+      pending_count: number;
+      current_pending_count: number;
+      unexpired_count: number;
+    }>;
+    const split = (value: string): readonly string[] => value
+      .split(String.fromCharCode(31))
+      .map((item) => item.trim())
+      .filter(Boolean);
+    return rows.map((row) => {
+      const pendingDecisionIds = split(row.pending_ids);
+      const currentPendingDecisionIds = split(row.current_pending_ids);
+      const expiredDecisionIds = split(row.expired_ids);
+      const expired = new Set(expiredDecisionIds);
+      const integrityIssues: Array<
+        | "active_plan_missing_or_stale"
+        | "current_step_missing_or_stale"
+        | "pending_decision_count_invalid"
+        | "current_decision_missing_or_ambiguous"
+        | "current_decision_expired"
+      > = [];
+      if (row.plan_usable !== 1) integrityIssues.push("active_plan_missing_or_stale");
+      if (row.step_usable !== 1) integrityIssues.push("current_step_missing_or_stale");
+      if (row.pending_count !== 1) integrityIssues.push("pending_decision_count_invalid");
+      if (row.current_pending_count !== 1) integrityIssues.push("current_decision_missing_or_ambiguous");
+      if (
+        row.current_pending_count === 1
+        && currentPendingDecisionIds.some((decisionId) => expired.has(decisionId))
+      ) integrityIssues.push("current_decision_expired");
+      return {
+        missionId: row.mission_id,
+        runId: row.run_id,
+        stepId: row.step_id,
+        currentPlanId: row.current_plan_id,
+        pendingDecisionIds,
+        currentPendingDecisionIds,
+        expiredDecisionIds,
+        pendingCount: row.pending_count,
+        currentPendingCount: row.current_pending_count,
+        unexpiredCount: row.unexpired_count,
+        integrityIssues,
+      };
+    });
   }
 
   getMission(missionId: string): PlanningMission {
     const row = this.database.prepare(`
-      SELECT id, name, objective, journey, engagement_id, authorization_status,
-        success_criteria_json, memory_policy_json
-      FROM missions WHERE id = ?
+      SELECT m.id, m.created_by, m.name, m.objective, m.journey, m.engagement_id,
+        m.authorization_status, m.success_criteria_json, m.memory_policy_json,
+        (
+          SELECT mc.value_json
+          FROM mission_constraints mc
+          WHERE mc.mission_id = m.id AND mc.constraint_type = 'guided_collaboration'
+          ORDER BY mc.created_at DESC, mc.id DESC LIMIT 1
+        ) AS guided_collaboration_json
+      FROM missions m WHERE m.id = ?
     `).get(missionId) as MissionRow | undefined;
     if (!row) throw new CommandRuntimeError(404, "mission_not_found", `Mission not found: ${missionId}`);
     const targets = this.database.prepare(`
       SELECT target, disposition FROM mission_targets WHERE mission_id = ? ORDER BY id
     `).all(missionId) as Array<{ target: string; disposition: "allowed" | "prohibited" }>;
+    const guidedCollaboration = row.guided_collaboration_json
+      ? parseObject(row.guided_collaboration_json)
+      : {};
+    const executionPreference = guidedCollaboration.executionPreference === "single_step_agent"
+      ? "single_step_agent" as const
+      : "manual" as const;
+    // Early preview builds serialized the optional selection as JSON null.
+    // Treat that historical storage representation as absent while continuing
+    // to fail closed for every non-null malformed selection.
+    const storedGuidedReconnaissanceValue = guidedCollaboration.guidedReconnaissance === null
+      ? undefined
+      : guidedCollaboration.guidedReconnaissance;
+    const storedGuidedReconnaissance = parseGuidedReconnaissanceSelection(
+      storedGuidedReconnaissanceValue,
+      "stored guidedReconnaissance",
+    );
+    if (storedGuidedReconnaissanceValue !== undefined && storedGuidedReconnaissance.issues.length > 0) {
+      throw new CommandRuntimeError(409, "guided_reconnaissance_constraint_invalid", "The stored Guided reconnaissance selection failed canonical validation", {
+        humanMessage: "Ti-Scale stopped planning because the saved first reconnaissance step is malformed or refers to stale preset data. It will not substitute another target interaction.",
+        retryable: false,
+        category: "invalid_input",
+        remediation: "Review the mission constraint, choose the first reconnaissance step and exact ports again, then create a new run.",
+        details: { issues: [...storedGuidedReconnaissance.issues] },
+      });
+    }
+    const guidedReconnaissance = storedGuidedReconnaissance.selection;
+    const guidedWindowsIdentityValue = guidedCollaboration.guidedWindowsIdentity;
+    let guidedWindowsIdentity: PlanningMission["guidedWindowsIdentity"];
+    if (guidedWindowsIdentityValue !== undefined && guidedWindowsIdentityValue !== null) {
+      if (!guidedWindowsIdentityValue || typeof guidedWindowsIdentityValue !== "object"
+        || Array.isArray(guidedWindowsIdentityValue)) {
+        throw new CommandRuntimeError(409, "guided_windows_identity_constraint_invalid", "The stored Windows/identity selection is malformed", {
+          category: "invalid_input",
+          humanMessage: "Ti-Scale stopped because the saved Windows/identity step is malformed. It did not substitute another tool or target.",
+          remediation: "Create a new Guided mission with one reviewed Windows/identity operation.",
+        });
+      }
+      const candidate = guidedWindowsIdentityValue as Record<string, unknown>;
+      const operations = new Set(["smb_share_list", "smb_identity_summary", "ldap_root_dse", "rpc_domain_info"]);
+      const authenticationMode = candidate.authenticationMode;
+      const reference = candidate.credentialReference;
+      const validReference = reference === null || (
+        typeof reference === "object" && !Array.isArray(reference) && reference !== null
+        && Object.keys(reference).sort().join("\u0000") === "id\u0000kind"
+        && (reference as Record<string, unknown>).kind === "systemd_credential_bundle"
+        && typeof (reference as Record<string, unknown>).id === "string"
+        && /^[A-Za-z0-9._:@/-]{1,200}$/u.test((reference as Record<string, unknown>).id as string)
+      );
+      if (typeof candidate.operation !== "string" || !operations.has(candidate.operation)
+        || Object.keys(candidate).sort().join("\u0000") !== "authenticationMode\u0000credentialReference\u0000operation"
+        || (authenticationMode !== "anonymous" && authenticationMode !== "credential_reference")
+        || !validReference
+        || (authenticationMode === "anonymous" && reference !== null)
+        || (authenticationMode === "credential_reference" && reference === null)
+        || (candidate.operation === "smb_identity_summary" && authenticationMode !== "credential_reference")
+        || (candidate.operation === "ldap_root_dse" && authenticationMode !== "anonymous")) {
+        throw new CommandRuntimeError(409, "guided_windows_identity_constraint_invalid", "The stored Windows/identity selection failed canonical validation", {
+          category: "invalid_input",
+          humanMessage: "Ti-Scale stopped because the saved Windows/identity step or opaque credential reference is invalid. It did not dispatch a fallback.",
+          remediation: "Create a new Guided mission with one reviewed operation and a matching authentication mode.",
+        });
+      }
+      guidedWindowsIdentity = structuredClone(candidate) as NonNullable<PlanningMission["guidedWindowsIdentity"]>;
+    }
     return {
       id: row.id,
+      createdBy: row.created_by,
       name: row.name,
       objective: row.objective,
       journey: row.journey,
@@ -465,6 +781,11 @@ export class RuntimeRepository {
       prohibitedTargets: targets.filter((target) => target.disposition === "prohibited").map((target) => target.target),
       successCriteria: jsonArray(row.success_criteria_json),
       memoryPolicy: parseObject(row.memory_policy_json),
+      ...(row.journey === "guided" ? {
+        executionPreference,
+        ...(guidedReconnaissance ? { guidedReconnaissance } : {}),
+        ...(guidedWindowsIdentity ? { guidedWindowsIdentity } : {}),
+      } : {}),
     };
   }
 
@@ -839,6 +1160,8 @@ export class RuntimeRepository {
       const actionType = normalizePolicyValue(step.action.actionType);
       const actionClass = normalizePolicyValue(step.action.actionClass);
       const actionTarget = step.action.target.trim();
+      const reviewedLocalProcess = step.action.arguments.executionBinding === "reviewed_local_process"
+        && step.action.arguments.toolId === step.action.actionType;
       if (!evaluateDestructiveAuthorization({
         destructive: step.action.destructive,
         policy: destructivePolicy,
@@ -862,10 +1185,13 @@ export class RuntimeRepository {
           },
         );
       }
+      // Mission contracts authorize registry-backed action classes. The exact
+      // executable/tool identity is independently constrained by the assigned
+      // specialist's canonical tool policy at start and dispatch time.
       if (
-        !allowed.has(actionType) ||
+        (!reviewedLocalProcess && !allowed.has(actionType)) ||
         !allowed.has(actionClass) ||
-        prohibited.has(actionType) ||
+        (!reviewedLocalProcess && prohibited.has(actionType)) ||
         prohibited.has(actionClass) ||
         !targets.has(actionTarget) ||
         !specialists.has(step.assignedAgentId)
@@ -898,6 +1224,7 @@ export class RuntimeRepository {
     this.assertLease(input.run.id, input.lease, input.now);
     this.validateAgents(input.plan);
     if (input.run.journey === "autonomous") this.assertAutonomousPlanInContract(input.run.id, input.plan);
+    if (input.run.journey === "guided") this.assertGuidedPlanInScope(input.mission.id, input.plan);
     if (input.guidedRecovery) {
       if (input.run.journey !== "guided" || input.guidedRecovery.failedActionId === "") {
         throw new CommandRuntimeError(409, "guided_recovery_context_invalid", "Guided recovery context is invalid");
@@ -924,11 +1251,17 @@ export class RuntimeRepository {
     }
 
     const version = (input.run.currentPlanVersion ?? 0) + 1;
-    const planHash = hashJson({ strategy: input.plan.strategySummary, steps: input.plan.steps });
+    const contentHash = planContentFingerprint(input.plan);
     const previous = this.database.prepare(`
-      SELECT id, plan_hash FROM plans WHERE run_id = ? ORDER BY version DESC LIMIT 1
-    `).get(input.run.id) as { id: string; plan_hash: string } | undefined;
-    if (previous?.plan_hash === planHash) {
+      SELECT id, plan_hash, content_hash
+      FROM plans WHERE run_id = ? ORDER BY version DESC LIMIT 1
+    `).get(input.run.id) as {
+      id: string;
+      plan_hash: string;
+      content_hash: string | null;
+    } | undefined;
+    const previousContentHash = previous?.content_hash ?? previous?.plan_hash;
+    if (previousContentHash === contentHash) {
       throw new CommandRuntimeError(409, "equivalent_replan", "The proposed replan is materially identical", {
         humanMessage: "Recovery produced the same plan and was stopped instead of looping.",
         category: "deterministic_tool_error",
@@ -937,11 +1270,18 @@ export class RuntimeRepository {
     }
 
     const planId = id("plan");
+    const planHash = planVersionReceiptHash({
+      runId: input.run.id,
+      planId,
+      version,
+      contentHash,
+    });
     this.database.prepare(`
       INSERT INTO plans (
         id, run_id, version, status, strategy_summary, rationale_summary,
-        plan_hash, created_by, created_at, activated_at
-      ) VALUES (?, ?, ?, 'active', ?, ?, ?, 'runtime-planner', ?, ?)
+        plan_hash, content_hash, content_hash_version,
+        created_by, created_at, activated_at
+      ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, 1, 'runtime-planner', ?, ?)
     `).run(
       planId,
       input.run.id,
@@ -949,6 +1289,7 @@ export class RuntimeRepository {
       input.plan.strategySummary,
       input.plan.rationaleSummary,
       planHash,
+      contentHash,
       input.now,
       input.now,
     );
@@ -1008,6 +1349,7 @@ export class RuntimeRepository {
           rationale: step.rationale,
           reversibility: step.reversibility,
           dependencies: dependencyIds,
+          runtimeModelBinding: step.runtimeModelBinding ?? null,
         }),
         stepIds[ordinal],
         input.now,
@@ -1022,6 +1364,7 @@ export class RuntimeRepository {
       stepId: stepIds[0]!,
       assignmentId: assignmentIds[0]!,
       action: first.action,
+      runtimeModelBinding: first.runtimeModelBinding,
     });
     let guidedDecisionId: string | null = null;
     if (input.run.journey === "guided") {
@@ -1095,6 +1438,7 @@ export class RuntimeRepository {
         planId,
         version,
         planHash,
+        contentHash,
         stepCount: input.plan.steps.length,
         strategySummary: input.plan.strategySummary,
       },
@@ -1117,6 +1461,7 @@ export class RuntimeRepository {
     stepId: string;
     assignmentId: string;
     action: PlannedAction;
+    runtimeModelBinding?: MissionPlanDraft["steps"][number]["runtimeModelBinding"];
   }): PersistedPlanResult["firstIntent"] {
     return {
       missionId: input.missionId,
@@ -1132,6 +1477,9 @@ export class RuntimeRepository {
       kind: input.action.kind,
       idempotent: input.action.idempotent,
       destructive: input.action.destructive,
+      ...(input.runtimeModelBinding
+        ? { runtimeModelBinding: input.runtimeModelBinding }
+        : {}),
     };
   }
 
@@ -1277,6 +1625,7 @@ export class RuntimeRepository {
       stepId: row.id,
       assignmentId: row.assignment_id,
       action: represented.action,
+      runtimeModelBinding: represented.runtimeModelBinding,
     });
   }
 
@@ -1339,6 +1688,9 @@ export class RuntimeRepository {
         riskClass: (stored.risk_class ?? "low") as MissionPlanDraft["steps"][number]["riskClass"],
         reversibility: represented.reversibility,
         action: represented.action,
+        ...(represented.runtimeModelBinding
+          ? { runtimeModelBinding: represented.runtimeModelBinding }
+          : {}),
       },
     };
   }
@@ -1397,7 +1749,10 @@ export class RuntimeRepository {
       UPDATE plan_steps SET status = 'completed', ended_at = ?, updated_at = ? WHERE id = ?
     `).run(input.now, input.now, input.stepId);
     this.database.prepare(`
-      UPDATE assignments SET status = 'completed', ended_at = ?, updated_at = ? WHERE step_id = ?
+      UPDATE assignments SET status = 'completed', ended_at = ?,
+        lease_owner = NULL, lease_acquired_at = NULL,
+        last_heartbeat_at = NULL, lease_expires_at = NULL, updated_at = ?
+      WHERE step_id = ?
     `).run(input.now, input.now, input.stepId);
     const counts = this.database.prepare(`
       SELECT COUNT(*) AS total,
@@ -1488,14 +1843,11 @@ export class RuntimeRepository {
     now: string;
     decisionTtlMs: number;
   }): GuidedSkipAdvanceResult {
-    const decision = this.getDecision(input.decisionId);
-    if (decision.status !== "pending") {
-      throw new CommandRuntimeError(
-        409,
-        "guided_decision_not_pending",
-        "Only the current pending Guided decision can be skipped",
-      );
-    }
+    // This is the transaction-owned recheck. It deliberately uses the exact
+    // timestamp selected by the runtime/HTTP boundary so expiry, single-owner
+    // pending state, active plan/current step, canonical parameters, scope,
+    // and assignment identity are all evaluated against one instant.
+    const decision = this.requireCurrentPendingDecision(input.decisionId, input.now);
     const representedIntent = this.getStepIntent(decision.stepId);
     const actualFingerprint = fingerprintAction(representedIntent).hash;
     const representedParameters = canonicalJson(representedIntent);
@@ -1888,6 +2240,55 @@ export class RuntimeRepository {
     return { id: evidenceId, contentHash, byteSize, verificationState: "verified", deduplicated: false };
   }
 
+  /** Validate one unconsumed interpretation for the exact current decision. */
+  requireInterpretedGuidedEvidence(
+    decision: GuidedDecisionProjection,
+    evidenceId: string,
+  ): { readonly summary: string; readonly contentHash: string } {
+    const row = this.database.prepare(`
+      SELECT e.mission_id, e.run_id, e.step_id, e.action_id, e.evidence_type,
+        e.content_hash, e.provenance_json, e.verification_state,
+        chain.details_json
+      FROM evidence e
+      JOIN evidence_chain_events chain
+        ON chain.evidence_id = e.id AND chain.event_type = 'interpreted'
+      WHERE e.id = ?
+      ORDER BY chain.occurred_at DESC, chain.id DESC LIMIT 1
+    `).get(evidenceId) as {
+      mission_id: string;
+      run_id: string | null;
+      step_id: string | null;
+      action_id: string | null;
+      evidence_type: string;
+      content_hash: string;
+      provenance_json: string;
+      verification_state: string;
+      details_json: string;
+    } | undefined;
+    const provenance = row ? parseObject(row.provenance_json) : {};
+    const details = row ? parseObject(row.details_json) : {};
+    if (
+      !row ||
+      row.mission_id !== decision.missionId ||
+      row.run_id !== decision.runId ||
+      row.step_id !== decision.stepId ||
+      row.action_id !== null ||
+      row.evidence_type !== "guided_text_result" ||
+      row.verification_state !== "unverified" ||
+      provenance.guidedDecisionId !== decision.id ||
+      provenance.representedActionFingerprint !== decision.actionFingerprint ||
+      typeof details.summary !== "string" ||
+      !details.summary.trim()
+    ) {
+      throw new CommandRuntimeError(409, "guided_evidence_scope_conflict", "Reviewed evidence does not belong to this exact Guided decision", {
+        humanMessage: "Interpret output from the current exact action before completing this step.",
+        category: "scope_conflict",
+        remediation: "Refresh the Guided workspace and submit output for the unchanged represented step.",
+      });
+    }
+    return { summary: details.summary.trim(), contentHash: row.content_hash };
+  }
+
   /** Create an immutable verified derivative of reviewed source evidence. */
   promoteInterpretedGuidedEvidence(input: {
     decision: GuidedDecisionProjection;
@@ -1944,6 +2345,7 @@ export class RuntimeRepository {
       row.evidence_type !== "guided_text_result" ||
       row.action_id !== null ||
       row.verification_state !== "unverified" ||
+      provenance.guidedDecisionId !== input.decision.id ||
       provenance.representedActionFingerprint !== input.decision.actionFingerprint ||
       !interpreted
     ) {
@@ -2090,12 +2492,22 @@ export class RuntimeRepository {
    * engine calls, crash continuations, and future adapters cannot validate only
    * a decision row while overlooking a changed run, plan, or represented step.
    */
-  requireCurrentPendingDecision(decisionId: string): GuidedDecisionProjection {
+  requireCurrentPendingDecision(
+    decisionId: string,
+    now = new Date().toISOString(),
+  ): GuidedDecisionProjection {
     const decision = this.getDecision(decisionId);
     if (decision.status !== "pending") {
       throw new CommandRuntimeError(409, "guided_decision_not_pending", "Only a pending Guided decision can use this control", {
         humanMessage: "This exact-step control is stale. Refresh the current Guided checkpoint.",
         category: "conflict",
+      });
+    }
+    if (Date.parse(decision.expiresAt) <= Date.parse(now)) {
+      throw new CommandRuntimeError(409, "guided_decision_expired", "The Guided decision expired", {
+        humanMessage: "This exact-step decision expired and cannot accept a result or command.",
+        category: "conflict",
+        remediation: "Refresh the run and use its blocked-state recovery to create a new represented decision.",
       });
     }
 
@@ -2171,7 +2583,57 @@ export class RuntimeRepository {
         remediation: "Refresh the Guided workspace and decide on the newly represented action.",
       });
     }
+    this.assertGuidedIntentInScope(decision.missionId, representedIntent);
     return decision;
+  }
+
+  private guidedScopeTargets(missionId: string): {
+    readonly allowed: ReadonlySet<string>;
+    readonly prohibited: ReadonlySet<string>;
+  } {
+    const rows = this.database.prepare(`
+      SELECT normalized_target, disposition FROM mission_targets
+      WHERE mission_id = ? ORDER BY id
+    `).all(missionId) as Array<{
+      normalized_target: string;
+      disposition: "allowed" | "prohibited";
+    }>;
+    return {
+      allowed: new Set(rows.filter((row) => row.disposition === "allowed").map((row) => row.normalized_target)),
+      prohibited: new Set(rows.filter((row) => row.disposition === "prohibited").map((row) => row.normalized_target)),
+    };
+  }
+
+  private assertGuidedIntentInScope(
+    missionId: string,
+    intent: Pick<DurableActionIntent, "target" | "actionClass">,
+  ): void {
+    const normalizedTarget = normalizeScopeTarget(intent.target);
+    const scope = this.guidedScopeTargets(missionId);
+    if (
+      scope.allowed.size === 0 ||
+      !scope.allowed.has(normalizedTarget) ||
+      scope.prohibited.has(normalizedTarget)
+    ) {
+      throw new CommandRuntimeError(409, "guided_action_outside_scope", "Guided action target is outside the normalized mission scope", {
+        humanMessage: "The represented action no longer matches the mission's exact allowed target, so it was not accepted.",
+        category: "scope_conflict",
+        remediation: "Refresh the mission scope and create a new represented decision for an allowed target.",
+      });
+    }
+    if (!REGISTERED_ACTION_CLASSES.has(intent.actionClass)) {
+      throw new CommandRuntimeError(409, "guided_action_class_unregistered", "Guided action class is not registered", {
+        humanMessage: "The represented action uses an unknown action class and cannot be accepted.",
+        category: "policy_denied",
+        remediation: "Regenerate the plan from the current Action Class Registry.",
+      });
+    }
+  }
+
+  private assertGuidedPlanInScope(missionId: string, plan: MissionPlanDraft): void {
+    for (const step of plan.steps) {
+      this.assertGuidedIntentInScope(missionId, step.action);
+    }
   }
 
   listDecisions(options: { status?: string; runId?: string; query?: string; limit?: number } = {}): GuidedDecisionProjection[] {
@@ -2218,20 +2680,27 @@ export class RuntimeRepository {
     return mapRunProjection(row);
   }
 
-  listRunProjections(options: {
-    readonly query?: string;
-    readonly journey?: Journey;
-    readonly status?: RunState;
-    readonly limit?: number;
-  } = {}): RuntimeRunProjection[] {
+  listRunProjectionPage(options: ListRuntimeRunProjectionOptions = {}): RuntimeRunProjectionPage {
     const limit = options.limit ?? 50;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new RangeError("run projection limit must be between 1 and 100");
+    }
+    if (options.status && options.statuses) {
+      throw new RangeError("run projection accepts one exact status or one status set, not both");
     }
     const clauses: string[] = [];
     const params: unknown[] = [];
     if (options.journey) { clauses.push("r.journey = ?"); params.push(options.journey); }
     if (options.status) { clauses.push("r.status = ?"); params.push(options.status); }
+    if (options.statuses) {
+      const statuses = [...new Set(options.statuses)];
+      if (statuses.length === 0) {
+        clauses.push("0");
+      } else {
+        clauses.push(`r.status IN (${statuses.map(() => "?").join(", ")})`);
+        params.push(...statuses);
+      }
+    }
     if (options.query) {
       clauses.push(`instr(lower(
         r.id || ' ' || r.mission_id || ' ' || m.name || ' ' || m.objective || ' ' ||
@@ -2240,13 +2709,28 @@ export class RuntimeRepository {
       ), lower(?)) > 0`);
       params.push(options.query);
     }
+    if (options.cursor) {
+      clauses.push("(r.updated_at < ? OR (r.updated_at = ? AND r.id < ?))");
+      params.push(options.cursor.updatedAt, options.cursor.updatedAt, options.cursor.id);
+    }
     const rows = this.database.prepare(`
       SELECT r.*, m.name AS mission_name, m.objective
       FROM runs r JOIN missions m ON m.id = r.mission_id
       ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
       ORDER BY r.updated_at DESC, r.id DESC LIMIT ?
-    `).all(...params, limit) as Array<Record<string, unknown>>;
-    return rows.map(mapRunProjection);
+    `).all(...params, limit + 1) as Array<Record<string, unknown>>;
+    const hasMore = rows.length > limit;
+    const visible = hasMore ? rows.slice(0, limit) : rows;
+    const items = visible.map(mapRunProjection);
+    const last = items.at(-1);
+    return {
+      items,
+      nextCursor: hasMore && last ? { updatedAt: last.updatedAt, id: last.id } : null,
+    };
+  }
+
+  listRunProjections(options: ListRuntimeRunProjectionOptions = {}): RuntimeRunProjection[] {
+    return [...this.listRunProjectionPage(options).items];
   }
 
   getMissionRuntime(missionId: string): {
@@ -2373,6 +2857,32 @@ export class RuntimeRepository {
       settingKey,
     );
     return leaseExpiresAt;
+  }
+
+  /**
+   * Remove only this worker's still-pending HTTP reservation. This is a
+   * cleanup fence, not a mission mutation: it is used when mission/run
+   * ownership changes after a claim so legacy-owned data never retains a
+   * Ti-Scale command reservation. A completed or replaced claim is untouched.
+   */
+  abandonIdempotentClaim(
+    scope: string,
+    key: string,
+    request: unknown,
+    ownerToken: string,
+  ): boolean {
+    const settingKey = idempotencyKey(scope, key);
+    const row = this.database.prepare("SELECT value_json FROM settings WHERE key = ?")
+      .get(settingKey) as { value_json: string } | undefined;
+    if (!row) return false;
+    const stored = JSON.parse(row.value_json) as StoredIdempotency;
+    if (
+      stored.requestHash !== hashJson(request)
+      || stored.status !== "pending"
+      || stored.ownerToken !== ownerToken
+    ) return false;
+    return this.database.prepare("DELETE FROM settings WHERE key = ? AND value_json = ?")
+      .run(settingKey, row.value_json).changes === 1;
   }
 
   completeIdempotentClaim(

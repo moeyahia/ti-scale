@@ -31,6 +31,7 @@ export const ACTION_POLICY_PRESET_IDS = [
   "internal_network_assessment",
   "active_directory_lab",
   "cloud_read_only",
+  "htb_web_full_path",
   "full_authorized_lab_compromise",
   "custom",
 ] as const;
@@ -71,6 +72,13 @@ export interface BuildActionClassRegistryInput {
   readonly destructivePolicy: DestructiveActionPolicy;
   readonly projection: RuntimeCapabilityProjection;
   readonly overrides?: Readonly<Partial<Record<ActionClassId, ActionPolicyState>>>;
+  /**
+   * Optional target-aware allowlist for inferred/default Autonomous policy.
+   * Operator overrides remain authoritative; this only prevents a preset from
+   * granting capabilities that have no reviewed outcome path for the supplied
+   * target kind.
+   */
+  readonly defaultAllowedActionClassIds?: readonly ActionClassId[];
   readonly authorizedTargetIds?: readonly string[];
   readonly boundedDestructiveTargetIds?: readonly string[];
 }
@@ -360,6 +368,8 @@ const SAFE_RECON_PREAUTHORIZED: readonly ActionClassId[] = [
   "active_host_discovery",
   "port_service_enumeration",
   "os_technology_fingerprinting",
+  "web_crawling_page_capture",
+  "web_content_endpoint_discovery_fuzzing",
   "cve_intelligence_applicability_validation",
   "local_report_artifact_generation",
 ];
@@ -390,6 +400,20 @@ const PRESET_PREAUTHORIZED: Readonly<
     "cve_intelligence_applicability_validation",
     "local_report_artifact_generation",
   ],
+  htb_web_full_path: [
+    "active_host_discovery",
+    "port_service_enumeration",
+    "os_technology_fingerprinting",
+    "web_crawling_page_capture",
+    "web_content_endpoint_discovery_fuzzing",
+    "vulnerability_configuration_assessment",
+    "cve_intelligence_applicability_validation",
+    "exploit_validation",
+    "command_session_execution",
+    "data_access_impact_validation",
+    "privilege_escalation",
+    "cleanup_restoration",
+  ],
   full_authorized_lab_compromise: [
     ...SAFE_RECON_PREAUTHORIZED,
     "web_crawling_page_capture",
@@ -412,6 +436,18 @@ const PRESET_PREAUTHORIZED: Readonly<
   custom: [],
 };
 
+/**
+ * Outcome-bearing presets must remain truthful. Unlike the conservative
+ * recommendation presets, selecting either strict outcome-bearing preset is
+ * an explicit request for its complete declared capability set. Silently
+ * rewriting a missing class to Prohibited would launch a recon-only run while
+ * presenting it as the requested end-to-end engagement.
+ */
+const STRICT_RUNTIME_PRESET_IDS = new Set<ActionPolicyPresetId>([
+  "htb_web_full_path",
+  "full_authorized_lab_compromise",
+]);
+
 function resolvePolicy(
   definition: ActionClassDefinition,
   presetId: ActionPolicyPresetId,
@@ -422,6 +458,9 @@ function resolvePolicy(
   }
   if (PRESET_PREAUTHORIZED[presetId].includes(definition.id)) {
     return { policyState: "pre_authorized", policySource: "preset" };
+  }
+  if (STRICT_RUNTIME_PRESET_IDS.has(presetId)) {
+    return { policyState: "prohibited", policySource: "platform_default" };
   }
   return {
     policyState: definition.defaultPolicyState,
@@ -436,6 +475,9 @@ export function buildActionClassRegistry(
   const authorizedTargets = new Set(input.authorizedTargetIds ?? []);
   const boundedTargets = input.boundedDestructiveTargetIds ?? [];
   const invalidBoundedTargets = boundedTargets.filter((targetId) => !authorizedTargets.has(targetId));
+  const defaultAllowedActionClassIds = input.defaultAllowedActionClassIds === undefined
+    ? undefined
+    : new Set(input.defaultAllowedActionClassIds);
   if (invalidBoundedTargets.length > 0) {
     throw new Error(
       `Bounded destructive targets are outside supplied authorization: ${invalidBoundedTargets.join(", ")}`,
@@ -446,6 +488,17 @@ export function buildActionClassRegistry(
     ACTION_CLASS_DEFINITIONS.map((definition): [ActionClassId, ResolvedActionClass] => {
       let resolved = resolvePolicy(definition, input.presetId, input.overrides?.[definition.id]);
       const launchBlockingReasons: string[] = [];
+      const strictPresetRequirement = resolved.policySource === "preset"
+        && STRICT_RUNTIME_PRESET_IDS.has(input.presetId);
+
+      if (
+        defaultAllowedActionClassIds !== undefined
+        && !strictPresetRequirement
+        && resolved.policySource !== "operator_override"
+        && !defaultAllowedActionClassIds.has(definition.id)
+      ) {
+        resolved = { policyState: "prohibited", policySource: "platform_default" };
+      }
 
       if (definition.destructiveOrDisruptive && resolved.policyState === "pre_authorized") {
         if (
@@ -462,20 +515,32 @@ export function buildActionClassRegistry(
       const capability = input.projection.actionClasses[definition.id];
       if (input.journey === "autonomous" && resolved.policyState === "pre_authorized") {
         const executable = capability.availability === "supported" && capability.enforcementReady;
-        if (!executable && resolved.policySource !== "operator_override") {
+        const readinessDetail = capability.readinessReasons.length > 0
+          ? ` Runtime detail: ${capability.readinessReasons.join(" ")}`
+          : "";
+        if (
+          !executable &&
+          resolved.policySource !== "operator_override" &&
+          !strictPresetRequirement
+        ) {
           // Recommended defaults adapt to the attested runtime. An unavailable
           // optional capability is never granted and does not make a safe
           // minimal mission impossible to launch.
           resolved = { policyState: "prohibited", policySource: "platform_default" };
         } else if (!executable) {
+          const requirementSource = strictPresetRequirement
+            ? `The selected ${input.presetId === "htb_web_full_path"
+              ? "HTB Web Full Path"
+              : "Full Authorized Lab Compromise"} preset requires this class`
+            : `${definition.label} was explicitly allowed`;
           if (capability.availability !== "supported") {
             launchBlockingReasons.push(
-              `${definition.label} was explicitly allowed, but the runtime reports it as ${capability.availability}. Connect a supported specialist and tool, or change this class to Guided only or Prohibited.`,
+              `${requirementSource}, but the runtime reports it as ${capability.availability}. Restore the named specialist, activation receipt, dependency, or tool binding below, or choose a narrower preset.${readinessDetail}`,
             );
           }
           if (!capability.enforcementReady) {
             launchBlockingReasons.push(
-              `${definition.label} was explicitly allowed, but no locally enforced executor can perform it autonomously. Select an enforcing provider and tool path, or change this class to Guided only or Prohibited.`,
+              `${requirementSource}, but no locally enforced executor can perform it autonomously. Activate the exact reviewed Autonomous tool/specialist route named below, or choose a narrower preset.${readinessDetail}`,
             );
           }
         }

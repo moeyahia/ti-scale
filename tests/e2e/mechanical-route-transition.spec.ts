@@ -29,11 +29,121 @@ async function transitionPhases(page: import("@playwright/test").Page) {
   ));
 }
 
+interface RenderedTransitionFrame {
+  phase: string;
+  opacity: number;
+  maxPlateOpacity: number;
+  width: number;
+  height: number;
+  visible: boolean;
+  textLength: number;
+  showedRouteFallback: boolean;
+}
+
+async function observeRenderedTransitionFrames(page: import("@playwright/test").Page): Promise<void> {
+  await page.evaluate(() => {
+    const instrumentedWindow = window as Window & { __tiRenderedTransitionFrames?: RenderedTransitionFrame[] };
+    instrumentedWindow.__tiRenderedTransitionFrames = [];
+    let sampling = false;
+    let fallbackTimer: number | undefined;
+    const recordFrame = () => {
+      const phase = document.documentElement.dataset.routeTransition ?? "idle";
+      const surface = document.querySelector<HTMLElement>("[data-route-transition-surface='route']");
+      if (surface) {
+        const style = getComputedStyle(surface);
+        const bounds = surface.getBoundingClientRect();
+        const maxPlateOpacity = Math.max(0, ...Array.from(
+          document.querySelectorAll<HTMLElement>(".ti-route-mechanism__plate"),
+          (plate) => Number.parseFloat(getComputedStyle(plate).opacity) || 0,
+        ));
+        const surfaceText = surface.textContent?.trim() ?? "";
+        instrumentedWindow.__tiRenderedTransitionFrames?.push({
+          phase,
+          opacity: Number.parseFloat(style.opacity),
+          maxPlateOpacity,
+          width: bounds.width,
+          height: bounds.height,
+          visible: style.display !== "none" && style.visibility !== "hidden",
+          textLength: surfaceText.length,
+          showedRouteFallback: surfaceText.includes("Loading Ti-Scale surface"),
+        });
+      }
+      if (phase === "idle") {
+        sampling = false;
+        if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
+        fallbackTimer = undefined;
+      }
+    };
+    const sampleAnimationFrame = () => {
+      if (!sampling) return;
+      recordFrame();
+      if (sampling) window.requestAnimationFrame(sampleAnimationFrame);
+    };
+    const sampleWithTimerFallback = () => {
+      if (!sampling) return;
+      recordFrame();
+      if (sampling) fallbackTimer = window.setTimeout(sampleWithTimerFallback, 16);
+    };
+    document.addEventListener("ti-scale:route-transition", (event) => {
+      const phase = (event as CustomEvent<{ phase?: string }>).detail?.phase;
+      if (!phase) return;
+      if (phase === "idle") {
+        recordFrame();
+        return;
+      }
+      if (!sampling) {
+        sampling = true;
+        recordFrame();
+        window.requestAnimationFrame(sampleAnimationFrame);
+        fallbackTimer = window.setTimeout(sampleWithTimerFallback, 16);
+      } else {
+        recordFrame();
+      }
+    });
+  });
+}
+
+async function renderedTransitionFrames(page: import("@playwright/test").Page): Promise<RenderedTransitionFrame[]> {
+  return page.evaluate(() => (
+    (window as Window & { __tiRenderedTransitionFrames?: RenderedTransitionFrame[] }).__tiRenderedTransitionFrames ?? []
+  ));
+}
+
 async function expectIdle(page: import("@playwright/test").Page): Promise<void> {
   await expect(page.locator("html")).toHaveAttribute("data-route-transition", "idle", { timeout: 2_000 });
   await expect(page.locator(".ti-scale")).toHaveAttribute("data-route-transition", "idle");
   await expect(page.locator("html")).not.toHaveClass(/is-route-transitioning/u);
   await expect(page.locator(".ti-scale")).not.toHaveClass(/is-route-transitioning/u);
+}
+
+async function activatePrimaryRoute(
+  page: import("@playwright/test").Page,
+  accessibleName: "Missions" | "Second Brain",
+): Promise<void> {
+  const sidebar = page.locator(".os-sidebar");
+  const link = sidebar.getByRole("link", { name: accessibleName, exact: true, includeHidden: true });
+  const trigger = page.locator("button.os-menu-button[aria-label='Open navigation']");
+
+  // A reduced-motion mobile document can reach `domcontentloaded` before
+  // React mounts the shell. Wait for the persistent navigation boundary
+  // before deciding whether the responsive drawer trigger is visible.
+  await expect(sidebar).toHaveCount(1);
+  await expect(trigger).toHaveCount(1);
+  const bootBoundary = page.locator("[data-ti-boot-boundary='startup']");
+  if (await bootBoundary.count()) {
+    await expect(bootBoundary).toHaveAttribute("data-ti-boot-phase", "complete", { timeout: 5_000 });
+  }
+  const usesNavigationDrawer = await page.evaluate(() => window.matchMedia("(max-width: 820px)").matches);
+  if (usesNavigationDrawer) {
+    await expect(trigger).toBeVisible();
+    if (await trigger.getAttribute("aria-expanded") !== "true") {
+      await trigger.click();
+    }
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await expect(sidebar).toHaveClass(/\bis-open\b/u);
+  }
+  await expect(link).toBeVisible();
+  await link.click();
 }
 
 test.describe(`${TEST_ID} navigation lifecycle`, () => {
@@ -44,7 +154,7 @@ test.describe(`${TEST_ID} navigation lifecycle`, () => {
 
     await page.evaluate(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "instant" }));
     await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
-    await page.getByRole("link", { name: "Missions", exact: true }).click();
+    await activatePrimaryRoute(page, "Missions");
 
     await expect(page).toHaveURL(/\/missions$/u);
     await expect(page.getByRole("heading", { level: 1, name: "Missions", exact: true })).toBeVisible();
@@ -65,12 +175,33 @@ test.describe(`${TEST_ID} navigation lifecycle`, () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
   });
 
-  test("back and forward traverse existing entries through the same finite mechanism", async ({ page }) => {
+  test("keeps every rendered route frame covered through the mechanical commit", async ({ page }) => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
-    await page.getByRole("link", { name: "Missions", exact: true }).click();
+    await expect(page.getByRole("heading", { level: 1, name: "Command Center", exact: true })).toBeVisible();
+    await observeRenderedTransitionFrames(page);
+
+    await activatePrimaryRoute(page, "Missions");
     await expect(page.getByRole("heading", { level: 1, name: "Missions", exact: true })).toBeVisible();
     await expectIdle(page);
-    await page.getByRole("link", { name: "Second Brain", exact: true }).click();
+
+    const frames = await renderedTransitionFrames(page);
+    expect(frames.length).toBeGreaterThan(2);
+    expect(frames.some(({ phase }) => phase === "disassembling")).toBe(true);
+    expect(frames.some(({ phase }) => phase === "assembling")).toBe(true);
+    expect(frames.filter(({ visible, width, height, opacity, maxPlateOpacity }) => (
+      !visible || width <= 0 || height <= 0 || !Number.isFinite(opacity)
+      || (opacity < 0.2 && maxPlateOpacity < 0.2)
+    ))).toEqual([]);
+    expect(frames.some(({ showedRouteFallback }) => showedRouteFallback)).toBe(false);
+    expect(frames.filter(({ textLength }) => textLength === 0)).toEqual([]);
+  });
+
+  test("back and forward traverse existing entries through the same finite mechanism", async ({ page }) => {
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await activatePrimaryRoute(page, "Missions");
+    await expect(page.getByRole("heading", { level: 1, name: "Missions", exact: true })).toBeVisible();
+    await expectIdle(page);
+    await activatePrimaryRoute(page, "Second Brain");
     await expect(page.getByRole("heading", { level: 1, name: "Second Brain", exact: true })).toBeVisible();
     await expectIdle(page);
     await observeTransitionPhases(page);
@@ -109,7 +240,7 @@ test.describe(`${TEST_ID} navigation lifecycle`, () => {
     });
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await observeTransitionPhases(page);
-    await page.getByRole("link", { name: "Missions", exact: true }).click();
+    await activatePrimaryRoute(page, "Missions");
 
     await expect(page).toHaveURL(/\/missions$/u);
     await expect(page.getByRole("heading", { level: 1, name: "Missions", exact: true })).toBeVisible();
@@ -123,16 +254,13 @@ test.describe(`${TEST_ID} navigation lifecycle`, () => {
   test("rapid double navigation commits only the latest target and leaves no phantom history entry", async ({ page }) => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("heading", { level: 1, name: "Command Center", exact: true })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Missions", exact: true })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Second Brain", exact: true })).toBeVisible();
+    await expect(page.locator("[data-ti-boot-boundary='startup']"))
+      .toHaveAttribute("data-ti-boot-phase", "complete", { timeout: 5_000 });
     await observeTransitionPhases(page);
 
     await page.evaluate(() => {
-      const missions = document.querySelector<HTMLAnchorElement>('a[href="/missions"]');
-      const brain = document.querySelector<HTMLAnchorElement>('a[href="/brain"]');
-      if (!missions || !brain) throw new Error("Primary navigation links are missing");
-      missions.click();
-      brain.click();
+      window.dispatchEvent(new CustomEvent("ti-scale:mechanical-navigate", { detail: { path: "/missions" } }));
+      window.dispatchEvent(new CustomEvent("ti-scale:mechanical-navigate", { detail: { path: "/brain" } }));
     });
 
     await expect(page).toHaveURL(/\/brain$/u);

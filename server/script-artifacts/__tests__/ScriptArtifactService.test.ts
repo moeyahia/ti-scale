@@ -8,6 +8,7 @@ import {
   MemoryScriptSourceStore,
   ScriptArtifactError,
   ScriptArtifactService,
+  scriptSourceStoreCompositionReceiptValid,
   scriptContentHash,
   type CreateScriptArtifactInput,
 } from "..";
@@ -295,6 +296,24 @@ describe("ScriptArtifactService", () => {
     const root = mkdtempSync(join(tmpdir(), "ti-scale-script-store-"));
     try {
       const store = new FileScriptSourceStore(root);
+      const compositionNow = new Date("2026-07-16T13:00:00.000Z");
+      const composition = store.inspectComposition(compositionNow);
+      expect(composition).toMatchObject({
+        storeId: "file-content-addressed-v1",
+        immutableContentAddressed: true,
+        localFilesystem: true,
+        targetInteraction: false,
+        executionAuthority: "none",
+      });
+      expect(scriptSourceStoreCompositionReceiptValid(
+        composition,
+        compositionNow,
+      )).toBe(true);
+      expect(JSON.stringify(composition)).not.toContain(root);
+      expect(scriptSourceStoreCompositionReceiptValid(
+        composition,
+        new Date("2026-07-16T13:01:00.000Z"),
+      )).toBe(false);
       const source = "#!/bin/sh\nprintf '%s\\n' ready\n";
       const hash = scriptContentHash(source);
       const stored = store.put(hash, source);

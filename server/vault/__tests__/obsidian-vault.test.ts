@@ -18,16 +18,20 @@ import { tmpdir } from "node:os";
 import { createDatabaseConnection, migrateDatabase } from "../../db/index";
 import {
   MemoryRepository,
+  ReusableKnowledgeOutcomeService,
   type MemoryProvenance,
   updateMemoryControlPolicy,
 } from "../../memory/index";
 import {
+  MAX_PROJECTED_PRIVATE_PROVENANCE_IDS,
   OBSIDIAN_V2_4_VAULT_FOLDERS,
   escapeObsidianSingleLineText,
   normalizeObsidianWikilinkTarget,
   ObsidianVaultBridge,
   ObsidianVaultWatcher,
   parseObsidianNote,
+  projectPrivateProvenanceIds,
+  renderObsidianNote,
   VaultPathPolicy,
 } from "../index";
 
@@ -65,10 +69,14 @@ function provenance(id: string): MemoryProvenance {
   };
 }
 
+function reusableNodeId(label: string): string {
+  return `mem_${createHash("sha256").update(label).digest("hex")}`;
+}
+
 function addNode(memory: MemoryRepository, id: string, title: string) {
   return memory.createNode({
-    id,
-    nodeType: "technique",
+    id: reusableNodeId(id),
+    nodeType: "attack_technique",
     title,
     summary: `Summary for ${title}`,
     body: `Operational note for ${title}.`,
@@ -81,6 +89,96 @@ function addNode(memory: MemoryRepository, id: string, title: string) {
     authorType: "operator",
     authorId: "operator-1",
   });
+}
+
+function addVerifiedProcedure(memory: MemoryRepository, id: string, title: string) {
+  return memory.createNode({
+    id: reusableNodeId(id),
+    nodeType: "attack_procedure",
+    title,
+    summary: `Reviewed reusable procedure for ${title}`,
+    body: `Run one bounded ${title} procedure and retain its verified result.`,
+    scope: { kind: "global" },
+    sensitivity: "internal",
+    confidence: 0.97,
+    lifecycleStatus: "verified",
+    confirmationState: "confirmed",
+    provenance: {
+      method: "derived",
+      explanation: "Generalized through local operator review",
+      sources: [{ sourceType: "review_receipt", sourceId: `source-${id}`, acquiredAt: "2026-07-21T12:00:00.000Z" }],
+    },
+    authorType: "operator",
+    authorId: "operator-1",
+  });
+}
+
+function classifyProcedureBothWays(
+  database: ReturnType<typeof createDatabaseConnection>,
+  nodeId: string,
+): void {
+  const now = "2026-07-21T12:00:00.000Z";
+  addMission(database, "mission-vault-outcomes");
+  database.prepare(`
+    INSERT INTO runs (id, mission_id, journey, status, created_at, updated_at)
+    VALUES ('run-vault-outcomes', 'mission-vault-outcomes', 'guided', 'completed', ?, ?)
+  `).run(now, now);
+  for (const [suffix, status] of [["success", "succeeded"], ["failed", "failed"]] as const) {
+    const attemptId = `attempt-vault-${suffix}`;
+    const evidenceId = `evidence-vault-${suffix}`;
+    database.prepare(`
+      INSERT INTO attack_attempts (
+        id, mission_id, run_id, objective, technique_name, action_class,
+        prerequisites_json, normalized_parameters_json, status, outcome_summary,
+        failure_category, ended_at, created_at, updated_at
+      ) VALUES (?, 'mission-vault-outcomes', 'run-vault-outcomes',
+        'Validate one exact reusable procedure', 'Bounded validation',
+        'exploit-validation', '[]', '{}', ?, ?, ?, ?, ?, ?)
+    `).run(
+      attemptId,
+      status,
+      `The exact represented procedure ${status}.`,
+      status === "failed" ? "deterministic_tool_error" : null,
+      now,
+      now,
+      now,
+    );
+    database.prepare(`
+      INSERT INTO attack_attempt_knowledge_contexts (
+        attack_attempt_id, procedure_node_id, product_node_ids_json,
+        version_node_ids_json, stack_node_ids_json, prerequisite_node_ids_json,
+        observed_state_node_ids_json, normalized_parameters_json, created_at, updated_at
+      ) VALUES (?, ?, '[]', '[]', '[]', '[]', '[]', '{}', ?, ?)
+    `).run(attemptId, nodeId, now, now);
+    database.prepare(`
+      INSERT INTO evidence (
+        id, mission_id, run_id, source, acquired_at, target, evidence_type,
+        content_hash, provenance_json, confidence, sensitivity,
+        verification_state, summary, created_by, created_at
+      ) VALUES (?, 'mission-vault-outcomes', 'run-vault-outcomes',
+        'local-evaluator', ?, 'redacted fixture', 'exploit_validation_result',
+        ?, '{}', 0.98, 'internal', 'verified',
+        'Verified result for the exact represented attempt.', 'worker-test', ?)
+    `).run(evidenceId, now, createHash("sha256").update(evidenceId).digest("hex"), now);
+    database.prepare(`
+      INSERT INTO evidence_chain_events (
+        id, evidence_id, event_type, actor, details_json, occurred_at
+      ) VALUES (?, ?, 'verified', 'local-evaluator', '{}', ?)
+    `).run(`custody-vault-${suffix}`, evidenceId, now);
+    database.prepare(`
+      INSERT INTO attack_attempt_evidence (
+        attack_attempt_id, evidence_id, relationship, created_at
+      ) VALUES (?, ?, 'outcome', ?)
+    `).run(attemptId, evidenceId, now);
+    new ReusableKnowledgeOutcomeService(database, () => new Date(now)).bind({
+      memoryNodeId: nodeId,
+      attackAttemptId: attemptId,
+      evidenceIds: [evidenceId],
+      actorId: "operator-1",
+      actorType: "operator",
+      reason: `Reviewed the exact ${suffix} attempt and verified result.`,
+    });
+  }
 }
 
 function addMission(database: ReturnType<typeof createDatabaseConnection>, id = "mission-vault-attachments") {
@@ -99,15 +197,15 @@ function addMissionNode(
   memory: MemoryRepository,
   id: string,
   title: string,
-  missionId: string,
+  _missionId: string,
 ) {
   return memory.createNode({
-    id,
-    nodeType: "procedure",
+    id: reusableNodeId(id),
+    nodeType: "attack_procedure",
     title,
     summary: `Summary for ${title}`,
     body: `Operational note for ${title}.`,
-    scope: { kind: "mission", engagementId: "engagement-vault", missionId },
+    scope: { kind: "global" },
     sensitivity: "private",
     confidence: 0.95,
     lifecycleStatus: "confirmed",
@@ -119,14 +217,61 @@ function addMissionNode(
 }
 
 describe("Obsidian vault bridge", () => {
+  test("projects both canonical outcome tags, omits unclassified tags, and ignores forged Vault classifications", () => {
+    const { db, memory, bridge, connection } = setup();
+    try {
+      const classified = addVerifiedProcedure(memory, "classified-procedure", "bounded validation");
+      classifyProcedureBothWays(db, classified.id);
+      const classifiedExport = bridge.exportNode(connection.id, classified.id);
+      const classifiedText = readFileSync(
+        join(connection.vaultPath, classifiedExport.relativePath),
+        "utf8",
+      );
+      expect(classifiedText).toContain("outcome_tags:\n  - \"success\"\n  - \"failed\"");
+      expect(classifiedText).toContain('  - "ti-scale/outcome/success"');
+      expect(classifiedText).toContain('  - "ti-scale/outcome/failed"');
+      expect(parseObsidianNote(classifiedText).outcomeTags).toEqual(["success", "failed"]);
+
+      const unclassified = addVerifiedProcedure(memory, "unclassified-procedure", "supporting analysis");
+      const unclassifiedExport = bridge.exportNode(connection.id, unclassified.id);
+      const unclassifiedPath = join(connection.vaultPath, unclassifiedExport.relativePath);
+      const unclassifiedText = readFileSync(unclassifiedPath, "utf8");
+      expect(unclassifiedText).not.toContain("outcome_tags:");
+      expect(unclassifiedText).not.toContain("ti-scale/outcome/");
+      expect(parseObsidianNote(unclassifiedText).outcomeTags).toEqual([]);
+
+      const forgedText = unclassifiedText.replace(
+        "private_provenance_ids:",
+        'outcome_tags:\n  - "success"\nprivate_provenance_ids:',
+      );
+      writeFileSync(unclassifiedPath, forgedText, "utf8");
+      expect(parseObsidianNote(forgedText).outcomeTags).toEqual(["success"]);
+      bridge.syncNode(connection.id, unclassified.id, "operator-1");
+      expect(db.prepare(`
+        SELECT COUNT(*) AS count FROM reusable_knowledge_outcome_links
+        WHERE memory_node_id = ?
+      `).get(unclassified.id)).toEqual({ count: 0 });
+
+      const canonicalRerender = renderObsidianNote(
+        memory.requireNode(unclassified.id),
+        [],
+        [],
+      );
+      expect(canonicalRerender).not.toContain("outcome_tags:");
+      expect(parseObsidianNote(canonicalRerender).outcomeTags).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
   test("round-trips YAML, stable IDs, authorship, and native wikilinks", () => {
     const { db, memory, bridge, connection } = setup();
     try {
-      addNode(memory, "node-origin", "Origin Technique");
-      addNode(memory, "node-target", "Target Evidence Pattern");
+      const origin = addNode(memory, "node-origin", "Origin Technique");
+      const target = addNode(memory, "node-target", "Target Evidence Pattern");
       memory.createEdge({
-        sourceNodeId: "node-origin",
-        targetNodeId: "node-target",
+        sourceNodeId: origin.id,
+        targetNodeId: target.id,
         edgeType: "depends_on",
         title: "Origin depends on target",
         summary: "The technique requires the evidence pattern",
@@ -138,30 +283,150 @@ describe("Obsidian vault bridge", () => {
         explanation: "This prerequisite was confirmed during review",
         authorType: "operator",
       });
-      const exported = bridge.exportNode(connection.id, "node-origin");
+      const exported = bridge.exportNode(connection.id, origin.id);
       expect(exported.status).toBe("synced");
       const path = join(connection.vaultPath, exported.relativePath);
       const text = readFileSync(path, "utf8");
       expect(text).not.toContain("[[81 Tools and MCP");
-      expect(text).toContain("[[41 Attack Paths/");
-      expect(text).toContain("ti-scale-edge:depends_on:node-target");
+      expect(text).toContain("[[42 Techniques and Procedures/");
+      expect(text).toContain("private_provenance_ids:");
+      expect(text).not.toContain("source-node-origin");
+      expect(text).toContain(`ti-scale-edge:depends_on:${target.id}`);
       const parsed = parseObsidianNote(text);
-      expect(parsed.id).toBe("node-origin");
+      expect(parsed.id).toBe(origin.id);
       expect(parsed.authorType).toBe("operator");
-      expect(parsed.aliases).toContain("node-origin");
-      expect(parsed.edges[0]).toMatchObject({ edgeType: "depends_on", targetNodeId: "node-target" });
+      expect(parsed.aliases).toContain(origin.id);
+      expect(parsed.sourceIds).toEqual([]);
+      expect(parsed.privateProvenanceIds).toHaveLength(1);
+      expect(parsed.privateProvenanceIds[0]).toStartWith("msrc_");
+      expect(parsed.edges[0]).toMatchObject({ edgeType: "depends_on", targetNodeId: target.id });
 
       const edited = text.replace(
         "Operational note for Origin Technique.",
         "Operator refined this operational procedure in Obsidian.",
       );
       writeFileSync(path, edited, "utf8");
-      const synced = bridge.syncNode(connection.id, "node-origin", "operator-1");
+      const synced = bridge.syncNode(connection.id, origin.id, "operator-1");
       expect(synced.status).toBe("synced");
-      const node = memory.requireNode("node-origin");
+      const node = memory.requireNode(origin.id);
       expect(node.body).toContain("refined this operational procedure");
       expect(node.version).toBe(2);
       expect(memory.listVersions(node.id)).toHaveLength(2);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("projects a small private provenance set completely with parser-verifiable integrity", () => {
+    const { db, memory, bridge, connection } = setup();
+    try {
+      const node = addNode(memory, "small-provenance", "Small provenance procedure");
+      const canonicalIds = (db.prepare(`
+        SELECT id FROM memory_sources WHERE node_id = ? ORDER BY id
+      `).all(node.id) as Array<{ id: string }>).map((row) => row.id);
+      const expected = projectPrivateProvenanceIds(canonicalIds);
+      const exported = bridge.exportNode(connection.id, node.id);
+      const text = readFileSync(join(connection.vaultPath, exported.relativePath), "utf8");
+      const parsed = parseObsidianNote(text);
+
+      expect(parsed.privateProvenanceIds).toEqual(expected.ids);
+      expect(parsed.privateProvenanceSummary).toEqual(expected.summary);
+      expect(parsed.privateProvenanceSummary).toMatchObject({
+        total: 1,
+        projected: 1,
+        truncated: false,
+      });
+      expect(text).toContain("Projection truncated: no");
+      expect(text).toContain(`Full-set SHA-256: \`${expected.summary.sha256}\``);
+
+      const forged = text.replace(
+        `private_provenance_sha256: \"${expected.summary.sha256}\"`,
+        `private_provenance_sha256: \"${"0".repeat(64)}\"`,
+      );
+      expect(() => parseObsidianNote(forged)).toThrow(
+        "YAML private provenance digest does not match its complete reference set",
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  test("bounds 3,156 private sources, preserves SQLite custody, and round-trips without leaking locators", () => {
+    const { db, memory, bridge, connection } = setup();
+    try {
+      const node = addNode(memory, "high-fanout-provenance", "High-fanout procedure");
+      const insert = db.prepare(`
+        INSERT INTO memory_sources (
+          id, node_id, source_type, source_id, acquired_at, created_at
+        ) VALUES (?, ?, 'historical_file', ?, ?, ?)
+      `);
+      const now = "2026-07-21T15:00:00.000Z";
+      const addSources = db.transaction(() => {
+        for (let index = 0; index < 3_155; index += 1) {
+          const suffix = String(index).padStart(4, "0");
+          const privateLocator = index === 0
+            ? "https://operator:unit-test-authentication-material@private.invalid/raw-evidence"
+            : `/root/engagements/private-client/mission-${suffix}/evidence-${suffix}.json`;
+          insert.run(`msrc_high_fanout_${suffix}`, node.id, privateLocator, now, now);
+        }
+      });
+      addSources();
+
+      const sourceRows = db.prepare(`
+        SELECT id, source_id AS sourceId FROM memory_sources WHERE node_id = ? ORDER BY id
+      `).all(node.id) as Array<{ id: string; sourceId: string }>;
+      expect(sourceRows).toHaveLength(3_156);
+      const expected = projectPrivateProvenanceIds(sourceRows.map((row) => row.id));
+      const exported = bridge.exportNode(connection.id, node.id);
+      expect(exported.status).toBe("synced");
+      const path = join(connection.vaultPath, exported.relativePath);
+      const text = readFileSync(path, "utf8");
+      const parsed = parseObsidianNote(text);
+
+      expect(Buffer.byteLength(text, "utf8")).toBeLessThan(128 * 1_024);
+      expect(parsed.privateProvenanceIds).toHaveLength(MAX_PROJECTED_PRIVATE_PROVENANCE_IDS);
+      expect(parsed.privateProvenanceIds).toEqual(expected.ids);
+      expect(parsed.privateProvenanceSummary).toEqual(expected.summary);
+      expect(parsed.privateProvenanceSummary).toMatchObject({
+        total: 3_156,
+        projected: MAX_PROJECTED_PRIVATE_PROVENANCE_IDS,
+        truncated: true,
+      });
+      expect(text).toContain("Canonical SQLite source records: 3156");
+      expect(text).toContain("Projection truncated: yes");
+      expect(text).not.toContain("unit-test-authentication-material");
+      expect(text).not.toContain("/root/engagements/");
+      expect(text).not.toContain("mission-0001");
+      expect(text).not.toContain("evidence-0001");
+      expect(text).toContain("source_ids: []");
+
+      writeFileSync(
+        path,
+        text.replace(
+          "Operational note for High-fanout procedure.",
+          "Operator refined this high-fanout procedure in Obsidian.",
+        ),
+        "utf8",
+      );
+      expect(bridge.syncNode(connection.id, node.id, "operator-1").status).toBe("synced");
+      expect(parseObsidianNote(readFileSync(path, "utf8")).privateProvenanceSummary).toEqual(expected.summary);
+      expect(db.prepare("SELECT COUNT(*) AS count FROM memory_sources WHERE node_id = ?").get(node.id))
+        .toEqual({ count: 3_156 });
+
+      const normalized = readFileSync(path, "utf8");
+      const forgedDigest = `${expected.summary.sha256[0] === "0" ? "1" : "0"}${expected.summary.sha256.slice(1)}`;
+      writeFileSync(
+        path,
+        normalized
+          .replace(expected.summary.sha256, forgedDigest)
+          .replace(expected.summary.sha256, forgedDigest),
+        "utf8",
+      );
+      expect(() => bridge.syncNode(connection.id, node.id, "operator-1")).toThrow(
+        "Vault private provenance summary does not match canonical SQLite custody",
+      );
+      expect(db.prepare("SELECT COUNT(*) AS count FROM memory_sources WHERE node_id = ?").get(node.id))
+        .toEqual({ count: 3_156 });
     } finally {
       db.close();
     }
@@ -172,33 +437,23 @@ describe("Obsidian vault bridge", () => {
     try {
       expect(OBSIDIAN_V2_4_VAULT_FOLDERS).toEqual([
         "00 Inbox",
-        "10 Operator",
-        "20 Engagements",
-        "21 Missions",
-        "22 Runs",
-        "30 Assets",
-        "31 Network Topology",
-        "32 Applications and Services",
-        "33 Identities and Trusts",
-        "40 Attack Plans",
-        "41 Attack Paths",
-        "42 Attack Attempts",
-        "43 Scripts",
-        "44 CVEs and Advisories",
-        "50 Evidence",
-        "51 Findings",
-        "52 Web Captures",
-        "53 Artifacts",
-        "60 Failures and Recoveries",
-        "61 Logs and Timelines",
-        "70 Lessons",
-        "71 Research Campaigns",
-        "72 Experiments",
-        "73 Strategies",
-        "80 Agents",
-        "81 Tools and MCP",
-        "90 Reports",
-        "99 System",
+        "20 Technology Products",
+        "21 Versions and Fingerprints",
+        "22 Software Stacks",
+        "23 Security Controls",
+        "30 Topology Patterns",
+        "40 Vulnerabilities and Weaknesses",
+        "41 Attack Vectors",
+        "42 Techniques and Procedures",
+        "43 Prerequisites and Attributes",
+        "44 Discovery and Fingerprints",
+        "45 Scripts and Tools",
+        "50 Outcomes and Validation",
+        "51 Operational Hazards",
+        "52 Recovery and Alternatives",
+        "53 Detection and Remediation",
+        "60 Strategies and Lessons",
+        "61 Research",
         "Attachments",
       ]);
       for (const relativePath of OBSIDIAN_V2_4_VAULT_FOLDERS) {
@@ -216,10 +471,10 @@ describe("Obsidian vault bridge", () => {
     try {
       const create = (
         id: string,
-        nodeType: "evaluation" | "lesson",
+        nodeType: "attack_procedure" | "attack_lesson",
         lifecycleStatus: "candidate" | "confirmed" | "verified",
       ) => memory.createNode({
-        id,
+        id: reusableNodeId(id),
         nodeType,
         title: id,
         summary: `Projection eligibility for ${id}`,
@@ -230,20 +485,20 @@ describe("Obsidian vault bridge", () => {
         lifecycleStatus,
         confirmationState: lifecycleStatus === "candidate" ? "pending" : "confirmed",
         provenance: provenance(`source-${id}`),
-        authorType: "system",
-        authorId: "vault-regression",
+        authorType: "operator",
+        authorId: "operator-1",
       });
       const source = create(
         "mem_eval_18329a68f167ab7ae963d89d3b854495",
-        "evaluation",
+        "attack_procedure",
         "verified",
       );
       const excluded = create(
         "mem_lesson_81c61d22ec10e234ef698615b9c63ef6",
-        "lesson",
+        "attack_lesson",
         "candidate",
       );
-      const eligible = create("mem_lesson_confirmed", "lesson", "confirmed");
+      const eligible = create("mem_lesson_confirmed", "attack_lesson", "confirmed");
       for (const target of [excluded, eligible]) {
         memory.createEdge({
           id: `edge-${target.id}`,
@@ -258,7 +513,7 @@ describe("Obsidian vault bridge", () => {
           lifecycleStatus: "confirmed",
           provenance: provenance(`edge-source-${target.id}`),
           explanation: "Canonical evaluation produced this lesson",
-          authorType: "system",
+          authorType: "operator",
           authorId: "vault-regression",
         });
       }
@@ -302,7 +557,7 @@ describe("Obsidian vault bridge", () => {
         lifecycleStatus: "confirmed",
         provenance: provenance("markdown-edge-source"),
         explanation,
-        authorType: "system",
+        authorType: "operator",
       });
 
       const rendered = bridge.exportNode(connection.id, source.id);
@@ -343,8 +598,8 @@ describe("Obsidian vault bridge", () => {
       });
       const source = addNode(memory, "confirmed-source", "Confirmed Source");
       const target = memory.createNode({
-        id: "verified-target",
-        nodeType: "lesson",
+        id: reusableNodeId("verified-target"),
+        nodeType: "attack_lesson",
         title: "Verified Target",
         summary: "Excluded by confirmed-only projection policy",
         body: "This verified note is not projected under the current policy.",
@@ -354,8 +609,8 @@ describe("Obsidian vault bridge", () => {
         lifecycleStatus: "verified",
         confirmationState: "confirmed",
         provenance: provenance("verified-target-source"),
-        authorType: "system",
-        authorId: "vault-regression",
+        authorType: "operator",
+        authorId: "operator-1",
       });
       memory.createEdge({
         sourceNodeId: source.id,
@@ -369,7 +624,7 @@ describe("Obsidian vault bridge", () => {
         lifecycleStatus: "confirmed",
         provenance: provenance("confirmed-policy-edge"),
         explanation: "The target is excluded from this vault by live policy",
-        authorType: "system",
+        authorType: "operator",
       });
 
       const exported = bridge.exportNode(connection.id, source.id);
@@ -383,10 +638,10 @@ describe("Obsidian vault bridge", () => {
   });
 
   test("does not emit wikilinks to notes excluded by the connection scope", () => {
-    const { db, memory, bridge, connection } = setup({ nodeTypes: ["evaluation"] });
+    const { db, memory, bridge, connection } = setup({ nodeTypes: ["attack_procedure"] });
     try {
-      const create = (id: string, nodeType: "evaluation" | "lesson") => memory.createNode({
-        id,
+      const create = (id: string, nodeType: "attack_procedure" | "attack_lesson") => memory.createNode({
+        id: reusableNodeId(id),
         nodeType,
         title: id,
         summary: `Connection projection scope for ${id}`,
@@ -397,12 +652,12 @@ describe("Obsidian vault bridge", () => {
         lifecycleStatus: "confirmed",
         confirmationState: "confirmed",
         provenance: provenance(`source-${id}`),
-        authorType: "system",
-        authorId: "vault-regression",
+        authorType: "operator",
+        authorId: "operator-1",
       });
-      const source = create("scope-source", "evaluation");
-      const eligible = create("scope-eligible", "evaluation");
-      const excluded = create("scope-excluded", "lesson");
+      const source = create("scope-source", "attack_procedure");
+      const eligible = create("scope-eligible", "attack_procedure");
+      const excluded = create("scope-excluded", "attack_lesson");
       for (const target of [eligible, excluded]) {
         memory.createEdge({
           sourceNodeId: source.id,
@@ -416,7 +671,7 @@ describe("Obsidian vault bridge", () => {
           lifecycleStatus: "confirmed",
           provenance: provenance(`edge-source-${target.id}`),
           explanation: "Only targets exported by this connection may be linked",
-          authorType: "system",
+          authorType: "operator",
         });
       }
 
@@ -449,7 +704,7 @@ describe("Obsidian vault bridge", () => {
           lifecycleStatus: "confirmed",
           provenance: provenance(`edge-source-${target.id}`),
           explanation: "The relationship must resolve to this connection's projected note",
-          authorType: "system",
+          authorType: "operator",
         });
       }
 
@@ -471,7 +726,7 @@ describe("Obsidian vault bridge", () => {
       const text = readFileSync(join(connection.vaultPath, exported.relativePath), "utf8");
       expect(text).toContain(`[[${legacyRelativePath.replace(/\.md$/u, "")}|`);
       expect(text).toContain(`[[${v24TargetProjection.relativePath.replace(/\.md$/u, "")}|`);
-      expect(v24TargetProjection.relativePath).toStartWith("41 Attack Paths/");
+      expect(v24TargetProjection.relativePath).toStartWith("42 Techniques and Procedures/");
       expect(existsSync(join(connection.vaultPath, legacyRelativePath))).toBe(true);
       expect(existsSync(join(connection.vaultPath, firstTargetProjection.relativePath))).toBe(false);
       expect((db.prepare(`
@@ -524,28 +779,34 @@ describe("Obsidian vault bridge", () => {
   test("detects concurrent database/vault edits and requires explicit resolution", () => {
     const { db, memory, bridge, connection } = setup();
     try {
-      addNode(memory, "node-conflict", "Conflict Technique");
-      const exported = bridge.exportNode(connection.id, "node-conflict");
+      const node = addNode(memory, "node-conflict", "Conflict Technique");
+      const exported = bridge.exportNode(connection.id, node.id);
       const path = join(connection.vaultPath, exported.relativePath);
       const vaultText = readFileSync(path, "utf8").replace(
         "Operational note for Conflict Technique.",
         "Vault-side operator edit.",
       );
       writeFileSync(path, vaultText, "utf8");
-      memory.correctNode("node-conflict", {
-        body: "Database-side agent edit.",
-        authorType: "agent",
-        authorId: "agent-1",
-        changeReason: "New mission evidence",
+      memory.correctNode(node.id, {
+        body: "Database-side operator edit.",
+        authorType: "operator",
+        authorId: "operator-1",
+        changeReason: "Operator reviewed reusable knowledge",
       });
-      const result = bridge.syncNode(connection.id, "node-conflict", "operator-1");
+      const result = bridge.syncNode(connection.id, node.id, "operator-1");
       expect(result.status).toBe("conflict");
       expect(result.conflictId).toBeDefined();
       const conflict = db.prepare("SELECT status FROM vault_conflicts WHERE id = ?").get(result.conflictId) as { status: string };
       expect(conflict.status).toBe("open");
+      const synchronizedAgain = bridge.syncNode(connection.id, node.id, "operator-1");
+      expect(synchronizedAgain).toMatchObject({
+        status: "conflict",
+        conflictId: result.conflictId,
+      });
+      expect(readFileSync(path, "utf8")).toContain("Vault-side operator edit");
       const resolved = bridge.resolveConflict(result.conflictId!, "database", "operator-1");
       expect(resolved.status).toBe("synced");
-      expect(readFileSync(path, "utf8")).toContain("Database-side agent edit");
+      expect(readFileSync(path, "utf8")).toContain("Database-side operator edit");
     } finally {
       db.close();
     }
@@ -561,14 +822,14 @@ describe("Obsidian vault bridge", () => {
       expect(existsSync(inbox)).toBe(false);
       expect(existsSync(join(connection.vaultPath, imported.quarantinePath!))).toBe(true);
 
-      addNode(memory, "node-forget-vault", "Forget Vault Technique");
-      const exported = bridge.exportNode(connection.id, "node-forget-vault");
+      const node = addNode(memory, "node-forget-vault", "Forget Vault Technique");
+      const exported = bridge.exportNode(connection.id, node.id);
       const path = join(connection.vaultPath, exported.relativePath);
       expect(existsSync(path)).toBe(true);
-      const result = bridge.forgetMemory("node-forget-vault", "operator-1");
+      const result = bridge.forgetMemory(node.id, "operator-1");
       expect(result.vaultProjections).toHaveLength(1);
       expect(existsSync(path)).toBe(false);
-      expect(memory.requireNode("node-forget-vault", true).lifecycleStatus).toBe("forgotten");
+      expect(memory.requireNode(node.id, true).lifecycleStatus).toBe("forgotten");
     } finally {
       db.close();
     }
@@ -577,8 +838,8 @@ describe("Obsidian vault bridge", () => {
   test("quarantines authentication material before candidate, correction, or conflict persistence", () => {
     const { db, memory, bridge, connection } = setup();
     try {
-      addNode(memory, "node-vault-safety", "Vault Safety Technique");
-      const exported = bridge.exportNode(connection.id, "node-vault-safety");
+      const node = addNode(memory, "node-vault-safety", "Vault Safety Technique");
+      const exported = bridge.exportNode(connection.id, node.id);
       const projectionPath = join(connection.vaultPath, exported.relativePath);
       const safeProjection = readFileSync(projectionPath, "utf8");
       const sessionMaterial = ["session_token", ": ", "unit-test-session-material-123456789"].join("");
@@ -588,7 +849,7 @@ describe("Obsidian vault bridge", () => {
       writeFileSync(
         inboxPath,
         safeProjection
-          .replace('id: "node-vault-safety"', 'id: "candidate-vault-safety"')
+          .replace(`id: "${node.id}"`, 'id: "candidate-vault-safety"')
           .replace("Operational note for Vault Safety Technique.", sessionMaterial),
         "utf8",
       );
@@ -616,11 +877,11 @@ describe("Obsidian vault bridge", () => {
         safeProjection.replace("Operational note for Vault Safety Technique.", privateKeyMaterial),
         "utf8",
       );
-      const synchronized = bridge.syncNode(connection.id, "node-vault-safety", "operator-1");
+      const synchronized = bridge.syncNode(connection.id, node.id, "operator-1");
       expect(synchronized.status).toBe("quarantined");
       expect(existsSync(projectionPath)).toBe(false);
-      expect(memory.requireNode("node-vault-safety")).toMatchObject({ version: 1, body: "Operational note for Vault Safety Technique." });
-      expect(memory.listVersions("node-vault-safety")).toHaveLength(1);
+      expect(memory.requireNode(node.id)).toMatchObject({ version: 1, body: "Operational note for Vault Safety Technique." });
+      expect(memory.listVersions(node.id)).toHaveLength(1);
       expect((db.prepare("SELECT COUNT(*) AS count FROM vault_conflicts").get() as { count: number }).count).toBe(0);
       expect(JSON.stringify(db.prepare("SELECT title, summary, body FROM memory_nodes").all()))
         .not.toContain("unit-test-authentication-material");
@@ -629,31 +890,29 @@ describe("Obsidian vault bridge", () => {
     }
   });
 
-  test("creates a private portable ZIP and a path-safe Obsidian deep link", async () => {
+  test("keeps deep links available while portable archive creation stays disabled", async () => {
     const { db, memory, bridge, connection } = setup();
     try {
-      addNode(memory, "node-portable", "Portable Technique");
-      const exported = bridge.exportNode(connection.id, "node-portable");
+      const node = addNode(memory, "node-portable", "Portable Technique");
+      const exported = bridge.exportNode(connection.id, node.id);
       const link = bridge.deepLink(connection.id, exported.relativePath);
       expect(link).toStartWith("obsidian://open?");
       expect(link).toContain("vault=Ti-Scale-Brain");
       expect(link).not.toContain(connection.vaultPath);
 
-      const archive = await bridge.createPortableExport(connection.id, ["node-portable"], "operator-1");
-      const bytes = readFileSync(archive.archivePath);
-      expect(bytes.subarray(0, 4).toString("hex")).toBe("504b0304");
-      expect(bytes.includes(Buffer.from(exported.relativePath, "utf8"))).toBe(true);
-      expect(bytes.includes(Buffer.from("ti-scale-vault-manifest.json", "utf8"))).toBe(true);
-      expect(bytes.includes(Buffer.from('"product": "Ti-Scale"', "utf8"))).toBe(true);
-      expect(bytes.includes(Buffer.from('"product": "Ti-Scale Ti-Scale"', "utf8"))).toBe(false);
-      expect(createHash("sha256").update(bytes).digest("hex")).toBe(archive.sha256);
-      expect(statSync(archive.archivePath).mode & 0o777).toBe(0o600);
+      await expect(
+        bridge.createPortableExport(connection.id, [node.id], "operator-1"),
+      ).rejects.toThrow(
+        "Portable Vault ZIP creation is disabled by operator no-backup policy",
+      );
+      expect(existsSync(join(connection.vaultPath, ".ti-scale", "exports")))
+        .toBe(false);
     } finally {
       db.close();
     }
   });
 
-  test("hashes, deduplicates, projects, and portably exports real attachment bytes", async () => {
+  test("keeps private engagement attachments out of reusable attack knowledge", () => {
     const { db, memory, bridge, connection } = setup();
     try {
       const missionId = addMission(db);
@@ -661,7 +920,6 @@ describe("Obsidian vault bridge", () => {
       const attachmentBytes = Buffer.from([
         0x43, 0x68, 0x69, 0x6c, 0x6c, 0x73, 0x50, 0x77, 0x6e, 0x00, 0xff, 0x10, 0x20,
       ]);
-      const contentHash = createHash("sha256").update(attachmentBytes).digest("hex");
       const firstAttachmentPath = join(connection.vaultPath, "Attachments", "operator-capture.png");
       writeFileSync(firstAttachmentPath, attachmentBytes);
 
@@ -670,7 +928,7 @@ describe("Obsidian vault bridge", () => {
       writeFileSync(
         join(connection.vaultPath, firstRelative),
         `${template
-          .replace('id: "node-attachment-seed"', 'id: "attachment-import"')
+          .replace(`id: "${seed.id}"`, 'id: "attachment-import"')
           .replace("# Attachment Seed", "# Imported Attachment")
           .replace("Operational note for Attachment Seed.", "Operator supplied a protected mission artifact.")
         }\n![[Attachments/operator-capture.png]]\n`,
@@ -678,63 +936,14 @@ describe("Obsidian vault bridge", () => {
       );
 
       const imported = bridge.importNote(connection.id, firstRelative, "operator-1");
-      expect(imported.status).toBe("candidate");
-      const artifact = db.prepare(`
-        SELECT id, storage_uri, content_hash, byte_size, media_type, metadata_json
-        FROM artifacts WHERE artifact_type = 'obsidian_attachment'
-      `).get() as {
-        id: string;
-        storage_uri: string;
-        content_hash: string;
-        byte_size: number;
-        media_type: string;
-        metadata_json: string;
-      };
-      expect(artifact.content_hash).toBe(contentHash);
-      expect(artifact.byte_size).toBe(attachmentBytes.length);
-      expect(artifact.media_type).toBe("image/png");
-      expect(artifact.storage_uri).not.toContain("operator-capture");
-      expect(artifact.metadata_json).not.toContain("operator-capture");
-      expect(readFileSync(join(connection.vaultPath, ".ti-scale", "attachments", contentHash)))
-        .toEqual(attachmentBytes);
-
-      const candidate = memory.requireCandidate(imported.candidateId!);
-      expect(candidate.body).not.toContain("operator-capture");
-      const confirmed = memory.confirmCandidate(candidate.id, "operator-1");
-      expect(db.prepare(`
-        SELECT source_id FROM memory_sources WHERE node_id = ? AND source_type = 'artifact'
-      `).get(confirmed.id)).toEqual({ source_id: artifact.id });
-
-      const exported = bridge.exportNode(connection.id, confirmed.id);
-      const projectedNote = readFileSync(join(connection.vaultPath, exported.relativePath), "utf8");
-      expect(projectedNote).toContain(`![[Attachments/${contentHash}.png]]`);
-      expect(projectedNote).toContain(`ti-scale-attachment:${artifact.id}:${contentHash}`);
-      expect(projectedNote).not.toContain("operator-capture");
-      expect(readFileSync(join(connection.vaultPath, "Attachments", `${contentHash}.png`)))
-        .toEqual(attachmentBytes);
-
-      const duplicateAttachmentPath = join(connection.vaultPath, "Attachments", "duplicate-name.png");
-      writeFileSync(duplicateAttachmentPath, attachmentBytes);
-      const duplicateRelative = "00 Inbox/attachment-duplicate.md";
-      writeFileSync(
-        join(connection.vaultPath, duplicateRelative),
-        `${template
-          .replace('id: "node-attachment-seed"', 'id: "attachment-duplicate"')
-          .replace("# Attachment Seed", "# Duplicate Attachment")
-        }\n![duplicate](Attachments/duplicate-name.png)\n`,
-        "utf8",
-      );
-      expect(bridge.importNote(connection.id, duplicateRelative, "operator-1").status).toBe("candidate");
+      expect(imported.status).toBe("quarantined");
+      expect(existsSync(join(connection.vaultPath, firstRelative))).toBe(false);
       expect((db.prepare(`
         SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'obsidian_attachment'
-      `).get() as { count: number }).count).toBe(1);
-
-      const archive = await bridge.createPortableExport(connection.id, [confirmed.id], "operator-1");
-      const archiveBytes = readFileSync(archive.archivePath);
-      expect(archive.fileCount).toBe(3);
-      expect(archiveBytes.includes(Buffer.from(`Attachments/${contentHash}.png`, "utf8"))).toBe(true);
-      expect(archiveBytes.includes(attachmentBytes)).toBe(true);
-      expect(archiveBytes.includes(Buffer.from("operator-capture", "utf8"))).toBe(false);
+      `).get() as { count: number }).count).toBe(0);
+      expect((db.prepare(`
+        SELECT COUNT(*) AS count FROM memory_candidates
+      `).get() as { count: number }).count).toBe(0);
     } finally {
       db.close();
     }
@@ -752,7 +961,7 @@ describe("Obsidian vault bridge", () => {
       const symlinkRelative = "00 Inbox/symlink-attachment.md";
       writeFileSync(
         join(connection.vaultPath, symlinkRelative),
-        `${template.replace('id: "node-attachment-rejection"', 'id: "symlink-attachment"')}\n![[Attachments/linked.png]]\n`,
+        `${template.replace(`id: "${seed.id}"`, 'id: "symlink-attachment"')}\n![[Attachments/linked.png]]\n`,
       );
       const symlinkImport = bridge.importNote(connection.id, symlinkRelative, "operator-1");
       expect(symlinkImport.status).toBe("quarantined");
@@ -763,7 +972,7 @@ describe("Obsidian vault bridge", () => {
       const integrityRelative = "00 Inbox/integrity-attachment.md";
       writeFileSync(
         join(connection.vaultPath, integrityRelative),
-        `${template.replace('id: "node-attachment-rejection"', 'id: "integrity-attachment"')}\n![[Attachments/integrity.png]] <!-- ti-scale-attachment:artifact-does-not-exist:${"0".repeat(64)} -->\n`,
+        `${template.replace(`id: "${seed.id}"`, 'id: "integrity-attachment"')}\n![[Attachments/integrity.png]] <!-- ti-scale-attachment:artifact-does-not-exist:${"0".repeat(64)} -->\n`,
       );
       const integrityImport = bridge.importNote(connection.id, integrityRelative, "operator-1");
       expect(integrityImport.status).toBe("quarantined");
@@ -775,7 +984,7 @@ describe("Obsidian vault bridge", () => {
     }
   });
 
-  test("versions an attachment-only vault edit once and preserves it through conflict resolution", () => {
+  test("quarantines an attachment added to a reusable attack note", () => {
     const { db, memory, bridge, connection } = setup();
     try {
       const missionId = addMission(db, "mission-vault-attachment-versioning");
@@ -783,7 +992,6 @@ describe("Obsidian vault bridge", () => {
       const exported = bridge.exportNode(connection.id, node.id);
       const notePath = join(connection.vaultPath, exported.relativePath);
       const attachmentBytes = Buffer.from("versioned attachment bytes");
-      const contentHash = createHash("sha256").update(attachmentBytes).digest("hex");
       writeFileSync(join(connection.vaultPath, "Attachments", "versioned.txt"), attachmentBytes);
       writeFileSync(
         notePath,
@@ -792,36 +1000,13 @@ describe("Obsidian vault bridge", () => {
       );
 
       const synchronized = bridge.syncNode(connection.id, node.id, "operator-1");
-      expect(synchronized.status).toBe("synced");
-      expect(memory.requireNode(node.id).version).toBe(2);
-      expect(memory.listVersions(node.id)).toHaveLength(2);
-      const normalized = readFileSync(notePath, "utf8");
-      expect(normalized).toContain(`Attachments/${contentHash}.txt`);
-      expect(normalized).not.toContain("versioned.txt");
-
-      writeFileSync(
-        notePath,
-        normalized.replace(
-          "Operational note for Attachment Versioning.",
-          "Vault-side concurrent edit.",
-        ),
-        "utf8",
-      );
-      memory.correctNode(node.id, {
-        body: "Database-side concurrent edit.",
-        authorType: "operator",
-        authorId: "operator-1",
-        changeReason: "Create a deterministic conflict",
-      });
-      const conflict = bridge.syncNode(connection.id, node.id, "operator-1");
-      expect(conflict.status).toBe("conflict");
-      const resolved = bridge.resolveConflict(conflict.conflictId!, "database", "operator-1");
-      expect(resolved.status).toBe("synced");
-      const resolvedText = readFileSync(notePath, "utf8");
-      expect(resolvedText).toContain("Database-side concurrent edit.");
-      expect(resolvedText).toContain(`Attachments/${contentHash}.txt`);
-      expect(readFileSync(join(connection.vaultPath, "Attachments", `${contentHash}.txt`)))
-        .toEqual(attachmentBytes);
+      expect(synchronized.status).toBe("quarantined");
+      expect(memory.requireNode(node.id).version).toBe(1);
+      expect(memory.listVersions(node.id)).toHaveLength(1);
+      expect(existsSync(notePath)).toBe(false);
+      expect((db.prepare(`
+        SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'obsidian_attachment'
+      `).get() as { count: number }).count).toBe(0);
     } finally {
       db.close();
     }
@@ -842,8 +1027,8 @@ describe("Obsidian vault bridge", () => {
       },
     });
     try {
-      addNode(memory, "node-watched", "Watched Technique");
-      const exported = bridge.exportNode(connection.id, "node-watched");
+      const node = addNode(memory, "node-watched", "Watched Technique");
+      const exported = bridge.exportNode(connection.id, node.id);
       const path = join(connection.vaultPath, exported.relativePath);
       writeFileSync(path, readFileSync(path, "utf8").replace(
         "Operational note for Watched Technique.",
@@ -854,7 +1039,7 @@ describe("Obsidian vault bridge", () => {
       listener?.("change", exported.relativePath);
       await new Promise((resolve) => setTimeout(resolve, 30));
       await watcher.waitForIdle();
-      expect(memory.requireNode("node-watched").body).toContain("watched vault");
+      expect(memory.requireNode(node.id).body).toContain("watched vault");
 
       const current = bridge.memoryControlPolicy();
       updateMemoryControlPolicy({
@@ -866,7 +1051,146 @@ describe("Obsidian vault bridge", () => {
       watcher.refreshConnections();
       expect(watcher.watchedConnectionCount).toBe(0);
       expect(fake.closed).toBe(true);
-      expect(() => bridge.exportNode(connection.id, "node-watched")).toThrow("not permitted");
+      expect(() => bridge.exportNode(connection.id, node.id)).toThrow("not permitted");
+    } finally {
+      await watcher.stop();
+      db.close();
+    }
+  });
+
+  test("does not capture stale filesystem events while a connection requires explicit recovery", async () => {
+    const { db, bridge, connection } = setup();
+    const fake = new EventEmitter() as EventEmitter & { close: () => void; closed: boolean };
+    fake.closed = false;
+    fake.close = () => { fake.closed = true; };
+    let listener: ((eventType: string, filename: string | Buffer | null) => void) | undefined;
+    const watcher = new ObsidianVaultWatcher(db, bridge, {
+      debounceMs: 10,
+      yieldMs: 0,
+      watchFactory: (_root, callback) => {
+        listener = callback;
+        return fake as unknown as FSWatcher;
+      },
+    });
+    try {
+      watcher.start();
+      const current = db.prepare(`
+        SELECT updated_at FROM vault_connections WHERE id = ?
+      `).get(connection.id) as { updated_at: string };
+      const recoveryVersion = new Date(Date.parse(current.updated_at) + 1).toISOString();
+      db.prepare(`
+        UPDATE vault_connections SET status = 'error', updated_at = ? WHERE id = ?
+      `).run(recoveryVersion, connection.id);
+
+      const relativePath = "operator-note-during-recovery.md";
+      const absolutePath = join(connection.vaultPath, relativePath);
+      const original = "# Operator bytes remain untouched during recovery\n";
+      writeFileSync(absolutePath, original, "utf8");
+      listener?.("change", relativePath);
+      expect(watcher.pendingCount).toBe(0);
+
+      db.prepare(`
+        UPDATE vault_connections SET status = 'degraded' WHERE id = ?
+      `).run(connection.id);
+      expect(watcher.pendingCount).toBe(0);
+      expect(readFileSync(absolutePath, "utf8")).toBe(original);
+    } finally {
+      await watcher.stop();
+      db.close();
+    }
+  });
+
+  test("quarantines connected edits but discards pending work at the disconnect fence", async () => {
+    const { db, bridge, connection } = setup();
+    const fake = new EventEmitter() as EventEmitter & { close: () => void; closed: boolean };
+    fake.closed = false;
+    fake.close = () => { fake.closed = true; };
+    let listener: ((eventType: string, filename: string | Buffer | null) => void) | undefined;
+    const errors: Error[] = [];
+    const watcher = new ObsidianVaultWatcher(db, bridge, {
+      debounceMs: 20,
+      yieldMs: 0,
+      onError: (error) => errors.push(error),
+      watchFactory: (_root, callback) => {
+        listener = callback;
+        return fake as unknown as FSWatcher;
+      },
+    });
+    try {
+      watcher.start();
+
+      const connectedRelative = "connected-malformed.md";
+      const connectedPath = join(connection.vaultPath, connectedRelative);
+      writeFileSync(connectedPath, "# Missing required Ti-Scale frontmatter\n", "utf8");
+      listener?.("change", connectedRelative);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      await watcher.waitForIdle();
+      expect(existsSync(connectedPath)).toBe(false);
+
+      const fencedRelative = "operator-note-at-disconnect.md";
+      const fencedPath = join(connection.vaultPath, fencedRelative);
+      const fencedText = "# Operator-owned bytes must remain untouched\n";
+      writeFileSync(fencedPath, fencedText, "utf8");
+      listener?.("change", fencedRelative);
+      expect(watcher.pendingCount).toBe(1);
+
+      db.prepare(`
+        UPDATE vault_connections SET status = 'disconnected' WHERE id = ?
+      `).run(connection.id);
+      watcher.refreshConnections();
+
+      expect(fake.closed).toBe(true);
+      expect(watcher.watchedConnectionCount).toBe(0);
+      expect(watcher.pendingCount).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      await watcher.waitForIdle();
+      expect(readFileSync(fencedPath, "utf8")).toBe(fencedText);
+      expect(errors).toEqual([]);
+      expect((db.prepare(`
+        SELECT status FROM vault_connections WHERE id = ?
+      `).get(connection.id) as { status: string }).status).toBe("disconnected");
+    } finally {
+      await watcher.stop();
+      db.close();
+    }
+  });
+
+  test("cancels already-debounced queued work when a Vault disconnects", async () => {
+    const { db, bridge, connection } = setup();
+    const fake = new EventEmitter() as EventEmitter & { close: () => void; closed: boolean };
+    fake.closed = false;
+    fake.close = () => { fake.closed = true; };
+    let listener: ((eventType: string, filename: string | Buffer | null) => void) | undefined;
+    const errors: Error[] = [];
+    const watcher = new ObsidianVaultWatcher(db, bridge, {
+      debounceMs: 10,
+      yieldMs: 1_000,
+      onError: (error) => errors.push(error),
+      watchFactory: (_root, callback) => {
+        listener = callback;
+        return fake as unknown as FSWatcher;
+      },
+    });
+    try {
+      watcher.start();
+      const relativePath = "queued-before-disconnect.md";
+      const absolutePath = join(connection.vaultPath, relativePath);
+      const original = "# Queued operator note remains byte-for-byte intact\n";
+      writeFileSync(absolutePath, original, "utf8");
+      listener?.("change", relativePath);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(watcher.pendingCount).toBe(1);
+
+      db.prepare(`
+        UPDATE vault_connections SET status = 'disconnected' WHERE id = ?
+      `).run(connection.id);
+      watcher.refreshConnections();
+
+      expect(watcher.pendingCount).toBe(0);
+      expect(fake.closed).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(readFileSync(absolutePath, "utf8")).toBe(original);
+      expect(errors).toEqual([]);
     } finally {
       await watcher.stop();
       db.close();

@@ -1,16 +1,27 @@
 import {
   useEffect,
   useRef,
-  type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { assetUrl } from "../../lib/assetUrl";
 
 type TitaniumCoreVariant = "command" | "journeys";
 
+const POINTER_DEPTH_SEGMENTS = 5;
+const CORE_FACET_COUNT = 8;
+
+function pointerDepthSegment(position: number, size: number): string {
+  if (!Number.isFinite(position) || !Number.isFinite(size) || size <= 0) return "2";
+  return String(Math.max(0, Math.min(
+    POINTER_DEPTH_SEGMENTS - 1,
+    Math.floor((position / size) * POINTER_DEPTH_SEGMENTS),
+  )));
+}
+
 function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const lockedFacetsRef = useRef(new Set<EventTarget>());
   const core640Avif = assetUrl("brand-v2/optimized/ti-scale-higgsfield-core-640.avif");
   const core1024Avif = assetUrl("brand-v2/optimized/ti-scale-higgsfield-core-1024.avif");
   const core1344Avif = assetUrl("brand-v2/optimized/ti-scale-higgsfield-core-1344.avif");
@@ -19,14 +30,34 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
   const core1344Webp = assetUrl("brand-v2/optimized/ti-scale-higgsfield-core-1344.webp");
   const metalGradientId = `ti-adaptive-metal-${variant}`;
   const darkGradientId = `ti-adaptive-graphite-${variant}`;
-  const materialStyle = {
-    "--ti-core-image": `url("${core1024Webp}")`,
-  } as CSSProperties;
 
-  useEffect(() => () => {
-    if (animationFrameRef.current !== null) {
-      window.cancelAnimationFrame(animationFrameRef.current);
-    }
+  useEffect(() => {
+    const root = rootRef.current;
+    const settleFacet = (event: AnimationEvent) => {
+      if (event.animationName !== "ti-transformer-facet-lock") return;
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || !target.matches("[data-ti-core-facet]")) return;
+      lockedFacetsRef.current.add(target);
+      if (lockedFacetsRef.current.size >= CORE_FACET_COUNT && root) {
+        root.dataset.tiCoreState = "locked";
+      }
+    };
+    root?.addEventListener("animationend", settleFacet);
+    root?.addEventListener("animationcancel", settleFacet);
+    // Animation events can be throttled while a tab is being backgrounded.
+    // This finite safety deadline releases compositor hints even in that case.
+    const lockSafetyTimer = window.setTimeout(() => {
+      const root = rootRef.current;
+      if (root) root.dataset.tiCoreState = "locked";
+    }, 1_900);
+    return () => {
+      root?.removeEventListener("animationend", settleFacet);
+      root?.removeEventListener("animationcancel", settleFacet);
+      window.clearTimeout(lockSafetyTimer);
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
   }, []);
 
   const setPointerDepth = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -37,20 +68,12 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
     const root = rootRef.current;
     if (!root) return;
     const bounds = root.getBoundingClientRect();
-    const x = Math.max(-1, Math.min(1, ((event.clientX - bounds.left) / bounds.width - 0.5) * 2));
-    const y = Math.max(-1, Math.min(1, ((event.clientY - bounds.top) / bounds.height - 0.5) * 2));
+    const column = pointerDepthSegment(event.clientX - bounds.left, bounds.width);
+    const row = pointerDepthSegment(event.clientY - bounds.top, bounds.height);
     if (animationFrameRef.current !== null) window.cancelAnimationFrame(animationFrameRef.current);
     animationFrameRef.current = window.requestAnimationFrame(() => {
-      root.style.setProperty("--ti-pointer-x", x.toFixed(3));
-      root.style.setProperty("--ti-pointer-y", y.toFixed(3));
-      root.style.setProperty("--ti-rotate-x", `${(-y * 3.2).toFixed(2)}deg`);
-      root.style.setProperty("--ti-rotate-y", `${(x * 4.2).toFixed(2)}deg`);
-      root.style.setProperty("--ti-shift-x", `${(x * 8).toFixed(2)}px`);
-      root.style.setProperty("--ti-shift-y", `${(y * 6).toFixed(2)}px`);
-      root.style.setProperty("--ti-depth-x", `${(-x * 13).toFixed(2)}px`);
-      root.style.setProperty("--ti-depth-y", `${(-y * 10).toFixed(2)}px`);
-      root.style.setProperty("--ti-light-x", `${(50 + x * 24).toFixed(2)}%`);
-      root.style.setProperty("--ti-light-y", `${(42 + y * 18).toFixed(2)}%`);
+      root.dataset.tiPointerColumn = column;
+      root.dataset.tiPointerRow = row;
       animationFrameRef.current = null;
     });
   };
@@ -60,16 +83,8 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
     if (!root) return;
     if (animationFrameRef.current !== null) window.cancelAnimationFrame(animationFrameRef.current);
     animationFrameRef.current = window.requestAnimationFrame(() => {
-      root.style.setProperty("--ti-pointer-x", "0");
-      root.style.setProperty("--ti-pointer-y", "0");
-      root.style.setProperty("--ti-rotate-x", "0deg");
-      root.style.setProperty("--ti-rotate-y", "0deg");
-      root.style.setProperty("--ti-shift-x", "0px");
-      root.style.setProperty("--ti-shift-y", "0px");
-      root.style.setProperty("--ti-depth-x", "0px");
-      root.style.setProperty("--ti-depth-y", "0px");
-      root.style.setProperty("--ti-light-x", "50%");
-      root.style.setProperty("--ti-light-y", "42%");
+      root.dataset.tiPointerColumn = "2";
+      root.dataset.tiPointerRow = "2";
       animationFrameRef.current = null;
     });
   };
@@ -79,7 +94,10 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
       ref={rootRef}
       className={`os-brand-media os-brand-media--${variant} ti-scale-core ti-scale-core--${variant}`}
       data-ti-transformer-core="true"
-      style={materialStyle}
+      data-ti-exploded-model="pending-approval"
+      data-ti-core-state="assembling"
+      data-ti-pointer-column="2"
+      data-ti-pointer-row="2"
       aria-hidden="true"
       onPointerMove={setPointerDepth}
       onPointerLeave={resetPointerDepth}
@@ -109,14 +127,15 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
         <path className="ti-scale-core__plate ti-scale-core__plate--lower" fill={`url(#${metalGradientId})`} d="m255 418 347-116 137 195-359 73Z" />
       </svg>
       <span className="ti-scale-core__shards">
-        {Array.from({ length: 8 }, (_, index) => (
+        {Array.from({ length: CORE_FACET_COUNT }, (_, index) => (
           <span
             className={`ti-scale-core__shard ti-scale-core__shard--${index + 1}`}
             key={index}
+            data-ti-core-facet={index + 1}
           />
         ))}
       </span>
-      <picture className="ti-scale-core__media">
+      <picture className="ti-scale-core__media" data-ti-raster-canvas="static">
         <source
           type="image/avif"
           srcSet={`${core640Avif} 640w, ${core1024Avif} 1024w, ${core1344Avif} 1344w`}
@@ -132,8 +151,9 @@ function TitaniumCore({ variant }: { variant: TitaniumCoreVariant }) {
           width="1344"
           height="768"
           alt=""
-          loading="lazy"
-          decoding="async"
+          loading={variant === "command" ? "eager" : "lazy"}
+          fetchPriority={variant === "command" ? "high" : "auto"}
+          decoding={variant === "command" ? "sync" : "async"}
           draggable="false"
         />
       </picture>

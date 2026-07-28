@@ -7,7 +7,7 @@ export default function JourneySelectionPage() {
       <JourneyAmbient />
       <PageHeader eyebrow="New mission" title="Choose how you want to work" description="There are exactly two mission journeys. You can inspect providers and tools later without turning them into execution modes." />
       <section className="os-journey-grid os-journey-grid--selection" aria-label="Mission journey">
-        <article className="os-journey-card os-journey-card--autonomous">
+        <article className="os-journey-card os-journey-card--autonomous" data-ti-plate="keel">
           <div className="os-journey-index" aria-hidden="true">01</div>
           <div className="os-journey-content">
             <p className="os-eyebrow">Autonomous</p><h2>Outcome first</h2>
@@ -17,7 +17,7 @@ export default function JourneySelectionPage() {
             <ButtonLink href="/missions/new/autonomous">Go Autonomous</ButtonLink>
           </div>
         </article>
-        <article className="os-journey-card os-journey-card--guided">
+        <article className="os-journey-card os-journey-card--guided" data-ti-plate="aero">
           <div className="os-journey-index" aria-hidden="true">02</div>
           <div className="os-journey-content">
             <p className="os-eyebrow">Guided</p><h2>Learn every step</h2>

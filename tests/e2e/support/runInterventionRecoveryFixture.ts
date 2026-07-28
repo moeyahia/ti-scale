@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
+import { acquireTestRunMutationAuthority } from "../../../server/control-plane/TestRunMutationAuthority";
 import { createDatabaseConnection, inImmediateTransaction, type SqliteDatabase } from "../../../server/db";
 import { EventRepository } from "../../../server/events";
 import { hashJson } from "../../../server/orchestration/serialization";
+import type { DurableActionIntent } from "../../../server/orchestration/types";
+import { fingerprintAction } from "../../../server/supervisor/ActionFingerprint";
 import { E2E_DATABASE_PATH } from "./environment";
 import { normalizeFixtureNamespace } from "./fixtureNamespace";
 
@@ -59,6 +62,7 @@ export interface RunInterventionRecoverySnapshot {
     readonly stateHashVerified: boolean;
     readonly inFlightCount: number;
   }[];
+  readonly eventOutboxCount: number;
   readonly runtimeIdempotencyCount: number;
   readonly recoveryIdempotencyCount: number;
 }
@@ -93,6 +97,24 @@ function representedAction(target: string): string {
     reversibility: "Read-only",
     dependencies: [],
   });
+}
+
+function representedIntent(fixture: RunInterventionRecoveryFixture): DurableActionIntent {
+  return {
+    missionId: fixture.missionId,
+    runId: fixture.runId,
+    stepId: fixture.stepId,
+    assignmentId: fixture.assignmentId,
+    planVersion: 1,
+    actionType: "passive_intelligence_osint",
+    actionClass: "passive_intelligence_osint",
+    target: fixture.target,
+    arguments: { mode: "bounded" },
+    intentSummary: "Collect one attributable observation inside the approved local fixture",
+    kind: "manual",
+    idempotent: true,
+    destructive: false,
+  };
 }
 
 function checkpointState(input: {
@@ -309,6 +331,7 @@ export function createRunInterventionRecoveryFixture(
         nowIso,
       );
       if (fixture.decisionId) {
+        const intent = representedIntent(fixture);
         connection.prepare(`
           INSERT INTO guided_decisions (
             id, mission_id, run_id, step_id, requested_action_fingerprint,
@@ -320,8 +343,8 @@ export function createRunInterventionRecoveryFixture(
           fixture.missionId,
           fixture.runId,
           fixture.stepId,
-          digest(`${fixture.decisionId}:fingerprint`),
-          JSON.stringify({ target: fixture.target, mode: "bounded" }),
+          fingerprintAction(intent).hash,
+          JSON.stringify(intent),
           "Keep the exact represented Guided boundary while the operator decides.",
           expiresAt,
           nowIso,
@@ -408,6 +431,9 @@ export function createRunInterventionRecoveryFixture(
         );
       }
     });
+    if (state === "replan" || state === "reassign") {
+      acquireTestRunMutationAuthority(connection, fixture.runId);
+    }
   } finally {
     connection.close();
   }
@@ -571,17 +597,13 @@ export function readRunInterventionRecoverySnapshot(
         (SELECT count(*) FROM provider_turns WHERE run_id = ? AND status = 'started') +
         (SELECT count(*) FROM runtime_continuations WHERE run_id = ? AND status IN ('pending', 'processing')) +
         (SELECT count(*) FROM runs WHERE id = ? AND lease_owner IS NOT NULL
-          AND lease_expires_at IS NOT NULL AND lease_expires_at > ?) +
-        (SELECT count(*) FROM control_plane_leases WHERE run_id = ? AND released_at IS NULL
-          AND expires_at > ?) AS count
+          AND lease_expires_at IS NOT NULL AND lease_expires_at > ?) AS count
     `).get(
       fixture.runId,
       fixture.runId,
       fixture.runId,
       fixture.runId,
       fixture.runId,
-      fixture.runId,
-      new Date().toISOString(),
       fixture.runId,
       new Date().toISOString(),
     ) as { count: number }).count;
@@ -633,6 +655,10 @@ export function readRunInterventionRecoverySnapshot(
         SELECT action, reason FROM audit_records WHERE run_id = ? ORDER BY occurred_at, rowid
       `).all(fixture.runId) as Array<{ action: string; reason: string | null }>),
       checkpoints,
+      eventOutboxCount: (connection.prepare(`
+        SELECT count(*) AS count FROM event_outbox
+        WHERE event_id IN (SELECT id FROM events WHERE run_id = ?)
+      `).get(fixture.runId) as { count: number }).count,
       runtimeIdempotencyCount: (connection.prepare(`
         SELECT count(*) AS count FROM settings WHERE key LIKE 'idempotency.runtime.run.%'
           AND instr(value_json, ?) > 0

@@ -69,6 +69,8 @@ Do not treat an SSE reconnect as a failed mission.
 
 The database event record is canonical. An outbox bridges durable changes to live fanout. Delivery is at-least-once at the transport boundary, so clients must deduplicate.
 
+Temporary SQLite writer contention does not discard or claim an event and does not terminate the event-stream service. The outbox pump defers the claim with capped exponential backoff and jitter, avoids touching SQLite again during that cooldown, and resumes from the unchanged durable row when the writer lock clears. Non-contention database errors still fail visibly; they are not reclassified as routine load.
+
 Subscriber queues are bounded. When a slow consumer exceeds the queue boundary, the server closes that subscriber instead of allowing unbounded memory growth. The client then replays from its last durable cursor.
 
 ## Redaction and sensitivity

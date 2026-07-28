@@ -6,6 +6,8 @@ import type {
   MemorySensitivity,
   RetrievalPolicy,
 } from "./types";
+import { isAttackCentricReusableNodeType } from "./types";
+import { autonomousMemoryConfirmationEligible } from "./AutonomousMemoryInfluence";
 
 const SENSITIVITY_RANK: Record<MemorySensitivity, number> = {
   public: 0,
@@ -17,6 +19,25 @@ const SENSITIVITY_RANK: Record<MemorySensitivity, number> = {
 interface CanonicalMissionScope {
   readonly engagementId: string | null;
   readonly journey: Journey;
+}
+
+function isCurrentRuntimeCapability(node: MemoryNode): boolean {
+  if (!["agent", "tool", "mcp_capability"].includes(node.nodeType)) return false;
+  const projection = node.retentionPolicy.runtimeCapabilityProjection;
+  const decision = node.retentionPolicy.agentToolDecision;
+  return node.authorType === "system"
+    && node.authorId === "system:runtime-capability-memory-projector"
+    && node.lifecycleStatus === "verified"
+    && projection !== null
+    && typeof projection === "object"
+    && !Array.isArray(projection)
+    && (projection as Record<string, unknown>).schemaVersion
+      === "ti-scale.runtime-capability-memory-projection.v1"
+    && (projection as Record<string, unknown>).status === "current"
+    && decision !== null
+    && typeof decision === "object"
+    && !Array.isArray(decision)
+    && (decision as Record<string, unknown>).schemaVersion === "1";
 }
 
 export function requireCanonicalMissionScope(
@@ -48,19 +69,34 @@ export function memoryScopeMatchesPolicy(
   policy: RetrievalPolicy,
 ): boolean {
   const scopeClasses = policy.allowedScopeClasses;
+  const attackKnowledge = isAttackCentricReusableNodeType(node.nodeType);
+  const currentRuntimeCapability = isCurrentRuntimeCapability(node);
   if (scopeClasses) {
     const allowed = new Set(scopeClasses);
+    const confirmedAttackKnowledgeAllowed = allowed.has("confirmed_attack_knowledge");
+    const verifiedAttackKnowledgeAllowed = allowed.has("verified_attack_knowledge");
     const typeAllowed = node.nodeType === "preference"
       ? allowed.has("confirmed_preferences")
       : node.nodeType === "lesson"
         ? allowed.has("verified_lessons")
+        : attackKnowledge
+          ? node.lifecycleStatus === "verified"
+            ? verifiedAttackKnowledgeAllowed || confirmedAttackKnowledgeAllowed
+            : node.lifecycleStatus === "confirmed" && confirmedAttackKnowledgeAllowed
+        : currentRuntimeCapability
+          ? allowed.has("current_runtime_capabilities")
         : true;
     if (!typeAllowed) return false;
     if (node.scope.kind === "global") {
-      // Only the two explicitly reviewable global classes may cross mission
-      // boundaries. Global tools, targets, failures, and free-form notes never
-      // become authorized merely because global retrieval is enabled.
-      if (node.nodeType !== "preference" && node.nodeType !== "lesson") return false;
+      // Only explicitly reviewable global classes may cross mission
+      // boundaries. Operational mission/target/evidence records never become
+      // retrieval authority merely because global retrieval is enabled.
+      if (
+        node.nodeType !== "preference"
+        && node.nodeType !== "lesson"
+        && !attackKnowledge
+        && !currentRuntimeCapability
+      ) return false;
       return policy.allowGlobal === true;
     }
     // A signed preference/lesson class permits that reviewed node type inside
@@ -68,7 +104,11 @@ export function memoryScopeMatchesPolicy(
     // engagement-memory authority is still required for every other
     // operational node type; it never becomes implicit through lesson use.
     if (
-      node.nodeType !== "preference" && node.nodeType !== "lesson" &&
+      node.nodeType !== "preference"
+      && node.nodeType !== "lesson"
+      && !attackKnowledge
+      && !currentRuntimeCapability
+      &&
       !allowed.has("engagement_memory")
     ) return false;
   }
@@ -98,6 +138,10 @@ export function memoryNodeMatchesPolicy(
 ): boolean {
   const statuses = policy.allowedStatuses ?? ["confirmed", "verified"];
   if (!statuses.includes(node.lifecycleStatus as "confirmed" | "verified")) return false;
+  if (
+    policy.journey === "autonomous"
+    && !autonomousMemoryConfirmationEligible(node)
+  ) return false;
   if (node.expiresAt && Date.parse(node.expiresAt) <= Date.parse(now)) return false;
   if (SENSITIVITY_RANK[node.sensitivity] > SENSITIVITY_RANK[policy.maximumSensitivity]) return false;
   if (policy.allowedNodeTypes && !policy.allowedNodeTypes.includes(node.nodeType)) return false;

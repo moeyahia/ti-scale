@@ -6,15 +6,31 @@ import type {
   PlanChangeListResponse,
   PlanChangeOperation,
   PlanChangeRequest,
+  PlanChangeAffectedAction,
+  PlanChangeAffectedAttackAttempt,
+  PlanChangeInflightFinalizeResponse,
+  PlanChangeInflightResolution,
+  PlanChangeInflightResolutionOption,
+  PlanChangeInflightResolutionResponse,
   PlanStepRepresentationInput,
 } from "../types/planChanges";
 
 type UnknownRecord = Record<string, unknown>;
 const STATUSES = new Set(["proposed", "validated", "rejected", "applied", "cancelled"]);
 const DIFF_KINDS = new Set(["add", "remove", "replace", "move"]);
-const OPERATION_KINDS = new Set(["update_plan", "update_step", "add_step", "remove_step", "reorder_steps", "set_dependencies", "set_represented_action"]);
+const OPERATION_KINDS = new Set(["restore_plan_version", "update_plan", "update_step", "add_step", "remove_step", "reorder_steps", "set_dependencies", "set_represented_action"]);
 const ACTION_KINDS = new Set(["tool", "provider_turn", "replan", "delegation", "manual"]);
 const RISK_CLASSES = new Set(["low", "medium", "high", "critical"]);
+const ACTION_STATUSES = new Set(["queued", "running"]);
+const RESOLUTION_MODES = new Set([
+  "checkpoint_finish_idempotent_work",
+  "checkpoint_cancel_affected_work",
+]);
+const RESOLUTION_STATUSES = new Set([
+  "waiting_for_terminal_work",
+  "ready_for_review",
+  "failed",
+]);
 
 function record(value: unknown, label: string): UnknownRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
@@ -92,6 +108,14 @@ function operation(value: unknown, index: number): PlanChangeOperation {
   const label = `operation[${index}]`;
   const root = record(value, label);
   const kind = enumeration<PlanChangeOperation["kind"]>(root.kind, OPERATION_KINDS, `${label}.kind`);
+  if (kind === "restore_plan_version") {
+    const item = exact(root, label, ["kind", "targetPlanId", "targetPlanVersion"]);
+    return {
+      kind,
+      targetPlanId: text(item.targetPlanId, `${label}.targetPlanId`),
+      targetPlanVersion: integer(item.targetPlanVersion, `${label}.targetPlanVersion`),
+    };
+  }
   if (kind === "update_plan") {
     const item = shape(root, label, ["kind"], ["strategySummary", "rationaleSummary"]);
     if (!has(item, "strategySummary") && !has(item, "rationaleSummary")) throw new Error(`${label} must change at least one plan field`);
@@ -160,6 +184,60 @@ function diffEntry(value: unknown, index: number): PlanChangeDiffEntry {
   return { kind: enumeration(item.kind, DIFF_KINDS, "diff kind"), path: text(item.path, "diff path"), label: text(item.label, "diff label"), before: json(item.before, "diff before"), after: json(item.after, "diff after") };
 }
 
+function affectedAction(value: unknown, index: number): PlanChangeAffectedAction {
+  const item = exact(value, `affected action[${index}]`, [
+    "id", "stepId", "actionType", "actionClass", "intentSummary", "target",
+    "status", "idempotent", "destructive",
+  ]);
+  return {
+    id: text(item.id, "affected action ID"),
+    stepId: nullableText(item.stepId, "affected action step ID"),
+    actionType: text(item.actionType, "affected action type"),
+    actionClass: text(item.actionClass, "affected action class"),
+    intentSummary: text(item.intentSummary, "affected action intent"),
+    target: nullableText(item.target, "affected action target"),
+    status: enumeration(item.status, ACTION_STATUSES, "affected action status"),
+    idempotent: bool(item.idempotent, "affected action idempotency"),
+    destructive: bool(item.destructive, "affected action destructive state"),
+  };
+}
+
+function affectedAttempt(
+  value: unknown,
+  index: number,
+): PlanChangeAffectedAttackAttempt {
+  const item = exact(value, `affected attack attempt[${index}]`, [
+    "id", "stepId", "objective", "techniqueName", "actionClass", "status",
+    "targetAssetId", "targetServiceId",
+  ]);
+  return {
+    id: text(item.id, "affected attack attempt ID"),
+    stepId: nullableText(item.stepId, "affected attack attempt step ID"),
+    objective: text(item.objective, "affected attack attempt objective"),
+    techniqueName: text(item.techniqueName, "affected attack attempt technique"),
+    actionClass: text(item.actionClass, "affected attack attempt action class"),
+    status: text(item.status, "affected attack attempt status"),
+    targetAssetId: nullableText(item.targetAssetId, "affected target asset ID"),
+    targetServiceId: nullableText(item.targetServiceId, "affected target service ID"),
+  };
+}
+
+function resolutionOption(
+  value: unknown,
+  index: number,
+): PlanChangeInflightResolutionOption {
+  const item = exact(value, `in-flight resolution option[${index}]`, [
+    "mode", "label", "consequence", "enabled", "disabledReason",
+  ]);
+  return {
+    mode: enumeration(item.mode, RESOLUTION_MODES, "resolution mode"),
+    label: text(item.label, "resolution label"),
+    consequence: text(item.consequence, "resolution consequence"),
+    enabled: bool(item.enabled, "resolution enabled state"),
+    disabledReason: nullableText(item.disabledReason, "resolution disabled reason"),
+  };
+}
+
 export function parsePlanChangeRequest(value: unknown): PlanChangeRequest {
   const fields = ["id", "missionId", "runId", "basePlanId", "basePlanVersion", "requestedBy", "requestText", "normalizedChange", "structuredDiff", "affectedRefs", "dependencyImpact", "policyValidation", "readinessImpact", "budgetImpact", "inflightImpact", "status", "resultPlanId", "createdAt", "resolvedAt", "version"];
   const item = exact(value, "plan change request", fields);
@@ -169,7 +247,16 @@ export function parsePlanChangeRequest(value: unknown): PlanChangeRequest {
   const policy = exact(item.policyValidation, "policy validation", ["valid", "journey", "contractId", "checkedActionClasses", "prohibitedActionClasses", "reasons"]);
   const readiness = exact(item.readinessImpact, "readiness impact", ["valid", "checkedAgentIds", "unavailableAgentIds", "reasons"]);
   const budget = exact(item.budgetImpact, "budget impact", ["addedSteps", "removedSteps", "netStepChange", "durationEstimate", "costEstimate", "explanation"]);
-  const inflight = exact(item.inflightImpact, "inflight impact", ["safeToApply", "runStatus", "leaseOwner", "activeStepIds", "activeAssignmentIds", "activeActionIds", "pendingDecisionIds", "queuedAssignmentIdsToCancel", "requiresCheckpoint", "requiresCancellation", "reasons"]);
+  const inflight = exact(item.inflightImpact, "inflight impact", [
+    "safeToApply", "runStatus", "leaseOwner", "affectedSubgraphStepIds",
+    "activeStepIds", "unaffectedActiveStepIds", "activeAssignmentIds",
+    "unaffectedActiveAssignmentIds", "activeActionIds",
+    "unaffectedActiveActionIds", "pendingDecisionIds",
+    "unaffectedPendingDecisionIds", "queuedAssignmentIdsToCancel",
+    "affectedActions", "unaffectedActions", "affectedAttackAttempts",
+    "unaffectedAttackAttempts", "resolutionOptions", "requiresCheckpoint",
+    "requiresCancellation", "reasons",
+  ]);
   const normalizedOperations = list(normalized.operations, "normalized operations");
   if (normalizedOperations.length < 1 || normalizedOperations.length > 50) throw new Error("normalized operations must contain 1 through 50 entries");
   if (budget.durationEstimate !== "not_observed" || budget.costEstimate !== "not_observed") throw new Error("unmeasured plan impact must remain not_observed");
@@ -182,7 +269,37 @@ export function parsePlanChangeRequest(value: unknown): PlanChangeRequest {
     policyValidation: { valid: bool(policy.valid, "policy validity"), journey: enumeration(policy.journey, new Set(["autonomous", "guided"]), "policy journey"), contractId: nullableText(policy.contractId, "contract ID"), checkedActionClasses: texts(policy.checkedActionClasses, "checked action classes"), prohibitedActionClasses: texts(policy.prohibitedActionClasses, "prohibited action classes"), reasons: texts(policy.reasons, "policy reasons") },
     readinessImpact: { valid: bool(readiness.valid, "readiness validity"), checkedAgentIds: texts(readiness.checkedAgentIds, "checked agents"), unavailableAgentIds: texts(readiness.unavailableAgentIds, "unavailable agents"), reasons: texts(readiness.reasons, "readiness reasons") },
     budgetImpact: { addedSteps: integer(budget.addedSteps, "added steps", true), removedSteps: integer(budget.removedSteps, "removed steps", true), netStepChange: typeof budget.netStepChange === "number" && Number.isSafeInteger(budget.netStepChange) ? budget.netStepChange : (() => { throw new Error("net step change must be an integer"); })(), durationEstimate: "not_observed", costEstimate: "not_observed", explanation: text(budget.explanation, "budget explanation") },
-    inflightImpact: { safeToApply: bool(inflight.safeToApply, "safe to apply"), runStatus: text(inflight.runStatus, "run status"), leaseOwner: nullableText(inflight.leaseOwner, "lease owner"), activeStepIds: texts(inflight.activeStepIds, "active steps"), activeAssignmentIds: texts(inflight.activeAssignmentIds, "active assignments"), activeActionIds: texts(inflight.activeActionIds, "active actions"), pendingDecisionIds: texts(inflight.pendingDecisionIds, "pending decisions"), queuedAssignmentIdsToCancel: texts(inflight.queuedAssignmentIdsToCancel, "queued assignments"), requiresCheckpoint: bool(inflight.requiresCheckpoint, "requires checkpoint"), requiresCancellation: bool(inflight.requiresCancellation, "requires cancellation"), reasons: texts(inflight.reasons, "inflight reasons") },
+    inflightImpact: {
+      safeToApply: bool(inflight.safeToApply, "safe to apply"),
+      runStatus: text(inflight.runStatus, "run status"),
+      leaseOwner: nullableText(inflight.leaseOwner, "lease owner"),
+      affectedSubgraphStepIds: texts(inflight.affectedSubgraphStepIds, "affected subgraph steps"),
+      activeStepIds: texts(inflight.activeStepIds, "active steps"),
+      unaffectedActiveStepIds: texts(inflight.unaffectedActiveStepIds, "unaffected active steps"),
+      activeAssignmentIds: texts(inflight.activeAssignmentIds, "active assignments"),
+      unaffectedActiveAssignmentIds: texts(inflight.unaffectedActiveAssignmentIds, "unaffected active assignments"),
+      activeActionIds: texts(inflight.activeActionIds, "active actions"),
+      unaffectedActiveActionIds: texts(inflight.unaffectedActiveActionIds, "unaffected active actions"),
+      pendingDecisionIds: texts(inflight.pendingDecisionIds, "pending decisions"),
+      unaffectedPendingDecisionIds: texts(inflight.unaffectedPendingDecisionIds, "unaffected pending decisions"),
+      queuedAssignmentIdsToCancel: texts(inflight.queuedAssignmentIdsToCancel, "queued assignments"),
+      affectedActions: list(inflight.affectedActions, "affected actions").map(affectedAction),
+      unaffectedActions: list(inflight.unaffectedActions, "unaffected actions").map(affectedAction),
+      affectedAttackAttempts: list(inflight.affectedAttackAttempts, "affected attack attempts").map(affectedAttempt),
+      unaffectedAttackAttempts: list(inflight.unaffectedAttackAttempts, "unaffected attack attempts").map(affectedAttempt),
+      resolutionOptions: (() => {
+        const options = list(inflight.resolutionOptions, "in-flight resolution options")
+          .map(resolutionOption);
+        if (options.length !== 2) throw new Error("exactly two in-flight resolution options are required");
+        return options as [
+          PlanChangeInflightResolutionOption,
+          PlanChangeInflightResolutionOption,
+        ];
+      })(),
+      requiresCheckpoint: bool(inflight.requiresCheckpoint, "requires checkpoint"),
+      requiresCancellation: bool(inflight.requiresCancellation, "requires cancellation"),
+      reasons: texts(inflight.reasons, "inflight reasons"),
+    },
     status: enumeration(item.status, STATUSES, "plan change status"), resultPlanId: nullableText(item.resultPlanId, "result plan ID"), createdAt: timestamp(item.createdAt, "created time"), resolvedAt: nullableTimestamp(item.resolvedAt, "resolved time"), version: integer(item.version, "request version"),
   };
 }
@@ -204,12 +321,77 @@ export function parsePlanChangeDetail(payload: unknown): PlanChangeDetailRespons
 }
 
 export function parsePlanChangeApply(payload: unknown): PlanChangeApplyResponse {
-  const item = shape(payload, "plan change apply", ["schemaVersion", "request", "resultPlanId", "resultPlanVersion"], ["contextPackId"]);
+  const item = shape(payload, "plan change apply", ["schemaVersion", "request", "resultPlanId", "resultPlanVersion", "guidedDecisionId"], ["contextPackId"]);
   return {
     schemaVersion: schemaVersion(item.schemaVersion),
     request: parsePlanChangeRequest(item.request),
     resultPlanId: text(item.resultPlanId, "result plan ID"),
     resultPlanVersion: integer(item.resultPlanVersion, "result plan version"),
+    guidedDecisionId: nullableText(item.guidedDecisionId, "Guided decision ID"),
     contextPackId: has(item, "contextPackId") ? nullableText(item.contextPackId, "context pack ID") : null,
+  };
+}
+
+function parseResolution(value: unknown): PlanChangeInflightResolution {
+  const item = exact(value, "in-flight resolution", [
+    "id", "planChangeRequestId", "missionId", "runId", "basePlanId", "mode",
+    "status", "affectedStepIds", "affectedAssignmentIds", "affectedActionIds",
+    "affectedAttackAttemptIds", "affectedDecisionIds", "sourceCheckpointId",
+    "sourceCheckpointStateHash", "sourceCheckpointEventSequence",
+    "settleDeadlineAt", "lastHeartbeatAt", "failureReason", "freshRequestId",
+    "requestedBy", "reason", "createdAt", "updatedAt", "resolvedAt", "version",
+  ]);
+  return {
+    id: text(item.id, "resolution ID"),
+    planChangeRequestId: text(item.planChangeRequestId, "plan change request ID"),
+    missionId: text(item.missionId, "resolution mission ID"),
+    runId: text(item.runId, "resolution run ID"),
+    basePlanId: text(item.basePlanId, "resolution base plan ID"),
+    mode: enumeration(item.mode, RESOLUTION_MODES, "resolution mode"),
+    status: enumeration(item.status, RESOLUTION_STATUSES, "resolution status"),
+    affectedStepIds: texts(item.affectedStepIds, "resolution affected steps"),
+    affectedAssignmentIds: texts(item.affectedAssignmentIds, "resolution affected assignments"),
+    affectedActionIds: texts(item.affectedActionIds, "resolution affected actions"),
+    affectedAttackAttemptIds: texts(item.affectedAttackAttemptIds, "resolution affected attempts"),
+    affectedDecisionIds: texts(item.affectedDecisionIds, "resolution affected decisions"),
+    sourceCheckpointId: text(item.sourceCheckpointId, "resolution checkpoint ID"),
+    sourceCheckpointStateHash: text(item.sourceCheckpointStateHash, "resolution checkpoint hash"),
+    sourceCheckpointEventSequence: integer(item.sourceCheckpointEventSequence, "resolution checkpoint sequence", true),
+    settleDeadlineAt: timestamp(item.settleDeadlineAt, "resolution settle deadline"),
+    lastHeartbeatAt: timestamp(item.lastHeartbeatAt, "resolution heartbeat"),
+    failureReason: nullableText(item.failureReason, "resolution failure reason"),
+    freshRequestId: nullableText(item.freshRequestId, "fresh request ID"),
+    requestedBy: text(item.requestedBy, "resolution requester"),
+    reason: text(item.reason, "resolution reason"),
+    createdAt: timestamp(item.createdAt, "resolution created time"),
+    updatedAt: timestamp(item.updatedAt, "resolution updated time"),
+    resolvedAt: nullableTimestamp(item.resolvedAt, "resolution resolved time"),
+    version: integer(item.version, "resolution version"),
+  };
+}
+
+export function parsePlanChangeInflightResolution(
+  payload: unknown,
+): PlanChangeInflightResolutionResponse {
+  const item = exact(payload, "in-flight resolution response", [
+    "schemaVersion", "resolution",
+  ]);
+  return {
+    schemaVersion: schemaVersion(item.schemaVersion),
+    resolution: item.resolution === null ? null : parseResolution(item.resolution),
+  };
+}
+
+export function parsePlanChangeInflightFinalize(
+  payload: unknown,
+): PlanChangeInflightFinalizeResponse {
+  const item = exact(payload, "in-flight resolution finalization", [
+    "schemaVersion", "resolution", "request", "guidedDecisionId",
+  ]);
+  return {
+    schemaVersion: schemaVersion(item.schemaVersion),
+    resolution: parseResolution(item.resolution),
+    request: parsePlanChangeRequest(item.request),
+    guidedDecisionId: nullableText(item.guidedDecisionId, "Guided decision ID"),
   };
 }

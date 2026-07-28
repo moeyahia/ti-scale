@@ -14,8 +14,8 @@ export const STEP_TWO_ID = "step-intelligence-2";
 export const AGENT_ONE_ID = "agent-recon";
 export const AGENT_TWO_ID = "agent-web";
 
-export function createTestDatabase(): SqliteDatabase {
-  const database = createDatabaseConnection({ filename: ":memory:" });
+export function createTestDatabase(filename = ":memory:"): SqliteDatabase {
+  const database = createDatabaseConnection({ filename });
   migrateDatabase(database, DATABASE_MIGRATIONS);
   database.prepare(`
     INSERT INTO missions (

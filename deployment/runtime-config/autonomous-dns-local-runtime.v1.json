@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "ti-scale.autonomous-dns-runtime-configuration.v1",
+  "configurationVersion": "autonomous-safe-recon-local-2026.07.20-v2",
+  "dns": {
+    "policyId": "reviewed-autonomous-local-safe-recon-v2",
+    "bindingId": "binding-autonomous-dns-a-v2",
+    "agentId": "specialist:autonomous-safe-recon",
+    "providerId": "provider:local-deterministic-safe-recon",
+    "modelId": "policy:local-safe-recon-v2",
+    "modelConfigurationHash": "d86cddc44ab8a0b3f02b3daf47ea5fee3ad48682e07edc9301356c1dfd9d67be",
+    "logicalWorkspace": "/engagements/autonomous-safe-recon",
+    "recordType": "A",
+    "successCriterion": "The exact DNS A query has one verified result for the authorized domain"
+  },
+  "ipRecon": {
+    "policyId": "reviewed-autonomous-local-safe-recon-v2",
+    "livenessBindingId": "binding-autonomous-ip-liveness-v1",
+    "serviceScanBindingId": "binding-autonomous-ip-services-v1",
+    "agentId": "specialist:autonomous-safe-recon",
+    "providerId": "provider:local-deterministic-safe-recon",
+    "modelId": "policy:local-safe-recon-v2",
+    "modelConfigurationHash": "d86cddc44ab8a0b3f02b3daf47ea5fee3ad48682e07edc9301356c1dfd9d67be",
+    "logicalWorkspace": "/engagements/autonomous-safe-recon",
+    "ports": [
+      22,
+      53,
+      80,
+      88,
+      135,
+      139,
+      389,
+      443,
+      445,
+      636,
+      3389,
+      5985,
+      8080,
+      8443
+    ],
+    "livenessSuccessCriterion": "The exact approved host has one verified bounded liveness result",
+    "serviceScanSuccessCriterion": "The exact approved host has one verified result for the reviewed TCP port set"
+  },
+  "localProcess": {
+    "adapterId": "ti-scale:autonomous-local-safe-recon"
+  },
+  "specialist": {
+    "id": "specialist:autonomous-safe-recon",
+    "label": "Autonomous Safe Recon specialist",
+    "workerId": "worker:autonomous-safe-recon-local-1",
+    "version": "2.0.0",
+    "heartbeatTtlMs": 60000
+  },
+  "provider": {
+    "id": "provider:local-deterministic-safe-recon",
+    "label": "Local deterministic Safe Recon policy",
+    "modelId": "policy:local-safe-recon-v2",
+    "modelConfigurationHash": "d86cddc44ab8a0b3f02b3daf47ea5fee3ad48682e07edc9301356c1dfd9d67be",
+    "policyVersion": "2.0.0",
+    "attestationTtlMs": 60000
+  }
+}

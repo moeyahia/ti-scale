@@ -5,6 +5,8 @@ import type { McpServerConnectionConfig } from "./types";
 const ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const ENVIRONMENT_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
+const CREDENTIAL_ID_PATTERN = /^[A-Za-z0-9_.-]{1,128}$/;
+const AUTH_SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9._~-]{0,31}$/;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const RESERVED_PROTOCOL_HEADERS = new Set([
   "connection",
@@ -61,7 +63,14 @@ const streamableHttpSchema = commonSchema.extend({
   headerEnvironment: z.record(
     z.string().regex(HEADER_NAME_PATTERN),
     z.string().regex(ENVIRONMENT_NAME_PATTERN),
-  ),
+  ).optional(),
+  headerCredentials: z.record(
+    z.string().regex(HEADER_NAME_PATTERN),
+    z.object({
+      id: z.string().regex(CREDENTIAL_ID_PATTERN),
+      scheme: z.string().regex(AUTH_SCHEME_PATTERN).optional(),
+    }).strict(),
+  ).optional(),
 }).strict();
 
 const stdioSchema = commonSchema.extend({
@@ -137,7 +146,9 @@ export const McpServerConnectionConfigSchema = z.discriminatedUnion("transport",
         message: "Remote MCP endpoints require HTTPS; HTTP is allowed only for an explicitly enabled loopback endpoint",
       });
     }
-    const headers = Object.keys(config.headerEnvironment);
+    const environmentHeaders = Object.keys(config.headerEnvironment ?? {});
+    const credentialHeaders = Object.keys(config.headerCredentials ?? {});
+    const headers = [...environmentHeaders, ...credentialHeaders];
     if (headers.length > 128) {
       context.addIssue({
         code: "custom",
@@ -151,6 +162,15 @@ export const McpServerConnectionConfigSchema = z.discriminatedUnion("transport",
         code: "custom",
         path: ["headerEnvironment", reserved],
         message: `${reserved} is controlled by the MCP transport and cannot be overridden`,
+      });
+    }
+    const duplicate = environmentHeaders.find((header) =>
+      credentialHeaders.some((candidate) => candidate.toLowerCase() === header.toLowerCase()));
+    if (duplicate) {
+      context.addIssue({
+        code: "custom",
+        path: ["headerCredentials", duplicate],
+        message: `${duplicate} cannot use both environment and systemd credential sources`,
       });
     }
   } else if (new Set(config.environmentVariableNames).size !== config.environmentVariableNames.length) {

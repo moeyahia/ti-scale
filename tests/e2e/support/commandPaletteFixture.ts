@@ -13,6 +13,7 @@ export interface CommandPaletteFixture {
   readonly namespace: string;
   readonly search: RunInterventionRecoveryFixture;
   readonly pauseResume: RunInterventionRecoveryFixture;
+  readonly invalidResume: RunInterventionRecoveryFixture;
   readonly cancel: RunInterventionRecoveryFixture;
   readonly memoryCandidate: RunInterventionRecoveryFixture;
   readonly missionLabel: string;
@@ -75,6 +76,7 @@ export function createCommandPaletteFixture(instanceId: string): CommandPaletteF
   const namespace = normalizeFixtureNamespace(instanceId);
   const search = createRunInterventionRecoveryFixture("pause_resume", `${namespace}-search`);
   const pauseResume = createRunInterventionRecoveryFixture("pause_resume", `${namespace}-pause-resume`);
+  const invalidResume = createRunInterventionRecoveryFixture("replan", `${namespace}-invalid-resume`);
   const cancel = createRunInterventionRecoveryFixture("cancel", `${namespace}-cancel`);
   const memoryCandidate = createRunInterventionRecoveryFixture("pause_resume", `${namespace}-memory-candidate`);
   const missionToken = token(namespace, "mission");
@@ -178,6 +180,7 @@ export function createCommandPaletteFixture(instanceId: string): CommandPaletteF
     namespace,
     search,
     pauseResume,
+    invalidResume,
     cancel,
     memoryCandidate,
     missionLabel,

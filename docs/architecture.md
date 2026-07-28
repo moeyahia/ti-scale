@@ -34,7 +34,7 @@ flowchart TD
     E --> D
     V --> D
     V --> O[Obsidian-compatible Markdown vault]
-    I --> F[Artifact store]
+    I --> F[Approved artifact and script-source stores]
 ```
 
 ### Client
@@ -72,7 +72,7 @@ The vault bridge projects eligible memory nodes to Markdown with YAML frontmatte
 
 ## Execution adapter boundary
 
-Planning, provider calls, specialist assignment, and tool execution are ports, not implicit capabilities of the HTTP process. The default server currently has no attached production execution adapter. Its readiness projection reports that fact, and execution-dependent endpoints fail closed with a structured `503`.
+Planning, provider calls, specialist assignment, and tool execution are ports, not implicit capabilities of the HTTP process. The default server mounts a deterministic manual-only Guided planner whose execution port is deliberately unable to contact a target, provider, tool, or MCP server. It has no Autonomous or generic tool execution adapter. Its readiness projection reports those distinctions, and unavailable execution-dependent endpoints fail closed with a structured `503`.
 
 An execution integration is acceptable only when it can provide fresh, typed readiness for:
 

@@ -15,6 +15,7 @@ import type {
   SavedMissionView,
 } from "../../domain/types/commandOs";
 import { Button, ButtonLink, Card, EmptyState, ErrorPanel, LoadingPanel, PageHeader, StatusPill } from "../../design-system/components/Primitives";
+import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
 import { useModalFocus } from "../../design-system/hooks/useModalFocus";
 import { AppLink } from "../../app/router/navigation";
 import { CursorControls, FilterForm, SelectFilter, useUrlFilters } from "../runs/OperationalSurface";
@@ -35,6 +36,37 @@ const SEVERITY_OPTIONS = ["informational", "low", "medium", "high", "critical"];
 
 function mutationKey(prefix: string): string {
   return `${prefix}-${globalThis.crypto.randomUUID()}`;
+}
+
+type SavedViewAttempt =
+  | {
+      readonly kind: "save";
+      readonly expectedVersion: number;
+      readonly idempotencyKey: string;
+      readonly name: string;
+      readonly state: MissionPortfolioState;
+    }
+  | {
+      readonly kind: "delete";
+      readonly expectedVersion: number;
+      readonly idempotencyKey: string;
+      readonly viewId: string;
+      readonly viewName: string;
+    };
+
+interface SavedViewFailure {
+  readonly attempt: SavedViewAttempt;
+  readonly error: Error;
+}
+
+interface BulkAttempt {
+  readonly mode: "archive" | "export";
+  readonly idempotencyKey: string;
+  readonly missions: MissionSummary[];
+}
+
+function samePortfolioState(left: MissionPortfolioState, right: MissionPortfolioState): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function missionHref(mission: MissionSummary): string {
@@ -150,14 +182,24 @@ function MissionBoard({ missions, selected, onSelected }: {
   );
 }
 
-function BulkDialog({ mode, missions, pending, onCancel, onConfirm }: {
+function BulkDialog({ mode, missions, pending, error, onCancel, onConfirm }: {
   mode: "archive" | "export";
   missions: MissionSummary[];
   pending: boolean;
+  error?: Error;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   const modalFocus = useModalFocus(true, onCancel, pending);
+  useEffect(() => {
+    if (!error || pending) return undefined;
+    const frame = requestAnimationFrame(() => {
+      modalFocus.dialogRef.current
+        ?.querySelector<HTMLElement>("[data-bulk-confirm]")
+        ?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [error, modalFocus.dialogRef, pending]);
   return (
     <div className="mission-bulk-modal" role="presentation">
       <section ref={modalFocus.dialogRef} role="dialog" aria-modal="true" aria-labelledby="mission-bulk-title" aria-describedby="mission-bulk-description" className="mission-bulk-dialog" tabIndex={-1} onKeyDown={modalFocus.onDialogKeyDown}>
@@ -167,7 +209,8 @@ function BulkDialog({ mode, missions, pending, onCancel, onConfirm }: {
           ? "Only durably terminal missions will archive. Active runs, actions, or assignments remain unchanged and will be reported as ineligible."
           : "The export includes bounded mission metadata, hashes, counts, and timestamps. Evidence blobs, objectives, target values, and confidential payloads are excluded."}</p>
         <ul>{missions.map((mission) => <li key={mission.id}><strong>{mission.title}</strong><code>{mission.id}</code><span>{mission.status}</span></li>)}</ul>
-        <div className="mission-bulk-actions"><Button data-modal-initial-focus variant="secondary" disabled={pending} onClick={onCancel}>Cancel</Button><Button variant={mode === "archive" ? "danger" : "primary"} disabled={pending} onClick={onConfirm}>{pending ? "Working…" : `Confirm ${mode}`}</Button></div>
+        {error && <ErrorPanel title={mode === "archive" ? "Mission archive did not complete" : "Mission metadata export did not complete"} error={error} />}
+        <div className="mission-bulk-actions"><Button data-modal-initial-focus variant="secondary" disabled={pending} onClick={onCancel}>Cancel</Button><Button data-bulk-confirm variant={mode === "archive" ? "danger" : "primary"} disabled={pending} onClick={onConfirm}>{pending ? "Working…" : error ? `Retry ${mode}` : `Confirm ${mode}`}</Button></div>
       </section>
     </div>
   );
@@ -196,10 +239,10 @@ export default function MissionPortfolioPage() {
   }, signal));
   const saved = useQuery("ti-scale-mission-saved-views", fetchSavedMissionViews, { staleTime: 5_000 });
   const [viewName, setViewName] = useState("");
-  const [viewError, setViewError] = useState<Error>();
+  const [viewFailure, setViewFailure] = useState<SavedViewFailure>();
   const [viewPending, setViewPending] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [bulkMode, setBulkMode] = useState<"archive" | "export" | null>(null);
+  const [bulkAttempt, setBulkAttempt] = useState<BulkAttempt>();
   const [bulkPending, setBulkPending] = useState(false);
   const [bulkError, setBulkError] = useState<Error>();
   const [bulkResult, setBulkResult] = useState<MissionBulkArchiveResult | MissionBulkExportResult>();
@@ -209,33 +252,67 @@ export default function MissionPortfolioPage() {
     setSelected((current) => new Set([...current].filter((missionId) => visible.has(missionId))));
   }, [missions.data]);
 
-  const saveView = async (event: FormEvent) => {
-    event.preventDefault();
-    const name = viewName.trim();
-    if (!name || !saved.data) return;
-    setViewPending(true); setViewError(undefined);
+  const executeViewAttempt = async (attempt: SavedViewAttempt) => {
+    setViewPending(true); setViewFailure(undefined);
     try {
-      await saveMissionView({ expectedVersion: saved.data.version, name, state }, mutationKey("mission-view"));
-      setViewName("");
+      if (attempt.kind === "save") {
+        await saveMissionView({
+          expectedVersion: attempt.expectedVersion,
+          name: attempt.name,
+          state: attempt.state,
+        }, attempt.idempotencyKey);
+        setViewName((current) => current.trim() === attempt.name ? "" : current);
+      } else {
+        await deleteMissionView(
+          attempt.viewId,
+          attempt.expectedVersion,
+          attempt.idempotencyKey,
+        );
+      }
       saved.refresh();
     } catch (cause) {
-      setViewError(cause instanceof Error ? cause : new Error("Saved view failed"));
+      setViewFailure({
+        attempt,
+        error: cause instanceof Error ? cause : new Error(
+          attempt.kind === "save" ? "Saved view failed" : "Saved view deletion failed",
+        ),
+      });
     } finally {
       setViewPending(false);
     }
   };
 
+  const saveView = async (event: FormEvent) => {
+    event.preventDefault();
+    const name = viewName.trim();
+    if (!name || !saved.data) return;
+    const failedAttempt = viewFailure?.attempt;
+    const attempt = failedAttempt?.kind === "save"
+      && failedAttempt.name === name
+      && samePortfolioState(failedAttempt.state, state)
+      ? failedAttempt
+      : {
+          kind: "save" as const,
+          expectedVersion: saved.data.version,
+          idempotencyKey: mutationKey("mission-view"),
+          name,
+          state,
+        };
+    await executeViewAttempt(attempt);
+  };
+
   const removeView = async (view: SavedMissionView) => {
     if (!saved.data) return;
-    setViewPending(true); setViewError(undefined);
-    try {
-      await deleteMissionView(view.id, saved.data.version, mutationKey("mission-view-delete"));
-      saved.refresh();
-    } catch (cause) {
-      setViewError(cause instanceof Error ? cause : new Error("Saved view deletion failed"));
-    } finally {
-      setViewPending(false);
-    }
+    const failedAttempt = viewFailure?.attempt;
+    await executeViewAttempt(failedAttempt?.kind === "delete" && failedAttempt.viewId === view.id
+      ? failedAttempt
+      : {
+          kind: "delete",
+          expectedVersion: saved.data.version,
+          idempotencyKey: mutationKey("mission-view-delete"),
+          viewId: view.id,
+          viewName: view.name,
+        });
   };
 
   const applyView = (view: SavedMissionView) => filters.set({
@@ -253,18 +330,29 @@ export default function MissionPortfolioPage() {
   const allVisibleSelected = visibleMissions.length > 0 && visibleMissions.every((mission) => selected.has(mission.id));
   const selectedMissions = visibleMissions.filter((mission) => selected.has(mission.id));
 
+  const openBulk = (mode: "archive" | "export") => {
+    if (selectedMissions.length === 0) return;
+    setBulkError(undefined);
+    setBulkResult(undefined);
+    setBulkAttempt({
+      mode,
+      idempotencyKey: mutationKey(`mission-bulk-${mode}`),
+      missions: selectedMissions,
+    });
+  };
+
   const confirmBulk = async () => {
-    if (!bulkMode || selectedMissions.length === 0) return;
+    if (!bulkAttempt || bulkAttempt.missions.length === 0) return;
     setBulkPending(true); setBulkError(undefined); setBulkResult(undefined);
     try {
-      const ids = selectedMissions.map((mission) => mission.id);
-      if (bulkMode === "archive") {
-        const result = await archiveMissions(ids, mutationKey("mission-bulk-archive"));
+      const ids = bulkAttempt.missions.map((mission) => mission.id);
+      if (bulkAttempt.mode === "archive") {
+        const result = await archiveMissions(ids, bulkAttempt.idempotencyKey);
         setBulkResult(result);
         missions.refresh();
         setSelected(new Set());
       } else {
-        const result = await exportMissionMetadata(ids, mutationKey("mission-bulk-export"));
+        const result = await exportMissionMetadata(ids, bulkAttempt.idempotencyKey);
         setBulkResult(result);
         const blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
@@ -274,7 +362,7 @@ export default function MissionPortfolioPage() {
         link.click();
         URL.revokeObjectURL(url);
       }
-      setBulkMode(null);
+      setBulkAttempt(undefined);
     } catch (cause) {
       setBulkError(cause instanceof Error ? cause : new Error("Bulk operation failed"));
     } finally {
@@ -296,7 +384,7 @@ export default function MissionPortfolioPage() {
         <SelectFilter filters={filters} name="status" label="Run state" options={STATUS_OPTIONS.map((status) => ({ value: status, label: status.replaceAll("_", " ") }))} />
         <label><span>Engagement</span><input value={state.engagement} onChange={(event) => filters.set({ engagement: event.target.value || undefined })} /></label>
         <label><span>Target</span><input value={state.target} onChange={(event) => filters.set({ target: event.target.value || undefined })} /></label>
-        <label><span>View</span><select value={state.view} onChange={(event) => filters.set({ view: event.target.value === "board" ? "board" : undefined })}><option value="table">Table</option><option value="board">Compact board</option></select></label>
+        <label><span>View</span><TitaniumSelect value={state.view} onChange={(event) => filters.set({ view: event.target.value === "board" ? "board" : undefined })}><option value="table">Table</option><option value="board">Compact board</option></TitaniumSelect></label>
         <details className="mission-advanced-filters">
           <summary>More canonical filters</summary>
           <div>
@@ -315,21 +403,20 @@ export default function MissionPortfolioPage() {
 
       <section className="mission-saved-views" aria-labelledby="mission-saved-title">
         <div><strong id="mission-saved-title">Synchronized saved views</strong><span>Actor-scoped filter and layout settings are versioned on the Ti-Scale server. Mission and evidence content is never copied into a view.</span></div>
-        <form onSubmit={(event) => void saveView(event)}><label><span className="os-visually-hidden">Saved view name</span><input maxLength={80} value={viewName} onChange={(event) => setViewName(event.target.value)} placeholder="Name current filters" /></label><Button type="submit" variant="secondary" disabled={!viewName.trim() || viewPending || !saved.data}>Save view</Button></form>
+        <form onSubmit={(event) => void saveView(event)}><label><span className="os-visually-hidden">Saved view name</span><input maxLength={80} value={viewName} onChange={(event) => { setViewName(event.target.value); if (viewFailure?.attempt.kind === "save") setViewFailure(undefined); }} placeholder="Name current filters" /></label><Button type="submit" variant="secondary" disabled={!viewName.trim() || viewPending || !saved.data}>Save view</Button></form>
         {saved.isLoading && <span role="status">Loading saved views…</span>}
         {saved.data && saved.data.items.length > 0 && <ul>{saved.data.items.map((view) => <li key={view.id}><button type="button" onClick={() => applyView(view)}>{view.name}</button><button type="button" disabled={viewPending} aria-label={`Delete saved view ${view.name}`} onClick={() => void removeView(view)}>×</button></li>)}</ul>}
-        {viewError && <div className="mission-inline-error" role="alert">{viewError.message}</div>}
+        {viewFailure && <div className="mission-saved-failure"><ErrorPanel title={viewFailure.attempt.kind === "save" ? "Saved view was not saved" : `Saved view ${viewFailure.attempt.viewName} was not deleted`} error={viewFailure.error} /></div>}
       </section>
 
       {missions.data && missions.data.items.length > 0 && (
         <section className="mission-bulk-toolbar" aria-label="Mission selection actions">
           <label><input type="checkbox" checked={allVisibleSelected} onChange={(event) => setSelected(event.target.checked ? new Set(visibleMissions.map((mission) => mission.id)) : new Set())} /><span>Select all {visibleMissions.length} visible missions</span></label>
           <strong>{selected.size} selected</strong>
-          <Button variant="secondary" disabled={selected.size === 0} onClick={() => setBulkMode("export")}>Export redacted metadata</Button>
-          <Button variant="danger" disabled={selected.size === 0} onClick={() => setBulkMode("archive")}>Archive terminal missions</Button>
+          <Button variant="secondary" disabled={selected.size === 0} onClick={() => openBulk("export")}>Export redacted metadata</Button>
+          <Button variant="danger" disabled={selected.size === 0} onClick={() => openBulk("archive")}>Archive terminal missions</Button>
         </section>
       )}
-      {bulkError && <ErrorPanel title="Mission bulk operation failed" error={bulkError} />}
       {bulkResult && <div className="mission-bulk-result" role="status"><strong>Bulk operation recorded</strong><span>{bulkResult.outcomes.filter((outcome) => outcome.status === "archived" || outcome.status === "exported").length} succeeded; {bulkResult.outcomes.filter((outcome) => outcome.status === "ineligible" || outcome.status === "not_found").length} unchanged.</span><details><summary>Per-mission outcomes</summary><ul>{bulkResult.outcomes.map((outcome) => <li key={outcome.missionId}><code>{outcome.missionId}</code> · {outcome.status} · {outcome.reason}</li>)}</ul></details></div>}
 
       {missions.isLoading && <LoadingPanel label="Loading mission portfolio" />}
@@ -363,7 +450,7 @@ export default function MissionPortfolioPage() {
         </Card>
       )}
       {missions.data && <CursorControls cursor={filters.values.cursor} nextCursor={missions.data.nextCursor} onChange={(cursor) => filters.set({ cursor }, { resetCursor: false, replace: false })} />}
-      {bulkMode && <BulkDialog mode={bulkMode} missions={selectedMissions} pending={bulkPending} onCancel={() => setBulkMode(null)} onConfirm={() => void confirmBulk()} />}
+      {bulkAttempt && <BulkDialog mode={bulkAttempt.mode} missions={bulkAttempt.missions} pending={bulkPending} error={bulkError} onCancel={() => { setBulkAttempt(undefined); setBulkError(undefined); }} onConfirm={() => void confirmBulk()} />}
     </div>
   );
 }

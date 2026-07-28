@@ -6,6 +6,7 @@ import {
   existsSync,
   fstatSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -14,6 +15,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
 } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import type { SqliteDatabase } from "../db/types";
@@ -24,16 +26,27 @@ import {
   type MemoryControlPolicy,
 } from "../memory/MemoryControlPolicy";
 import {
+  isTerminalAttackKnowledgeReviewCandidate,
+  TERMINAL_ATTACK_KNOWLEDGE_REVIEW_NODE_TYPES,
+  TERMINAL_ATTACK_KNOWLEDGE_REVIEW_SCHEMA,
+} from "../memory/TerminalAttackKnowledgeReview";
+import { assertIdentifier } from "../memory/validation";
+import {
   assertReusableMemoryText,
+  ATTACK_CENTRIC_REUSABLE_NODE_TYPES,
+  isAttackCentricReusableNodeType,
   MEMORY_LIFECYCLE_STATES,
   MEMORY_NODE_TYPES,
   MEMORY_SCOPE_KINDS,
   MEMORY_SENSITIVITIES,
   MemoryRepository,
+  HistoricalReportedOutcomeService,
+  ReusableKnowledgeOutcomeService,
   REUSABLE_MEMORY_LIMITS,
   ReusableMemorySafetyError,
   type CreateMemoryEdgeInput,
   type ForgetResult,
+  type MemoryEdge,
   type MemoryNode,
   type MemoryProvenance,
   type ProvenanceSource,
@@ -41,6 +54,7 @@ import {
 import {
   OBSIDIAN_V2_4_VAULT_FOLDERS,
   parseObsidianNote,
+  projectPrivateProvenanceIds,
   renderObsidianNote,
   vaultRelativePath,
 } from "./ObsidianMarkdown";
@@ -51,6 +65,15 @@ import {
 } from "./VaultPathPolicy";
 import { obsidianDeepLink } from "./ObsidianDeepLink";
 import { writePortableZip, type PortableZipEntry } from "./PortableZip";
+import { ObsidianPluginManager } from "./ObsidianPluginManager";
+import { activeVaultPathFingerprint } from "./ActiveVaultComposition";
+import {
+  OPERATOR_PROFILE_VAULT_FOLDER,
+  isOperatorProfileVaultNodeAllowed,
+  operatorProfileVaultOperatorId,
+  operatorProfileVaultEligibleNodeIds,
+  vaultScopeIncludesOperatorProfile,
+} from "./OperatorProfileVaultProjection";
 import type {
   VaultConnection,
   VaultBulkExportCounts,
@@ -61,6 +84,7 @@ import type {
   VaultImportResult,
   VaultNote,
   VaultPortableExport,
+  VaultPortableExportOptions,
   VaultSyncVerification,
   VaultSyncVerificationItem,
   VaultSyncResult,
@@ -97,10 +121,12 @@ export interface BridgeOptions {
   readonly createId?: (prefix: string) => string;
   /** Test seam immediately before a managed file is opened with O_NOFOLLOW. */
   readonly beforeManagedRead?: (absolutePath: string) => void;
-  /** Test seam after a durable quarantine intent and before the guarded copy. */
+  /** Legacy-named test seam after a durable quarantine intent and before the guarded move. */
   readonly beforeQuarantineCopy?: (absolutePath: string) => void;
-  /** Test seam after the copy is durable but before its marker/state commit. */
+  /** Legacy-named test seam after the move is durable but before its marker/state commit. */
   readonly afterQuarantineCopy?: (intentId: string) => void;
+  /** Pinned-release test/deployment seam used only for optional portable handoff. */
+  readonly brainAtlasPluginManager?: ObsidianPluginManager;
 }
 
 type Mutable<T> = { -readonly [Key in keyof T]: T[Key] };
@@ -136,9 +162,40 @@ const MAX_RECOVERY_NOTE_BYTES = 2 * 1024 * 1024;
 // engagement corpus to be projected in one resumable pass. The eligible
 // imported corpus is already above the previous 50,000-note ceiling.
 const MAX_BULK_EXPORT_NOTES = 100_000;
+const MAX_SYNC_SCOPE_NODE_IDS = 10_000;
 const MAX_BULK_EXPORT_CONCURRENCY = 32;
 const MAX_BULK_EXPORT_ISSUES = 100;
 const MAX_ARTIFACT_BACKLINKS = 8;
+const REUSABLE_VAULT_NODE_TYPES = [
+  ...ATTACK_CENTRIC_REUSABLE_NODE_TYPES,
+] as const satisfies readonly MemoryNode["nodeType"][];
+const REUSABLE_VAULT_NODE_TYPE_SET: ReadonlySet<string> = new Set(REUSABLE_VAULT_NODE_TYPES);
+const RUNTIME_CAPABILITY_VAULT_NODE_TYPE_SET: ReadonlySet<string> =
+  new Set(["agent", "tool", "mcp_capability"]);
+const RUNTIME_CAPABILITY_MEMORY_SCHEMA =
+  "ti-scale.runtime-capability-memory-projection.v1";
+
+function isCurrentRuntimeCapabilityProjectionNode(node: MemoryNode): boolean {
+  if (!RUNTIME_CAPABILITY_VAULT_NODE_TYPE_SET.has(node.nodeType)) return false;
+  const projection = node.retentionPolicy.runtimeCapabilityProjection;
+  const typedDecision = node.retentionPolicy.agentToolDecision;
+  const currentProjection = projection !== null
+    && typeof projection === "object"
+    && !Array.isArray(projection)
+    && (projection as Record<string, unknown>).schemaVersion
+      === RUNTIME_CAPABILITY_MEMORY_SCHEMA
+    && (projection as Record<string, unknown>).status === "current";
+  const typed = typedDecision !== null
+    && typeof typedDecision === "object"
+    && !Array.isArray(typedDecision)
+    && (typedDecision as Record<string, unknown>).schemaVersion === "1";
+  return node.authorType === "system"
+    && node.authorId === "system:runtime-capability-memory-projector"
+    && node.scope.kind === "global"
+    && node.lifecycleStatus === "verified"
+    && currentProjection
+    && typed;
+}
 const ATTACHMENT_EXTENSIONS = new Map<string, string>([
   [".avif", "image/avif"],
   [".csv", "text/csv"],
@@ -159,6 +216,21 @@ function hashText(value: string): string {
 
 function hashBytes(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function canonicalAuditValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalAuditValue).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .filter((key) => record[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${canonicalAuditValue(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
 function sameFileIdentity(
@@ -231,6 +303,9 @@ function boundedExportError(error: unknown): string {
   if (message.includes("outside the vault connection")) {
     return "Canonical memory is outside this vault connection's explicit sync scope";
   }
+  if (message.includes("private operational provenance")) {
+    return "Private operational records are not exportable to the reusable Attack Knowledge Vault";
+  }
   if (message.includes("synchronization is not permitted") || message.includes("memory control policy")) {
     return "Obsidian synchronization is disabled by the current memory control policy";
   }
@@ -276,7 +351,7 @@ export class VaultManagedNoteInspectionError extends Error {
 interface ManagedNoteSnapshot {
   readonly bytes: Buffer;
   readonly source: string;
-  /** Hash of exact bytes, used only as the quarantine compare-and-copy guard. */
+  /** Hash of exact bytes, used only as the quarantine compare-and-move guard. */
   readonly exactHash: string;
 }
 
@@ -332,6 +407,7 @@ export class ObsidianVaultBridge {
   readonly #beforeManagedRead?: (absolutePath: string) => void;
   readonly #beforeQuarantineCopy?: (absolutePath: string) => void;
   readonly #afterQuarantineCopy?: (intentId: string) => void;
+  readonly #brainAtlasPlugins: ObsidianPluginManager;
 
   constructor(
     database: SqliteDatabase,
@@ -347,6 +423,8 @@ export class ObsidianVaultBridge {
     this.#beforeManagedRead = options.beforeManagedRead;
     this.#beforeQuarantineCopy = options.beforeQuarantineCopy;
     this.#afterQuarantineCopy = options.afterQuarantineCopy;
+    this.#brainAtlasPlugins = options.brainAtlasPluginManager
+      ?? new ObsidianPluginManager({ database, pathPolicy });
   }
 
   #now(): string {
@@ -374,6 +452,56 @@ export class ObsidianVaultBridge {
       : ["confirmed", "verified"];
   }
 
+  #candidateReviewNodeTypes(connection: VaultConnection | undefined): readonly string[] {
+    if (!connection) return [];
+    return this.#connectionScopeValues(
+      connection,
+      "candidateReviewNodeTypes",
+      TERMINAL_ATTACK_KNOWLEDGE_REVIEW_NODE_TYPES,
+    ) ?? [];
+  }
+
+  #candidateReviewProjectionAllowed(
+    connection: VaultConnection | undefined,
+    node: MemoryNode,
+  ): boolean {
+    return Boolean(
+      connection
+      && this.#candidateReviewNodeTypes(connection).includes(node.nodeType)
+      && isTerminalAttackKnowledgeReviewCandidate(node),
+    );
+  }
+
+  #projectionLifecycleAllowed(
+    connection: VaultConnection | undefined,
+    node: MemoryNode,
+  ): boolean {
+    return this.projectionLifecycleStatuses().includes(node.lifecycleStatus)
+      || this.#candidateReviewProjectionAllowed(connection, node);
+  }
+
+  #edgeProjectionAllowed(
+    connection: VaultConnection | undefined,
+    edge: MemoryEdge,
+    source: MemoryNode,
+    target: MemoryNode,
+  ): boolean {
+    if (this.projectionLifecycleStatuses().includes(edge.lifecycleStatus)) return true;
+    return Boolean(
+      connection
+      && edge.lifecycleStatus === "candidate"
+      && edge.scope.kind === "global"
+      && edge.authorType === "agent"
+      && edge.authorId === "run-evaluator"
+      && (
+        this.#candidateReviewProjectionAllowed(connection, source)
+        || this.#candidateReviewProjectionAllowed(connection, target)
+      )
+      && this.#projectionLifecycleAllowed(connection, source)
+      && this.#projectionLifecycleAllowed(connection, target),
+    );
+  }
+
   assertVaultSyncAllowed(): MemoryControlPolicy {
     const policy = this.memoryControlPolicy();
     if (!policy.enabled || policy.obsidianSyncScope === "disabled") {
@@ -382,9 +510,33 @@ export class ObsidianVaultBridge {
     return policy;
   }
 
-  #assertProjectionAllowed(node: MemoryNode): void {
+  #nodeProjectionAllowed(connection: VaultConnection | undefined, node: MemoryNode): boolean {
+    if (
+      REUSABLE_VAULT_NODE_TYPE_SET.has(node.nodeType)
+      && !RUNTIME_CAPABILITY_VAULT_NODE_TYPE_SET.has(node.nodeType)
+    ) return true;
+    if (RUNTIME_CAPABILITY_VAULT_NODE_TYPE_SET.has(node.nodeType)) {
+      return isCurrentRuntimeCapabilityProjectionNode(node);
+    }
+    const operatorId = connection
+      ? operatorProfileVaultOperatorId(connection.syncScope)
+      : undefined;
+    return Boolean(
+      connection
+      && vaultScopeIncludesOperatorProfile(connection.syncScope)
+      && operatorId
+      && isOperatorProfileVaultNodeAllowed(this.#database, node, operatorId),
+    );
+  }
+
+  #assertProjectionAllowed(node: MemoryNode, connection?: VaultConnection): void {
     this.assertVaultSyncAllowed();
-    if (!this.projectionLifecycleStatuses().includes(node.lifecycleStatus)) {
+    if (!this.#nodeProjectionAllowed(connection, node)) {
+      throw new Error(
+        `Memory node type ${node.nodeType} is private operational provenance and cannot be projected as reusable Vault knowledge`,
+      );
+    }
+    if (!this.#projectionLifecycleAllowed(connection, node)) {
       throw new Error(
         `Memory lifecycle ${node.lifecycleStatus} is not permitted by the current Obsidian projection scope`,
       );
@@ -411,6 +563,16 @@ export class ObsidianVaultBridge {
     this.assertVaultSyncAllowed();
     const result = this.#paths.verifyExistingRoundTrip(vaultPath);
     return { ...result, checkedAt: this.#now() };
+  }
+
+  /** Create only the reviewed Operator Profile category on an existing Vault. */
+  ensureOperatorProfileFolder(connectionId: string): { readonly folder: typeof OPERATOR_PROFILE_VAULT_FOLDER; readonly created: boolean } {
+    const connection = this.requireConnection(connectionId);
+    this.verifyExistingVaultPath(connection.vaultPath);
+    const path = this.#paths.resolveRelative(connection.vaultPath, OPERATOR_PROFILE_VAULT_FOLDER, true);
+    const created = !existsSync(path);
+    mkdirSync(path, { recursive: true, mode: 0o700 });
+    return { folder: OPERATOR_PROFILE_VAULT_FOLDER, created };
   }
 
   connect(input: {
@@ -455,6 +617,9 @@ export class ObsidianVaultBridge {
     const row = this.#database.prepare("SELECT * FROM vault_connections WHERE id = ?").get(id) as ConnectionRow | undefined;
     if (!row) throw new Error(`Vault connection not found: ${id}`);
     const connection = connectionFromRow(row);
+    if (connection.status === "disconnected") {
+      throw new Error(`Vault connection is disconnected: ${id}`);
+    }
     this.#paths.resolveExistingVault(connection.vaultPath);
     return connection;
   }
@@ -473,7 +638,7 @@ export class ObsidianVaultBridge {
     readonly sourceHash: string;
   } {
     this.assertVaultSyncAllowed();
-    const connection = this.requireExistingConnection(connectionId);
+    const connection = this.requireConnection(connectionId);
     const path = this.#paths.resolveRelative(connection.vaultPath, relativePath);
     const snapshot = this.#readManagedNoteSnapshot(path);
     try {
@@ -481,6 +646,7 @@ export class ObsidianVaultBridge {
       const note = parseObsidianNote(snapshot.source);
       this.#assertVaultNoteSafe(note);
       this.#assertConnectionProjectionAllowed(connection, note);
+      if (this.#memory.getNode(note.id)) this.#assertCanonicalPrivateProvenance(note.id, note);
       return { note, contentHash: hashText(snapshot.source), sourceHash: snapshot.exactHash };
     } catch (error) {
       throw new VaultManagedNoteInspectionError(
@@ -492,10 +658,9 @@ export class ObsidianVaultBridge {
   }
 
   /**
-   * Preserve an invalid operator note through a guarded, content-free copy.
-   * The source is intentionally never renamed or deleted by recovery. A
-   * durable intent written before the copy allows the next run to reconcile a
-   * crash after fsync without guessing which file won.
+   * Move an invalid operator note into quarantine without retaining a second
+   * restorable byte copy. A durable content-free intent written before the
+   * rename lets the next run reconcile a crash after fsync.
    */
   quarantineManagedNote(
     connectionId: string,
@@ -504,14 +669,26 @@ export class ObsidianVaultBridge {
     expectedContentHash: string,
   ): string {
     this.assertVaultSyncAllowed();
-    const connection = this.requireExistingConnection(connectionId);
+    const connection = this.requireConnection(connectionId);
     const path = this.#paths.resolveRelative(connection.vaultPath, relativePath);
     const snapshot = this.#readManagedNoteSnapshot(path);
     if (snapshot.exactHash !== expectedContentHash) throw new VaultDestinationChangedError();
 
     const sourcePathHash = hashText(relativePath);
     const prior = this.#matchingQuarantineIntent(connection.id, sourcePathHash, expectedContentHash);
-    if (prior?.status === "committed") return prior.quarantineRelative;
+    if (prior?.status === "committed") {
+      const quarantinePath = this.#paths.resolveRelative(connection.vaultPath, prior.quarantineRelative);
+      if (existsSync(path) && existsSync(quarantinePath)) {
+        const current = this.#readManagedNoteSnapshot(path, false);
+        const quarantined = this.#readManagedNoteSnapshot(quarantinePath, false);
+        if (current.exactHash !== expectedContentHash || quarantined.exactHash !== expectedContentHash) {
+          throw new VaultDestinationChangedError();
+        }
+        unlinkSync(path);
+        this.#fsyncDirectory(dirname(path));
+      }
+      return prior.quarantineRelative;
+    }
     const intent = prior ?? this.#createQuarantineIntent(
       connection,
       relativePath,
@@ -524,17 +701,23 @@ export class ObsidianVaultBridge {
       this.#beforeQuarantineCopy?.(path);
       const publishSnapshot = this.#readManagedNoteSnapshot(path, false);
       if (publishSnapshot.exactHash !== expectedContentHash) throw new VaultDestinationChangedError();
-      const copyPath = this.#paths.resolveRelative(connection.vaultPath, intent.quarantineRelative);
-      if (!existsSync(copyPath)) {
-        this.#paths.atomicWriteBytes(connection.vaultPath, intent.quarantineRelative, publishSnapshot.bytes, {
-          exists: false,
-        });
+      const quarantinePath = this.#paths.resolveRelative(connection.vaultPath, intent.quarantineRelative, true);
+      if (!existsSync(quarantinePath)) {
+        renameSync(path, quarantinePath);
+        this.#fsyncDirectory(dirname(path));
+        this.#fsyncDirectory(dirname(quarantinePath));
+      } else if (existsSync(path)) {
+        const existing = this.#readManagedNoteSnapshot(quarantinePath, false);
+        if (existing.exactHash !== expectedContentHash) {
+          throw new Error("Existing quarantine destination failed content verification");
+        }
+        unlinkSync(path);
+        this.#fsyncDirectory(dirname(path));
       }
-      const copied = this.#readManagedNoteSnapshot(copyPath, false);
-      if (copied.exactHash !== expectedContentHash) {
-        throw new Error("Quarantine copy failed content verification");
+      const quarantined = this.#readManagedNoteSnapshot(quarantinePath, false);
+      if (quarantined.exactHash !== expectedContentHash) {
+        throw new Error("Quarantine move failed content verification");
       }
-      this.#fsyncDirectory(dirname(copyPath));
       this.#afterQuarantineCopy?.(intent.id);
       this.#commitQuarantineIntent(connection, intent);
       return intent.quarantineRelative;
@@ -544,21 +727,21 @@ export class ObsidianVaultBridge {
     }
   }
 
-  /** Finish verified quarantine copies left between fsync and SQLite commit. */
+  /** Finish verified quarantine moves left between fsync and SQLite commit. */
   recoverQuarantineIntents(connectionId: string): VaultQuarantineRecovery {
-    const connection = this.requireExistingConnection(connectionId);
+    const connection = this.requireConnection(connectionId);
     let recovered = 0;
     let unresolved = 0;
     for (const intent of this.#quarantineIntents(connectionId).filter((item) => item.status !== "committed")) {
       try {
-        const copyPath = this.#paths.resolveRelative(connection.vaultPath, intent.quarantineRelative);
-        if (!existsSync(copyPath)) {
+        const quarantinePath = this.#paths.resolveRelative(connection.vaultPath, intent.quarantineRelative);
+        if (!existsSync(quarantinePath)) {
           this.#markQuarantineIntent(intent, "recovery_required");
           unresolved += 1;
           continue;
         }
-        const copied = this.#readManagedNoteSnapshot(copyPath, false);
-        if (copied.exactHash !== intent.sourceContentHash) {
+        const quarantined = this.#readManagedNoteSnapshot(quarantinePath, false);
+        if (quarantined.exactHash !== intent.sourceContentHash) {
           this.#markQuarantineIntent(intent, "recovery_required");
           unresolved += 1;
           continue;
@@ -694,7 +877,7 @@ export class ObsidianVaultBridge {
           quarantineRelative,
           sourceContentHash,
           now,
-          "Quarantine copy is pending durable verification",
+          "Quarantine move is pending durable verification",
         );
       }
       this.#database.prepare(`
@@ -775,10 +958,125 @@ export class ObsidianVaultBridge {
   }
 
   markConnectionHealth(connectionId: string, status: "connected" | "degraded" | "error"): void {
-    this.requireConnection(connectionId);
-    this.#database.prepare(`
-      UPDATE vault_connections SET status = ?, updated_at = ? WHERE id = ?
-    `).run(status, this.#now(), connectionId);
+    const current = this.#database.prepare(`
+      SELECT status FROM vault_connections WHERE id = ?
+    `).get(connectionId) as { readonly status: VaultConnection["status"] } | undefined;
+    if (!current) throw new Error(`Vault connection not found: ${connectionId}`);
+    if (current.status === "disconnected") {
+      throw new Error(`Vault connection is disconnected: ${connectionId}`);
+    }
+    const changed = this.#database.prepare(`
+      UPDATE vault_connections SET status = ? WHERE id = ? AND status != 'disconnected'
+    `).run(status, connectionId);
+    if (changed.changes !== 1) {
+      throw new Error("Vault connection health state changed concurrently");
+    }
+  }
+
+  /**
+   * Re-run and persist the exact existing-path filesystem lifecycle proof used
+   * by Autonomous attack-memory composition. This does not change the
+   * connection configuration version: `updated_at` is reserved for path,
+   * permission, scope, and lifecycle mutations, while ordinary health and
+   * synchronization activity use their dedicated fields.
+   */
+  refreshConnectionHealthProof(
+    connectionId: string,
+    actor = "system:vault-health-monitor",
+  ): {
+    readonly connectionId: string;
+    readonly connectionUpdatedAt: string;
+    readonly checkedAt: string;
+    readonly pathFingerprint: string;
+    readonly checks: {
+      readonly write: true;
+      readonly read: true;
+      readonly rename: true;
+      readonly delete: true;
+    };
+    readonly auditRecordId: string;
+  } {
+    this.assertVaultSyncAllowed();
+    if (!actor.trim() || Buffer.byteLength(actor, "utf8") > 256) {
+      throw new TypeError("Vault health actor is invalid");
+    }
+    const before = this.requireConnection(connectionId);
+    if (before.status !== "connected") {
+      throw new Error("Only a currently connected Vault can refresh its active health proof");
+    }
+    const health = this.verifyExistingVaultPath(before.vaultPath);
+    if (Date.parse(health.checkedAt) < Date.parse(before.updatedAt)) {
+      throw new Error("Vault health proof predates the current connection version");
+    }
+    const pathFingerprint = activeVaultPathFingerprint(health.vaultRoot);
+    const auditRecordId = `audit-vault-health-${randomUUID()}`;
+
+    inImmediateTransaction(this.#database, () => {
+      const current = this.#database.prepare(`
+        SELECT id, vault_path, status, updated_at
+        FROM vault_connections WHERE id = ?
+      `).get(connectionId) as {
+        readonly id: string;
+        readonly vault_path: string;
+        readonly status: VaultConnection["status"];
+        readonly updated_at: string;
+      } | undefined;
+      if (
+        !current
+        || current.status === "disconnected"
+        || current.vault_path !== before.vaultPath
+        || current.updated_at !== before.updatedAt
+      ) {
+        throw new Error("Vault connection changed while its health proof was being verified");
+      }
+      const previous = this.#database.prepare(
+        "SELECT record_hash FROM audit_records ORDER BY rowid DESC LIMIT 1",
+      ).get() as { readonly record_hash: string } | undefined;
+      const details = {
+        connectionId,
+        connectionUpdatedAt: before.updatedAt,
+        pathFingerprint,
+        checks: health.checks,
+      };
+      const hashMaterial = {
+        id: auditRecordId,
+        actor: actor.trim(),
+        action: "vault.health.verified",
+        resourceType: "vault_connection",
+        resourceId: connectionId,
+        reason: "Automated existing Vault write/read/rename/delete health proof",
+        details,
+        previousHash: previous?.record_hash ?? null,
+        occurredAt: health.checkedAt,
+      };
+      this.#database.prepare(`
+        INSERT INTO audit_records (
+          id, actor_type, actor_id, action, resource_type, resource_id, reason,
+          details_json, previous_hash, record_hash, occurred_at
+        ) VALUES (?, 'system', ?, 'vault.health.verified', 'vault_connection',
+          ?, ?, ?, ?, ?, ?)
+      `).run(
+        auditRecordId,
+        actor.trim(),
+        connectionId,
+        hashMaterial.reason,
+        JSON.stringify(details),
+        previous?.record_hash ?? null,
+        createHash("sha256")
+          .update(canonicalAuditValue(hashMaterial), "utf8")
+          .digest("hex"),
+        health.checkedAt,
+      );
+    });
+
+    return Object.freeze({
+      connectionId,
+      connectionUpdatedAt: before.updatedAt,
+      checkedAt: health.checkedAt,
+      pathFingerprint,
+      checks: health.checks,
+      auditRecordId,
+    });
   }
 
   deepLink(connectionId: string, relativePath?: string): string {
@@ -799,19 +1097,23 @@ export class ObsidianVaultBridge {
   } {
     const node = this.#memory.requireNode(nodeId);
     const sources = this.#database.prepare(`
-      SELECT source_id AS sourceId FROM memory_sources WHERE node_id = ? ORDER BY acquired_at
-    `).all(nodeId) as Array<{ sourceId: string }>;
+      SELECT id AS privateProvenanceId, source_id AS sourceId
+      FROM memory_sources WHERE node_id = ? ORDER BY acquired_at, id
+    `).all(nodeId) as Array<{ privateProvenanceId: string; sourceId: string }>;
     const now = this.#now();
+    const projectedEdgeLifecycleSql = this.#candidateReviewNodeTypes(connection).length > 0
+      ? "'confirmed', 'verified', 'candidate'"
+      : "'confirmed', 'verified'";
     const rows = this.#database.prepare(`
       SELECT edge.target_node_id, target_state.relative_path AS target_relative_path
-      FROM memory_edges edge
+      FROM memory_edges_safe edge
       JOIN memory_nodes target ON target.id = edge.target_node_id
       LEFT JOIN vault_sync_state target_state
         ON target_state.connection_id = ? AND target_state.node_id = edge.target_node_id
       WHERE edge.source_node_id = ?
-        AND edge.lifecycle_status IN ('confirmed', 'verified')
+        AND edge.lifecycle_status IN (${projectedEdgeLifecycleSql})
         AND (edge.expires_at IS NULL OR edge.expires_at > ?)
-        AND target.lifecycle_status IN ('confirmed', 'verified')
+        AND target.lifecycle_status IN (${projectedEdgeLifecycleSql})
         AND (target.expires_at IS NULL OR target.expires_at > ?)
       ORDER BY edge.created_at
     `).all(connection?.id ?? "", nodeId, now, now) as Array<{
@@ -821,7 +1123,7 @@ export class ObsidianVaultBridge {
     const incomingRows = node.nodeType === "artifact"
       ? this.#database.prepare(`
         SELECT edge.source_node_id, source_state.relative_path AS source_relative_path
-        FROM memory_edges edge
+        FROM memory_edges_safe edge
         JOIN memory_nodes source ON source.id = edge.source_node_id
         LEFT JOIN vault_sync_state source_state
           ON source_state.connection_id = ? AND source_state.node_id = edge.source_node_id
@@ -848,7 +1150,6 @@ export class ObsidianVaultBridge {
         .filter((edge) => (
           edge.sourceNodeId === nodeId
           && permittedTargets.has(edge.targetNodeId)
-          && permittedLifecycleStatuses.has(edge.lifecycleStatus)
         ))
         .flatMap((edge) => {
           const target = this.#memory.getNode(edge.targetNodeId);
@@ -857,7 +1158,9 @@ export class ObsidianVaultBridge {
           // live memory-control lifecycle policy excludes. Without this check,
           // a confirmed-only connection can emit a link to a verified note
           // that is intentionally absent from the same vault.
-          if (!permittedLifecycleStatuses.has(target.lifecycleStatus)) return [];
+          if (!this.#projectionLifecycleAllowed(connection, target)) return [];
+          if (!this.#edgeProjectionAllowed(connection, edge, node, target)) return [];
+          if (!this.#nodeProjectionAllowed(connection, target)) return [];
           if (connection && !this.#connectionProjectionMatches(connection, target)) return [];
           // Artifact leaves carry a safe native backlink to their producing
           // node. Omitting the mirrored high-fanout line here keeps run hubs
@@ -883,6 +1186,7 @@ export class ObsidianVaultBridge {
           const source = this.#memory.getNode(edge.sourceNodeId);
           if (!source || (allowedTargetIds && !allowedTargetIds.has(source.id))) return [];
           if (!permittedLifecycleStatuses.has(source.lifecycleStatus)) return [];
+          if (!this.#nodeProjectionAllowed(connection, source)) return [];
           if (connection && !this.#connectionProjectionMatches(connection, source)) return [];
           const relativePath = permittedSources.get(source.id);
           return [{
@@ -895,12 +1199,21 @@ export class ObsidianVaultBridge {
     // the repository mapping above supplies validated domain records.
     void rows;
     const attachments = this.#attachmentsForNode(node);
+    const outcomeTags = new ReusableKnowledgeOutcomeService(this.#database)
+      .summary(node.id).outcomeTags;
+    const reportedOutcome = new HistoricalReportedOutcomeService(this.#database)
+      .summary(node.id);
     const text = renderObsidianNote(
       node,
-      sources.map((source) => ({ sourceId: source.sourceId })),
+      sources.map((source) => ({
+        sourceId: source.sourceId,
+        privateProvenanceId: source.privateProvenanceId,
+      })),
       outgoing,
       attachments,
       backlinks,
+      outcomeTags,
+      reportedOutcome,
     );
     assertReusableMemoryText([{
       field: "vaultProjection.note",
@@ -928,13 +1241,17 @@ export class ObsidianVaultBridge {
     nodeId: string,
     raceRetry: number,
     allowedTargetIds?: ReadonlySet<string>,
+    reprojectionTrail: ReadonlySet<string> = new Set(),
   ): VaultSyncResult {
     const connection = this.requireConnection(connectionId);
     const rendered = this.renderNode(nodeId, connection, allowedTargetIds);
-    this.#assertProjectionAllowed(rendered.node);
+    this.#assertProjectionAllowed(rendered.node, connection);
     this.#assertConnectionProjectionAllowed(connection, rendered.node);
     const state = this.#stateForNode(connectionId, nodeId);
-    const relativePath = state?.relative_path ?? rendered.relativePath;
+    const pathReconciliation = state
+      ? this.#reconcileHiddenProjectionPath(connection, state, rendered.node, rendered.relativePath)
+      : { relativePath: rendered.relativePath, renamed: false };
+    const relativePath = pathReconciliation.relativePath;
     const filePath = this.#paths.resolveRelative(connection.vaultPath, relativePath, true);
     const databaseHash = hashText(rendered.text);
     const vaultBytes = existsSync(filePath) ? readFileSync(filePath) : undefined;
@@ -987,11 +1304,29 @@ export class ObsidianVaultBridge {
       if (
         (error instanceof VaultDestinationChangedError || error instanceof VaultCanonicalChangedError)
         && raceRetry < 1
-      ) return this.#exportNodeSync(connectionId, nodeId, raceRetry + 1, allowedTargetIds);
+      ) {
+        return this.#exportNodeSync(
+          connectionId,
+          nodeId,
+          raceRetry + 1,
+          allowedTargetIds,
+          reprojectionTrail,
+        );
+      }
       throw error;
     }
     this.#upsertSyncedState(connectionId, rendered.node, relativePath, databaseHash);
     this.#touchConnection(connectionId);
+    if (pathReconciliation.renamed) {
+      const nextTrail = new Set(reprojectionTrail);
+      nextTrail.add(rendered.node.id);
+      this.#reprojectInboundLinkSources(
+        connection,
+        rendered.node.id,
+        allowedTargetIds,
+        nextTrail,
+      );
+    }
     return {
       connectionId,
       nodeId,
@@ -999,6 +1334,177 @@ export class ObsidianVaultBridge {
       status: "synced",
       message: "Memory note exported atomically",
     };
+  }
+
+  /**
+   * Earlier slug generation allowed `.net-*` note names. Obsidian and common
+   * file browsers hide dot-prefixed files. Reconcile only that legacy case;
+   * ordinary title changes continue to preserve their established path.
+   *
+   * A hard-link publish keeps at least one complete copy throughout the
+   * filesystem/SQLite handoff. A changed operator note or occupied canonical
+   * path fails closed instead of being overwritten.
+   */
+  #reconcileHiddenProjectionPath(
+    connection: VaultConnection,
+    state: SyncStateRow,
+    node: MemoryNode,
+    canonicalRelativePath: string,
+  ): { readonly relativePath: string; readonly renamed: boolean } {
+    if (state.relative_path === canonicalRelativePath) {
+      return { relativePath: canonicalRelativePath, renamed: false };
+    }
+    const legacyName = basename(state.relative_path);
+    if (!legacyName.startsWith(".") || basename(canonicalRelativePath).startsWith(".")) {
+      return { relativePath: state.relative_path, renamed: false };
+    }
+    if (state.node_id !== node.id || !state.vault_content_hash) {
+      throw new Error("Hidden Vault projection cannot be renamed without an exact tracked content hash");
+    }
+    const source = this.#paths.resolveRelative(connection.vaultPath, state.relative_path);
+    const destination = this.#paths.resolveRelative(
+      connection.vaultPath,
+      canonicalRelativePath,
+      true,
+    );
+    const expectedHash = state.vault_content_hash;
+    let publishedDestination = false;
+
+    if (existsSync(source)) {
+      const metadata = lstatSync(source);
+      if (metadata.isSymbolicLink() || !metadata.isFile()) {
+        throw new Error("Hidden Vault projection is not a regular file");
+      }
+      if (hashText(readFileSync(source, "utf8")) !== expectedHash) {
+        // Preserve the operator edit at its current path. The normal sync path
+        // will classify it as Vault-ahead before any later rename is attempted.
+        return { relativePath: state.relative_path, renamed: false };
+      }
+      if (existsSync(destination)) {
+        const destinationMetadata = lstatSync(destination);
+        if (
+          destinationMetadata.isSymbolicLink()
+          || !destinationMetadata.isFile()
+          || hashText(readFileSync(destination, "utf8")) !== expectedHash
+        ) {
+          throw new VaultDestinationChangedError();
+        }
+      } else {
+        linkSync(source, destination);
+        publishedDestination = true;
+      }
+    } else if (existsSync(destination)) {
+      const destinationMetadata = lstatSync(destination);
+      if (
+        destinationMetadata.isSymbolicLink()
+        || !destinationMetadata.isFile()
+        || hashText(readFileSync(destination, "utf8")) !== expectedHash
+      ) {
+        throw new VaultDestinationChangedError();
+      }
+    } else {
+      // The tracked projection is already missing. Point recovery at the new,
+      // visible canonical path; the ordinary atomic export below recreates it.
+    }
+
+    try {
+      const result = this.#database.prepare(`
+        UPDATE vault_sync_state SET relative_path = ?
+        WHERE id = ? AND connection_id = ? AND node_id = ? AND relative_path = ?
+      `).run(
+        canonicalRelativePath,
+        state.id,
+        connection.id,
+        node.id,
+        state.relative_path,
+      );
+      if (result.changes !== 1) throw new VaultCanonicalChangedError();
+    } catch (error) {
+      if (publishedDestination && existsSync(destination)) unlinkSync(destination);
+      throw error;
+    }
+
+    if (existsSync(source)) {
+      const sourceMetadata = lstatSync(source);
+      if (
+        !sourceMetadata.isSymbolicLink()
+        && sourceMetadata.isFile()
+        && hashText(readFileSync(source, "utf8")) === expectedHash
+      ) unlinkSync(source);
+    }
+    return { relativePath: canonicalRelativePath, renamed: true };
+  }
+
+  /**
+   * A note path is part of every inbound native Obsidian wikilink. When a
+   * tracked target moves, refresh already-projected source notes immediately
+   * so the native graph never keeps pointing at the retired path. Operator
+   * edits still win: the ordinary export path leaves those notes Vault-ahead
+   * or in conflict instead of overwriting them.
+   */
+  #reprojectInboundLinkSources(
+    connection: VaultConnection,
+    targetNodeId: string,
+    allowedTargetIds: ReadonlySet<string> | undefined,
+    reprojectionTrail: ReadonlySet<string>,
+  ): void {
+    const now = this.#now();
+    const projectedLifecycleSql = this.#candidateReviewNodeTypes(connection).length > 0
+      ? "'confirmed', 'verified', 'candidate'"
+      : "'confirmed', 'verified'";
+    const rows = this.#database.prepare(`
+      SELECT DISTINCT edge.source_node_id AS sourceNodeId
+      FROM memory_edges_safe edge
+      JOIN memory_nodes source ON source.id = edge.source_node_id
+      JOIN vault_sync_state source_state
+        ON source_state.connection_id = ? AND source_state.node_id = edge.source_node_id
+      WHERE edge.target_node_id = ?
+        AND edge.lifecycle_status IN (${projectedLifecycleSql})
+        AND (edge.expires_at IS NULL OR edge.expires_at > ?)
+        AND source.lifecycle_status IN (${projectedLifecycleSql})
+        AND (source.expires_at IS NULL OR source.expires_at > ?)
+      ORDER BY edge.source_node_id
+    `).all(connection.id, targetNodeId, now, now) as Array<{ sourceNodeId: string }>;
+
+    for (const { sourceNodeId } of rows) {
+      if (
+        reprojectionTrail.has(sourceNodeId)
+        || (allowedTargetIds !== undefined && !allowedTargetIds.has(sourceNodeId))
+      ) continue;
+      const source = this.#memory.getNode(sourceNodeId);
+      if (
+        !source
+        || !this.#projectionLifecycleAllowed(connection, source)
+        || !this.#nodeProjectionAllowed(connection, source)
+        || !this.#connectionProjectionMatches(connection, source)
+      ) continue;
+
+      try {
+        this.#exportNodeSync(
+          connection.id,
+          sourceNodeId,
+          0,
+          allowedTargetIds,
+          reprojectionTrail,
+        );
+      } catch (error) {
+        // The target rename is already durable. Surface a repairable source
+        // projection state without claiming that the target migration failed
+        // or risking an overwrite of operator-authored Vault content.
+        const state = this.#stateForNode(connection.id, sourceNodeId);
+        if (state) {
+          this.#database.prepare(`
+            UPDATE vault_sync_state
+            SET status = 'database_ahead', error_message = ?, last_scanned_at = ?
+            WHERE id = ?
+          `).run(
+            `Inbound wikilink requires re-projection after a linked note moved: ${boundedExportError(error)}`,
+            this.#now(),
+            state.id,
+          );
+        }
+      }
+    }
   }
 
   /**
@@ -1024,6 +1530,22 @@ export class ObsidianVaultBridge {
     return this.#selectExportableNodeIds(connection);
   }
 
+  /**
+   * Remove only managed projections whose canonical node is no longer
+   * permitted by the live Vault policy. Canonical memory is retained.
+   */
+  purgeRevokedNodeProjections(
+    connectionId: string,
+    nodeIds: readonly string[],
+  ): readonly string[] {
+    const connection = this.requireConnection(connectionId);
+    this.assertVaultSyncAllowed();
+    return this.#purgeRevokedConnectionProjections(
+      connection,
+      new Set(nodeIds),
+    );
+  }
+
   #selectExportableNodeIds(connection: VaultConnection): readonly string[] {
     const lifecycleStatuses = this.#connectionScopeValues(
       connection,
@@ -1033,10 +1555,49 @@ export class ObsidianVaultBridge {
     const permittedLifecycle = lifecycleStatuses.filter((item) =>
       this.projectionLifecycleStatuses().includes(item as MemoryNode["lifecycleStatus"])
     );
-    if (permittedLifecycle.length === 0) return [];
+    const candidateReviewNodeTypes = this.#candidateReviewNodeTypes(connection);
+    if (permittedLifecycle.length === 0 && candidateReviewNodeTypes.length === 0) return [];
 
-    const clauses = [`lifecycle_status IN (${permittedLifecycle.map(() => "?").join(",")})`];
-    const parameters: string[] = [...permittedLifecycle];
+    const operatorId = operatorProfileVaultOperatorId(connection.syncScope);
+    const operatorProfileNodeIds = operatorId
+      && vaultScopeIncludesOperatorProfile(connection.syncScope)
+      ? operatorProfileVaultEligibleNodeIds(this.#database, operatorId)
+      : [];
+    const projectionBoundary = operatorProfileNodeIds.length > 0
+      ? `(node_type IN (${REUSABLE_VAULT_NODE_TYPES.map(() => "?").join(",")}) OR id IN (${operatorProfileNodeIds.map(() => "?").join(",")}))`
+      : `node_type IN (${REUSABLE_VAULT_NODE_TYPES.map(() => "?").join(",")})`;
+    const lifecycleClause = candidateReviewNodeTypes.length > 0
+      ? `(
+          ${permittedLifecycle.length > 0
+            ? `lifecycle_status IN (${permittedLifecycle.map(() => "?").join(",")}) OR`
+            : ""}
+          (
+            lifecycle_status = 'candidate'
+            AND confirmation_state = 'pending'
+            AND node_type IN (${candidateReviewNodeTypes.map(() => "?").join(",")})
+            AND author_type = 'agent'
+            AND author_id = 'run-evaluator'
+            AND json_extract(
+              retention_policy_json,
+              '$.terminalAttackKnowledgeReview.schemaVersion'
+            ) = ?
+            AND json_extract(
+              retention_policy_json,
+              '$.terminalAttackKnowledgeReview.status'
+            ) = 'pending_operator_review'
+          )
+        )`
+      : `lifecycle_status IN (${permittedLifecycle.map(() => "?").join(",")})`;
+    const clauses = [lifecycleClause, projectionBoundary];
+    const parameters: string[] = [
+      ...permittedLifecycle,
+      ...candidateReviewNodeTypes,
+      ...(candidateReviewNodeTypes.length > 0
+        ? [TERMINAL_ATTACK_KNOWLEDGE_REVIEW_SCHEMA]
+        : []),
+      ...REUSABLE_VAULT_NODE_TYPES,
+      ...operatorProfileNodeIds,
+    ];
     const addScopeClause = (key: string, column: string, allowed?: readonly string[]): void => {
       const values = this.#connectionScopeValues(connection, key, allowed);
       if (!values) return;
@@ -1048,6 +1609,7 @@ export class ObsidianVaultBridge {
       parameters.push(...values);
     };
     addScopeClause("nodeTypes", "node_type", MEMORY_NODE_TYPES);
+    addScopeClause("nodeIds", "id");
     addScopeClause("scopeKinds", "scope", MEMORY_SCOPE_KINDS);
     addScopeClause("sensitivities", "sensitivity", MEMORY_SENSITIVITIES);
     addScopeClause("engagementIds", "engagement_id");
@@ -1062,22 +1624,34 @@ export class ObsidianVaultBridge {
     if (rows.length > MAX_BULK_EXPORT_NOTES) {
       throw new Error(`A single Obsidian export is limited to ${MAX_BULK_EXPORT_NOTES} canonical notes`);
     }
-    return rows.map((row) => row.id);
+    return rows.flatMap((row) => {
+      const node = this.#memory.getNode(row.id);
+      return node
+        && this.#projectionLifecycleAllowed(connection, node)
+        && this.#nodeProjectionAllowed(connection, node)
+        && this.#connectionProjectionMatches(connection, node)
+        ? [row.id]
+        : [];
+    });
   }
 
-  #purgeRevokedConnectionProjections(connection: VaultConnection): void {
-    const lifecycleStatuses = this.projectionLifecycleStatuses();
+  #purgeRevokedConnectionProjections(
+    connection: VaultConnection,
+    requestedNodeIds?: ReadonlySet<string>,
+  ): readonly string[] {
     const rows = this.#database.prepare(`
       SELECT node_id, relative_path FROM vault_sync_state
       WHERE connection_id = ? AND node_id IS NOT NULL
     `).all(connection.id) as Array<{ node_id: string; relative_path: string }>;
     const revoked = rows.filter((row) => {
+      if (requestedNodeIds && !requestedNodeIds.has(row.node_id)) return false;
       const node = this.#memory.getNode(row.node_id, true);
       return !node
-        || !lifecycleStatuses.includes(node.lifecycleStatus)
+        || !this.#projectionLifecycleAllowed(connection, node)
+        || !this.#nodeProjectionAllowed(connection, node)
         || !this.#connectionProjectionMatches(connection, node);
     });
-    if (revoked.length === 0) return;
+    if (revoked.length === 0) return [];
 
     const deleteConflicts = this.#database.prepare(`
       DELETE FROM vault_conflicts WHERE sync_state_id IN (
@@ -1116,6 +1690,7 @@ export class ObsidianVaultBridge {
         rmSync(archivePath, { force: true });
       }
     }
+    return revoked.map(({ node_id }) => node_id).sort();
   }
 
   /**
@@ -1279,6 +1854,12 @@ export class ObsidianVaultBridge {
       throw new Error(`Vault connection sync scope ${key} must be a string array`);
     }
     const values = [...new Set(value as string[])];
+    if (key === "nodeIds") {
+      if (values.length > MAX_SYNC_SCOPE_NODE_IDS) {
+        throw new Error(`Vault connection sync scope nodeIds is limited to ${MAX_SYNC_SCOPE_NODE_IDS} exact node IDs`);
+      }
+      values.forEach((nodeId) => assertIdentifier(nodeId, "vault connection exact memory node ID"));
+    }
     if (allowed && values.some((item) => !allowed.includes(item))) {
       throw new Error(`Vault connection sync scope ${key} contains an unsupported value`);
     }
@@ -1287,9 +1868,21 @@ export class ObsidianVaultBridge {
 
   #connectionProjectionMismatch(
     connection: VaultConnection,
-    node: Pick<MemoryNode, "lifecycleStatus" | "nodeType" | "scope" | "sensitivity">,
+    node: Pick<MemoryNode, "id" | "lifecycleStatus" | "nodeType" | "scope" | "sensitivity">,
   ): string | undefined {
+    const canonical = this.#memory.getNode(node.id, true);
+    const exactRuntimeCapabilityNodeTypeBypass = Boolean(
+      canonical
+      && canonical.nodeType === node.nodeType
+      && isCurrentRuntimeCapabilityProjectionNode(canonical),
+    );
+    const exactTerminalCandidateLifecycleBypass = Boolean(
+      canonical
+      && canonical.nodeType === node.nodeType
+      && this.#candidateReviewProjectionAllowed(connection, canonical),
+    );
     const checks: Array<[string, string | undefined, readonly string[] | undefined]> = [
+      ["nodeIds", node.id, undefined],
       ["lifecycleStatuses", node.lifecycleStatus, MEMORY_LIFECYCLE_STATES],
       ["nodeTypes", node.nodeType, MEMORY_NODE_TYPES],
       ["scopeKinds", node.scope.kind, MEMORY_SCOPE_KINDS],
@@ -1299,6 +1892,15 @@ export class ObsidianVaultBridge {
     ];
     for (const [key, actual, allowed] of checks) {
       const values = this.#connectionScopeValues(connection, key, allowed);
+      // Live reusable-knowledge Vaults intentionally omit general agent/tool
+      // node classes. Only the exact canonical, system-authored, current
+      // runtime attestation may bypass that one dimension; lifecycle,
+      // scope-kind, sensitivity, engagement, and mission filters still apply.
+      if (key === "nodeTypes" && exactRuntimeCapabilityNodeTypeBypass) continue;
+      // Candidate review is an explicit independent scope. It bypasses only
+      // the generic confirmed/verified lifecycle list; every other connection
+      // dimension and the exact evaluator marker still applies.
+      if (key === "lifecycleStatuses" && exactTerminalCandidateLifecycleBypass) continue;
       if (values && (!actual || !values.includes(actual))) {
         return key;
       }
@@ -1308,14 +1910,14 @@ export class ObsidianVaultBridge {
 
   #connectionProjectionMatches(
     connection: VaultConnection,
-    node: Pick<MemoryNode, "lifecycleStatus" | "nodeType" | "scope" | "sensitivity">,
+    node: Pick<MemoryNode, "id" | "lifecycleStatus" | "nodeType" | "scope" | "sensitivity">,
   ): boolean {
     return this.#connectionProjectionMismatch(connection, node) === undefined;
   }
 
   #assertConnectionProjectionAllowed(
     connection: VaultConnection,
-    node: Pick<MemoryNode, "lifecycleStatus" | "nodeType" | "scope" | "sensitivity">,
+    node: Pick<MemoryNode, "id" | "lifecycleStatus" | "nodeType" | "scope" | "sensitivity">,
   ): void {
     const mismatch = this.#connectionProjectionMismatch(connection, node);
     if (mismatch) {
@@ -1327,7 +1929,7 @@ export class ObsidianVaultBridge {
   assertConnectionNodeAllowed(connectionId: string, nodeId: string): MemoryNode {
     const connection = this.requireConnection(connectionId);
     const node = this.#memory.requireNode(nodeId);
-    this.#assertProjectionAllowed(node);
+    this.#assertProjectionAllowed(node, connection);
     this.#assertConnectionProjectionAllowed(connection, node);
     return node;
   }
@@ -1356,7 +1958,7 @@ export class ObsidianVaultBridge {
   ): Promise<{ readonly result: VaultSyncResult; readonly skipped: boolean }> {
     if (!this.vaultSyncEnabled()) throw new VaultSyncPolicyRevokedError();
     const rendered = this.renderNode(nodeId, connection);
-    this.#assertProjectionAllowed(rendered.node);
+    this.#assertProjectionAllowed(rendered.node, connection);
     this.#assertConnectionProjectionAllowed(connection, rendered.node);
     const state = this.#stateForNode(connection.id, nodeId);
     const relativePath = state?.relative_path ?? rendered.relativePath;
@@ -1489,7 +2091,7 @@ export class ObsidianVaultBridge {
     if (!this.vaultSyncEnabled()) throw new VaultSyncPolicyRevokedError();
     const current = this.#memory.requireNode(renderedNode.id);
     if (current.version !== renderedNode.version) throw new VaultCanonicalChangedError();
-    this.#assertProjectionAllowed(current);
+    this.#assertProjectionAllowed(current, connection);
     this.#assertConnectionProjectionAllowed(connection, current);
   }
 
@@ -1499,7 +2101,7 @@ export class ObsidianVaultBridge {
     raceRetry: number,
   ): Promise<{ readonly result: VaultSyncResult; readonly skipped: boolean }> {
     const current = this.renderNode(nodeId, connection);
-    this.#assertProjectionAllowed(current.node);
+    this.#assertProjectionAllowed(current.node, connection);
     this.#assertConnectionProjectionAllowed(connection, current.node);
     const state = this.#stateForNode(connection.id, nodeId);
     if (!state) {
@@ -1548,7 +2150,7 @@ export class ObsidianVaultBridge {
   ): VaultSyncResult {
     const connection = this.requireConnection(connectionId);
     const rendered = this.renderNode(nodeId, connection, allowedTargetIds);
-    this.#assertProjectionAllowed(rendered.node);
+    this.#assertProjectionAllowed(rendered.node, connection);
     this.#assertConnectionProjectionAllowed(connection, rendered.node);
     const state = this.#stateForNode(connectionId, nodeId);
     if (!state) return this.exportNode(connectionId, nodeId, allowedTargetIds);
@@ -1567,6 +2169,40 @@ export class ObsidianVaultBridge {
     const vaultHash = hashText(vaultText);
     const databaseChanged = state.database_content_hash !== databaseHash;
     const vaultChanged = state.vault_content_hash !== vaultHash;
+    if (state.status === "conflict") {
+      const openConflict = this.#database.prepare(`
+        SELECT id, database_hash, vault_hash
+        FROM vault_conflicts
+        WHERE sync_state_id = ? AND status = 'open'
+      `).get(state.id) as {
+        id: string;
+        database_hash: string;
+        vault_hash: string;
+      } | undefined;
+      if (openConflict) {
+        if (
+          openConflict.database_hash !== databaseHash
+          || openConflict.vault_hash !== vaultHash
+        ) {
+          return this.#refreshOpenConflict(
+            openConflict.id,
+            connection,
+            nodeId,
+            state.relative_path,
+            "Conflict inputs changed while awaiting operator resolution",
+            allowedTargetIds,
+          );
+        }
+        return {
+          connectionId,
+          nodeId,
+          relativePath: state.relative_path,
+          status: "conflict",
+          conflictId: openConflict.id,
+          message: "Database and vault changes conflict; operator resolution is required",
+        };
+      }
+    }
     if (databaseChanged && vaultChanged && databaseHash !== vaultHash) {
       return this.#createConflict(connection, state, rendered.node, state.relative_path, rendered.text, vaultText);
     }
@@ -1643,7 +2279,7 @@ export class ObsidianVaultBridge {
     allowedTargetIds?: ReadonlySet<string>,
   ): VaultSyncResult {
     const rendered = this.renderNode(nodeId, connection, allowedTargetIds);
-    this.#assertProjectionAllowed(rendered.node);
+    this.#assertProjectionAllowed(rendered.node, connection);
     this.#assertConnectionProjectionAllowed(connection, rendered.node);
     const state = this.#stateForNode(connection.id, nodeId);
     if (!state) throw new Error("Vault synchronization state disappeared during imported-edit recovery");
@@ -1772,7 +2408,16 @@ export class ObsidianVaultBridge {
     this.#assertConnectionProjectionAllowed(connection, note);
     this.#assertImportedEdgesAllowed(connection, note, allowedTargetIds);
     const existing = this.#memory.getNode(note.id);
+    if (existing) this.#assertCanonicalPrivateProvenance(existing.id, note);
     const candidateImport = !existing || relativePath.startsWith("00 Inbox/");
+    if (!existing && note.privateProvenanceSummary?.truncated) {
+      throw new Error("A new Vault candidate cannot claim private provenance omitted from canonical SQLite custody");
+    }
+    if (candidateImport && !REUSABLE_VAULT_NODE_TYPE_SET.has(note.nodeType)) {
+      throw new Error(
+        `Vault note type ${note.nodeType} is private operational provenance and cannot enter reusable memory`,
+      );
+    }
     if (candidateImport && !memoryCandidateAllowed(memoryPolicy, note.nodeType)) {
       throw new Error("This Obsidian note type is not permitted by the current memory candidate policy");
     }
@@ -1819,7 +2464,7 @@ export class ObsidianVaultBridge {
     if (!allowExistingUpdate) {
       throw new Error("Updating an existing memory requires a version-aware sync operation");
     }
-    this.#assertProjectionAllowed(existing);
+    this.#assertProjectionAllowed(existing, connection);
     this.#assertConnectionProjectionAllowed(connection, existing);
     if (note.nodeType !== existing.nodeType || JSON.stringify(note.scope) !== JSON.stringify(existing.scope)) {
       throw new Error("Node type and memory scope cannot be changed through automatic vault sync");
@@ -1848,7 +2493,9 @@ export class ObsidianVaultBridge {
       confidence: note.confidence,
       expiresAt: note.expiresAt ?? null,
       additionalProvenanceSources: newAttachmentSources,
-      authorType: "import",
+      // The authenticated operator authored this edit through their connected
+      // Vault. Preserve that authorship instead of disguising it as an import.
+      authorType: "operator",
       authorId: actor,
       changeReason: "Operator edited synchronized Obsidian note",
     });
@@ -1887,7 +2534,12 @@ export class ObsidianVaultBridge {
     connectionId: string,
     nodeIds: readonly string[],
     actor: string,
+    options: VaultPortableExportOptions = {},
   ): Promise<VaultPortableExport> {
+    throw new Error(
+      "Portable Vault ZIP creation is disabled by operator no-backup policy",
+    );
+    /* c8 ignore start -- unreachable retired portable-archive implementation */
     this.assertVaultSyncAllowed();
     const connection = this.requireConnection(connectionId);
     const createdAt = this.#now();
@@ -1898,7 +2550,7 @@ export class ObsidianVaultBridge {
     const portableNodeIds = new Set(uniqueIds);
     for (const nodeId of uniqueIds) {
       const rendered = this.renderNode(nodeId, connection, portableNodeIds);
-      this.#assertProjectionAllowed(rendered.node);
+      this.#assertProjectionAllowed(rendered.node, connection);
       this.#assertConnectionProjectionAllowed(connection, rendered.node);
       nodeSnapshots.push({
         nodeId,
@@ -1915,6 +2567,43 @@ export class ObsidianVaultBridge {
       }
     }
     entries.push(...portableAttachments.values());
+    let brainAtlasProfile: VaultPortableExport["brainAtlasProfile"];
+    if (options.includeBrainAtlasProfile === true) {
+      const health = this.#brainAtlasPlugins.health(connectionId);
+      if (!health.healthy || !health.configuration.sha256) {
+        throw new Error("The pinned Brain Atlas profile must pass read-only health before portable export");
+      }
+      const pinnedRelease = this.#brainAtlasPlugins.pinnedRelease();
+      const base = `.obsidian/plugins/${pinnedRelease.pluginId}`;
+      const profileFiles = [
+        "main.js", "manifest.json", "styles.css", "data.json", "release.json", "LICENSE",
+      ] as const;
+      const assetSha256: Record<string, string> = {};
+      for (const name of profileFiles) {
+        const filePath = this.#paths.resolveRelative(connection.vaultPath, `${base}/${name}`);
+        const bytes = readFileSync(filePath);
+        assetSha256[name] = hashBytes(bytes);
+        entries.push({
+          name: `${base}/${name}`,
+          filePath,
+          approvedObsidianProfile: "ti-scale-brain-atlas-v1",
+        });
+      }
+      const community = `${JSON.stringify([pinnedRelease.pluginId], null, 2)}\n`;
+      entries.push({
+        name: ".obsidian/community-plugins.json",
+        data: community,
+        approvedObsidianProfile: "ti-scale-brain-atlas-v1",
+      });
+      assetSha256["community-plugins.json"] = hashBytes(Buffer.from(community, "utf8"));
+      brainAtlasProfile = {
+        pluginId: pinnedRelease.pluginId,
+        version: pinnedRelease.version,
+        configurationSha256: health.configuration.sha256!,
+        assetSha256,
+        mode: "portable-copy",
+      };
+    }
     const manifest = {
       schemaVersion: "2.4",
       product: "Ti-Scale",
@@ -1924,7 +2613,11 @@ export class ObsidianVaultBridge {
       generatedBy: actor,
       noteCount: uniqueIds.length,
       attachmentCount: portableAttachments.size,
-      includesObsidianSettings: false,
+      includesObsidianSettings: options.includeBrainAtlasProfile === true,
+      obsidianSettingsScope: options.includeBrainAtlasProfile === true
+        ? "pinned-brain-atlas-only"
+        : "none",
+      ...(brainAtlasProfile ? { brainAtlasProfile } : {}),
     };
     entries.push({ name: "ti-scale-vault-manifest.json", data: `${JSON.stringify(manifest, null, 2)}\n` });
     const stamp = createdAt.replace(/[:.]/gu, "-");
@@ -1944,10 +2637,18 @@ export class ObsidianVaultBridge {
       fileCount: result.fileCount,
       createdAt,
       nodeSnapshots,
+      ...(brainAtlasProfile ? { brainAtlasProfile } : {}),
     };
+    /* c8 ignore stop */
   }
 
   portableExportPath(connectionId: string, archiveName: string): string {
+    void connectionId;
+    void archiveName;
+    throw new Error(
+      "Portable Vault ZIP delivery is disabled by operator no-backup policy",
+    );
+    /* c8 ignore start -- unreachable retired portable-archive delivery */
     const connection = this.requireConnection(connectionId);
     if (!/^ti-scale-brain-[A-Za-z0-9._-]+\.zip$/u.test(archiveName) || basename(archiveName) !== archiveName) {
       throw new TypeError("Portable vault archive name is invalid");
@@ -1955,6 +2656,7 @@ export class ObsidianVaultBridge {
     const path = this.#paths.resolveRelative(connection.vaultPath, `.ti-scale/exports/${archiveName}`);
     if (!existsSync(path) || !statSync(path).isFile()) throw new Error("Portable vault archive was not found");
     return path;
+    /* c8 ignore stop */
   }
 
   /** Compare canonical content, tracked hashes, and projection files read-only. */
@@ -1999,7 +2701,12 @@ export class ObsidianVaultBridge {
     const counts = Object.fromEntries(statuses.map((status) => [status, items.filter((item) => item.status === status).length])) as Record<VaultSyncVerificationItem["status"], number>;
     return {
       connectionId,
-      healthy: counts.database_ahead === 0 && counts.vault_ahead === 0 && counts.conflict === 0 && counts.missing === 0 && counts.quarantined === 0,
+      healthy: counts.database_ahead === 0
+        && counts.vault_ahead === 0
+        && counts.conflict === 0
+        && counts.missing === 0
+        && counts.pending === 0
+        && counts.quarantined === 0,
       checkedAt: this.#now(),
       counts,
       items,
@@ -2252,6 +2959,14 @@ export class ObsidianVaultBridge {
       ) {
         throw new Error("Vault note relationship target is outside the permitted memory scope");
       }
+      if (
+        isAttackCentricReusableNodeType(note.nodeType)
+        !== isAttackCentricReusableNodeType(target.nodeType)
+      ) {
+        throw new Error(
+          "Vault note relationships cannot cross the reusable/private memory boundary",
+        );
+      }
     }
   }
 
@@ -2287,7 +3002,7 @@ export class ObsidianVaultBridge {
         lifecycleStatus: "confirmed",
         provenance,
         explanation: "Operator preserved this relationship as a native Obsidian wikilink",
-        authorType: "import",
+        authorType: "operator",
         authorId: actor,
       };
       this.#memory.createEdge(input);
@@ -2335,12 +3050,29 @@ export class ObsidianVaultBridge {
       throw new Error("Vault note exceeds the attachment count limit");
     }
     for (const attachment of note.attachments) attachmentExtension(attachment.relativePath);
+    if (isAttackCentricReusableNodeType(note.nodeType) && note.sourceIds.length > 0) {
+      throw new Error("Reusable attack knowledge must use opaque private_provenance_ids, not raw source_ids");
+    }
+    if (
+      !isAttackCentricReusableNodeType(note.nodeType)
+      && (note.privateProvenanceIds.length > 0 || note.privateProvenanceSummary !== undefined)
+    ) {
+      throw new Error("Private provenance summaries are permitted only for reusable attack knowledge");
+    }
+    if (note.privateProvenanceIds.some((id) => !/^msrc_[A-Za-z0-9._:-]+$/u.test(id))) {
+      throw new Error("Vault private provenance reference is malformed");
+    }
     assertReusableMemoryText([
       { field: "vaultNote.title", value: note.title, maximumBytes: REUSABLE_MEMORY_LIMITS.title },
       { field: "vaultNote.summary", value: note.summary, maximumBytes: REUSABLE_MEMORY_LIMITS.summary },
       { field: "vaultNote.body", value: note.body, maximumBytes: REUSABLE_MEMORY_LIMITS.body },
       ...note.sourceIds.map((sourceId, index) => ({
         field: `vaultNote.sourceIds[${index}]`,
+        value: sourceId,
+        maximumBytes: REUSABLE_MEMORY_LIMITS.provenanceIdentifier,
+      })),
+      ...note.privateProvenanceIds.map((sourceId, index) => ({
+        field: `vaultNote.privateProvenanceIds[${index}]`,
         value: sourceId,
         maximumBytes: REUSABLE_MEMORY_LIMITS.provenanceIdentifier,
       })),
@@ -2372,6 +3104,32 @@ export class ObsidianVaultBridge {
         },
       ]),
     ]);
+  }
+
+  /**
+   * Bind a managed note's bounded projection back to the complete canonical
+   * SQLite row set. Legacy notes without summary metadata remain importable
+   * once and are normalized on write; current summaries fail closed if their
+   * count, digest, truncation state, or visible opaque sample was changed.
+   */
+  #assertCanonicalPrivateProvenance(nodeId: string, note: VaultNote): void {
+    if (!isAttackCentricReusableNodeType(note.nodeType) || !note.privateProvenanceSummary) return;
+    const rows = this.#database.prepare(`
+      SELECT id FROM memory_sources WHERE node_id = ? ORDER BY id
+    `).all(nodeId) as Array<{ id: string }>;
+    const canonical = projectPrivateProvenanceIds(rows.map((row) => row.id));
+    const summary = note.privateProvenanceSummary;
+    if (
+      summary.schema !== canonical.summary.schema
+      || summary.total !== canonical.summary.total
+      || summary.projected !== canonical.summary.projected
+      || summary.sha256 !== canonical.summary.sha256
+      || summary.truncated !== canonical.summary.truncated
+      || note.privateProvenanceIds.length !== canonical.ids.length
+      || note.privateProvenanceIds.some((id, index) => id !== canonical.ids[index])
+    ) {
+      throw new Error("Vault private provenance summary does not match canonical SQLite custody");
+    }
   }
 
   #assertVaultSourceSafe(source: string): void {
@@ -2482,8 +3240,8 @@ export class ObsidianVaultBridge {
     if (!row) throw new Error("Open vault conflict not found");
     const connectionId = String(row.connection_id);
     const nodeId = String(row.node_id);
-    this.#assertProjectionAllowed(this.#memory.requireNode(nodeId));
     const connection = this.requireConnection(connectionId);
+    this.#assertProjectionAllowed(this.#memory.requireNode(nodeId), connection);
     this.#assertConnectionProjectionAllowed(connection, this.#memory.requireNode(nodeId));
     const relativePath = String(row.relative_path);
     const projectionPath = this.#paths.resolveRelative(connection.vaultPath, relativePath);
@@ -2553,6 +3311,7 @@ export class ObsidianVaultBridge {
       if (note.id !== current.id || note.nodeType !== current.nodeType || JSON.stringify(note.scope) !== JSON.stringify(current.scope)) {
         throw new Error("Conflict resolution cannot change stable identity, node type, or memory scope");
       }
+      this.#assertCanonicalPrivateProvenance(current.id, note);
       const attachmentSources = this.#importAttachments(connection, note);
       const existingSourceKeys = new Set(
         current.provenance.sources.map((item) => `${item.sourceType}\0${item.sourceId}`),
@@ -2567,7 +3326,7 @@ export class ObsidianVaultBridge {
         additionalProvenanceSources: attachmentSources.filter(
           (item) => !existingSourceKeys.has(`${item.sourceType}\0${item.sourceId}`),
         ),
-        authorType: "import",
+        authorType: "operator",
         authorId: actor,
         changeReason: `Operator resolved Obsidian conflict using the ${resolution} content`,
       });
@@ -2818,7 +3577,7 @@ export class ObsidianVaultBridge {
   #touchConnection(connectionId: string): void {
     const now = this.#now();
     this.#database.prepare(`
-      UPDATE vault_connections SET last_sync_at = ?, updated_at = ?, status = 'connected' WHERE id = ?
-    `).run(now, now, connectionId);
+      UPDATE vault_connections SET last_sync_at = ? WHERE id = ?
+    `).run(now, connectionId);
   }
 }

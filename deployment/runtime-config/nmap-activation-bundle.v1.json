@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "ti-scale.nmap-activation-bundle.v1",
+  "bundleVersion": "nmap-safe-recon-2026.07.20-v3",
+  "serviceUnit": "ti-scale.service",
+  "installRoot": "/etc/ti-scale/runtime/bundles",
+  "dropInDirectory": "/etc/systemd/system/ti-scale.service.d",
+  "dropInName": "60-reviewed-nmap-activation.conf",
+  "documents": [
+    {
+      "role": "local_tool_capability_manifest",
+      "sourcePath": "deployment/runtime-config/local-tool-capabilities.nmap-enabled.v1.json",
+      "installName": "local-tool-capabilities.v1.json",
+      "sha256": "8a0ac74f4ef2f1988e4725e866d02c262b1875c1eee401f3cca0ce9e10766616",
+      "sourceMode": 420,
+      "installMode": 288
+    },
+    {
+      "role": "local_tool_probe_sandbox",
+      "sourcePath": "deployment/runtime-config/bubblewrap-probe-sandbox.v1.json",
+      "installName": "bubblewrap-probe-sandbox.v1.json",
+      "sha256": "c715dd5706e91a416367eeac5512fba3c2a145a49fb8fc0778c9e8f2d8d457b9",
+      "sourceMode": 420,
+      "installMode": 288
+    },
+    {
+      "role": "engagement_workspace_mappings",
+      "sourcePath": "deployment/runtime-config/engagement-workspace-mappings.v1.json",
+      "installName": "engagement-workspace-mappings.v1.json",
+      "sha256": "0ddf4173205c8d6d7a98dcfabd029a0d1baada653444b689c18853d509a688d1",
+      "sourceMode": 420,
+      "installMode": 288
+    },
+    {
+      "role": "autonomous_dns_runtime",
+      "sourcePath": "deployment/runtime-config/autonomous-dns-local-runtime.v1.json",
+      "installName": "autonomous-dns-local-runtime.v1.json",
+      "sha256": "12770b66e7d46f8a9043439af3194ed4c478812fa0ffbdd6f6402719fc5116b7",
+      "sourceMode": 420,
+      "installMode": 288
+    },
+    {
+      "role": "activation_environment",
+      "sourcePath": "deployment/runtime-config/nmap-activation-environment.v3.conf",
+      "installName": "activation-environment.v3.conf",
+      "sha256": "5583dd2ed2270466d3db027a3d5574b0555680f4549782b66ccaab4f5540f36c",
+      "sourceMode": 420,
+      "installMode": 288
+    }
+  ],
+  "dropIn": {
+    "sourcePath": "deployment/systemd/ti-scale.service.d/60-reviewed-nmap-activation.conf",
+    "sha256": "c90baf171ddb9976fa4c8f726b5238960638cfe0dc30f8e739f55f5a890b9abd",
+    "sourceMode": 420,
+    "installMode": 420
+  },
+  "nmap": {
+    "installerPath": "scripts/install-reviewed-nmap.sh",
+    "installerSha256": "34539a01da5776d18ced014798b2f71c7846d1d597248fc7650ca363e3bf65fc",
+    "installerMode": 493,
+    "executablePath": "/opt/ti-scale-toolchain/nmap/5b42c994b6f5804be11726deae943defc868dbe91d8362b3a2686b7d5160667f/nmap",
+    "executableSha256": "5b42c994b6f5804be11726deae943defc868dbe91d8362b3a2686b7d5160667f"
+  }
+}

@@ -12,6 +12,7 @@ export const RUNTIME_CONTINUATION_KINDS = [
   "action_result_to_advance",
   "guided_failure_to_recover",
   "evaluation_pending",
+  "memory_projection_pending",
   "cancellation_finalize_pending",
   "resume_recovery_pending",
 ] as const;
@@ -122,7 +123,22 @@ function safeError(value: string, fallback: string): string {
  * `processing` row becomes reclaimable only after its persisted lease expires.
  */
 export class RuntimeContinuationRepository {
-  constructor(readonly database: SqliteDatabase) {}
+  constructor(
+    readonly database: SqliteDatabase,
+    private readonly assertMutationAuthority?: (runId: string) => void,
+  ) {}
+
+  private assertRunMutation(runId: string): void {
+    this.assertMutationAuthority?.(runId);
+  }
+
+  private runIdForContinuation(id: string): string {
+    const row = this.database.prepare(
+      "SELECT run_id FROM runtime_continuations WHERE id = ?",
+    ).get(id) as { run_id: string } | undefined;
+    if (!row) throw new Error(`Runtime continuation not found: ${id}`);
+    return row.run_id;
+  }
 
   enqueue(input: {
     readonly runId: string;
@@ -134,24 +150,27 @@ export class RuntimeContinuationRepository {
   }): RuntimeContinuation {
     const runId = requireText(input.runId, "runId");
     const sourceId = requireText(input.sourceId, "sourceId");
-    const id = `continuation_${randomUUID()}`;
-    this.database.prepare(`
-      INSERT INTO runtime_continuations (
-        id, run_id, kind, source_id, payload_json, status, attempt_count,
-        available_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
-      ON CONFLICT(run_id, kind, source_id) DO NOTHING
-    `).run(
-      id,
-      runId,
-      input.kind,
-      sourceId,
-      canonicalJson(sanitizedPayload(input.kind, input.payload)),
-      input.availableAt ?? input.now,
-      input.now,
-      input.now,
-    );
-    return this.getByKey(runId, input.kind, sourceId);
+    return inImmediateTransaction(this.database, () => {
+      this.assertRunMutation(runId);
+      const id = `continuation_${randomUUID()}`;
+      this.database.prepare(`
+        INSERT INTO runtime_continuations (
+          id, run_id, kind, source_id, payload_json, status, attempt_count,
+          available_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+        ON CONFLICT(run_id, kind, source_id) DO NOTHING
+      `).run(
+        id,
+        runId,
+        input.kind,
+        sourceId,
+        canonicalJson(sanitizedPayload(input.kind, input.payload)),
+        input.availableAt ?? input.now,
+        input.now,
+        input.now,
+      );
+      return this.getByKey(runId, input.kind, sourceId);
+    });
   }
 
   get(id: string): RuntimeContinuation {
@@ -178,16 +197,47 @@ export class RuntimeContinuationRepository {
     `).all(runId) as ContinuationRow[]).map(mapRow);
   }
 
-  readyRunIds(now: string, limit = 50): string[] {
+  readyRunIds(
+    now: string,
+    limit = 50,
+    controlPlane?: "legacy" | "ti_scale",
+  ): string[] {
     return (this.database.prepare(`
-      SELECT run_id, MIN(created_at) AS first_created
-      FROM runtime_continuations
-      WHERE (status = 'pending' AND available_at <= ?)
-         OR (status = 'processing' AND lease_expires_at <= ?)
-      GROUP BY run_id
-      ORDER BY first_created, run_id
+      SELECT rc.run_id, MIN(rc.created_at) AS first_created
+      FROM runtime_continuations rc
+      JOIN runs r ON r.id = rc.run_id
+      JOIN missions m ON m.id = r.mission_id
+      WHERE (
+        (rc.status = 'pending' AND rc.available_at <= ?)
+        OR (rc.status = 'processing' AND rc.lease_expires_at <= ?)
+      )
+        AND (? IS NULL OR (r.control_plane = ? AND m.control_plane = ?))
+        AND NOT EXISTS (
+          SELECT 1
+          FROM plan_change_inflight_resolutions gate
+          LEFT JOIN plan_change_requests fresh
+            ON fresh.id = gate.fresh_request_id
+          WHERE gate.run_id = rc.run_id
+            AND (
+              gate.status IN ('waiting_for_terminal_work', 'failed')
+              OR (
+                gate.status = 'ready_for_review'
+                AND COALESCE(fresh.status, 'proposed')
+                  IN ('proposed', 'validated')
+              )
+            )
+        )
+      GROUP BY rc.run_id
+      ORDER BY first_created, rc.run_id
       LIMIT ?
-    `).all(now, now, limit) as Array<{ run_id: string }>).map((row) => row.run_id);
+    `).all(
+      now,
+      now,
+      controlPlane ?? null,
+      controlPlane ?? null,
+      controlPlane ?? null,
+      limit,
+    ) as Array<{ run_id: string }>).map((row) => row.run_id);
   }
 
   /**
@@ -195,10 +245,27 @@ export class RuntimeContinuationRepository {
    * continuation enqueueing. New writes must enqueue atomically at source; this
    * scan is intentionally conservative and never repeats an in-flight action.
    */
-  reconcileFromCanonicalState(now: string): number {
+  reconcileFromCanonicalState(
+    now: string,
+    controlPlane?: "legacy" | "ti_scale",
+    supportedJourneys: readonly ("autonomous" | "guided")[] = ["autonomous", "guided"],
+  ): number {
+    const journeys = new Set(supportedJourneys);
+    if (
+      journeys.size === 0
+      || [...journeys].some((journey) => journey !== "autonomous" && journey !== "guided")
+    ) {
+      throw new RangeError("Continuation reconciliation requires guided and/or autonomous journey scope");
+    }
     return inImmediateTransaction(this.database, () => {
       let repaired = 0;
+      const ownership = controlPlane
+        ? `AND r.control_plane = '${controlPlane}' AND m.control_plane = '${controlPlane}'`
+        : "";
       const enqueue = (input: Parameters<RuntimeContinuationRepository["enqueue"]>[0]) => {
+        const run = this.database.prepare("SELECT journey FROM runs WHERE id = ?")
+          .get(input.runId) as { journey: "autonomous" | "guided" } | undefined;
+        if (!run || !journeys.has(run.journey)) return;
         const before = this.database.prepare(`
           SELECT id FROM runtime_continuations
           WHERE run_id = ? AND kind = ? AND source_id = ?
@@ -211,8 +278,10 @@ export class RuntimeContinuationRepository {
         SELECT e.id AS event_id, e.run_id
         FROM events e
         JOIN runs r ON r.id = e.run_id
+        JOIN missions m ON m.id = r.mission_id
         WHERE e.event_type = 'run.cancellation_requested'
           AND r.status NOT IN ('completed', 'failed', 'cancelled')
+          ${ownership}
           AND NOT EXISTS (
             SELECT 1 FROM events terminal
             WHERE terminal.run_id = e.run_id
@@ -232,9 +301,11 @@ export class RuntimeContinuationRepository {
       const readyAutonomous = this.database.prepare(`
         SELECT r.id AS run_id, r.current_plan_id AS plan_id, ps.id AS step_id
         FROM runs r
+        JOIN missions m ON m.id = r.mission_id
         JOIN plans p ON p.id = r.current_plan_id AND p.status = 'active'
         JOIN plan_steps ps ON ps.id = r.current_step_id AND ps.plan_id = p.id
         WHERE r.journey = 'autonomous' AND r.status = 'running'
+          ${ownership}
           AND ps.status = 'ready'
           AND NOT EXISTS (
             SELECT 1 FROM actions a
@@ -255,7 +326,9 @@ export class RuntimeContinuationRepository {
         SELECT gd.run_id, gd.id AS decision_id, gd.step_id
         FROM guided_decisions gd
         JOIN runs r ON r.id = gd.run_id
+        JOIN missions m ON m.id = r.mission_id
         WHERE r.journey = 'guided'
+          ${ownership}
           AND r.status IN ('waiting_guided_decision', 'running')
           AND gd.status = 'approved'
           AND NOT EXISTS (
@@ -276,8 +349,10 @@ export class RuntimeContinuationRepository {
         SELECT a.run_id, a.id AS action_id, a.step_id
         FROM actions a
         JOIN runs r ON r.id = a.run_id
+        JOIN missions m ON m.id = r.mission_id
         JOIN plan_steps ps ON ps.id = a.step_id
         WHERE r.status = 'running' AND a.status = 'succeeded'
+          ${ownership}
           AND ps.status NOT IN ('completed', 'skipped', 'cancelled')
       `).all() as Array<{ run_id: string; action_id: string; step_id: string }>;
       for (const row of succeeded) {
@@ -294,7 +369,9 @@ export class RuntimeContinuationRepository {
         SELECT a.run_id, a.id AS action_id, a.step_id
         FROM actions a
         JOIN runs r ON r.id = a.run_id
+        JOIN missions m ON m.id = r.mission_id
         WHERE r.journey = 'guided' AND r.status = 'recovering'
+          ${ownership}
           AND a.status IN ('failed', 'timed_out', 'denied')
           AND a.ended_at = (
             SELECT MAX(latest.ended_at) FROM actions latest
@@ -315,8 +392,10 @@ export class RuntimeContinuationRepository {
       const evaluations = this.database.prepare(`
         SELECT r.id AS run_id, p.id AS plan_id
         FROM runs r
+        JOIN missions m ON m.id = r.mission_id
         JOIN plans p ON p.id = r.current_plan_id
         WHERE r.status = 'running' AND p.status = 'completed'
+          ${ownership}
           AND NOT EXISTS (SELECT 1 FROM run_evaluations re WHERE re.run_id = r.id)
       `).all() as Array<{ run_id: string; plan_id: string }>;
       for (const row of evaluations) {
@@ -328,10 +407,40 @@ export class RuntimeContinuationRepository {
         });
       }
 
+      // Terminal memory/Vault projection is a separate, post-commit concern.
+      // Reconstruct a missing continuation from the canonical evaluation so a
+      // process that died after evaluation commit cannot strand its graph in
+      // SQLite without the configured human-readable Vault projection.
+      const memoryProjections = this.database.prepare(`
+        SELECT re.run_id, re.id AS evaluation_id
+        FROM run_evaluations re
+        JOIN runs r ON r.id = re.run_id
+        JOIN missions m ON m.id = r.mission_id AND m.id = re.mission_id
+        WHERE 1 = 1
+          ${ownership}
+          AND NOT EXISTS (
+            SELECT 1 FROM runtime_continuations rc
+            WHERE rc.run_id = re.run_id
+              AND rc.kind = 'memory_projection_pending'
+              AND rc.source_id = re.id
+          )
+        ORDER BY re.created_at, re.id
+      `).all() as Array<{ run_id: string; evaluation_id: string }>;
+      for (const row of memoryProjections) {
+        enqueue({
+          runId: row.run_id,
+          kind: "memory_projection_pending",
+          sourceId: row.evaluation_id,
+          now,
+        });
+      }
+
       const resumed = this.database.prepare(`
         SELECT r.id AS run_id, CAST(r.version AS TEXT) AS source_id
         FROM runs r
+        JOIN missions m ON m.id = r.mission_id
         WHERE r.status = 'recovering'
+          ${ownership}
           AND NOT EXISTS (
             SELECT 1 FROM actions a
             WHERE a.run_id = r.id AND a.status IN ('queued', 'running')
@@ -366,6 +475,7 @@ export class RuntimeContinuationRepository {
     }
     const workerId = requireText(input.workerId, "workerId");
     return inImmediateTransaction(this.database, () => {
+      this.assertRunMutation(input.runId);
       const kindFilter = input.kinds?.length
         ? `AND kind IN (${input.kinds.map(() => "?").join(",")})`
         : "";
@@ -376,6 +486,21 @@ export class RuntimeContinuationRepository {
           AND (
             (status = 'pending' AND available_at <= ?)
             OR (status = 'processing' AND lease_expires_at <= ?)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM plan_change_inflight_resolutions gate
+            LEFT JOIN plan_change_requests fresh
+              ON fresh.id = gate.fresh_request_id
+            WHERE gate.run_id = runtime_continuations.run_id
+              AND (
+                gate.status IN ('waiting_for_terminal_work', 'failed')
+                OR (
+                  gate.status = 'ready_for_review'
+                  AND COALESCE(fresh.status, 'proposed')
+                    IN ('proposed', 'validated')
+                )
+              )
           )
           ${kindFilter}
         ORDER BY created_at, id LIMIT 1
@@ -409,6 +534,26 @@ export class RuntimeContinuationRepository {
     const workerId = requireText(input.workerId, "workerId");
     return inImmediateTransaction(this.database, () => {
       const candidate = this.get(input.id);
+      this.assertRunMutation(candidate.runId);
+      const gated = this.database.prepare(`
+        SELECT 1
+        FROM plan_change_inflight_resolutions gate
+        LEFT JOIN plan_change_requests fresh ON fresh.id = gate.fresh_request_id
+        WHERE gate.run_id = ?
+          AND (
+            gate.status IN ('waiting_for_terminal_work', 'failed')
+            OR (
+              gate.status = 'ready_for_review'
+              AND COALESCE(fresh.status, 'proposed') IN ('proposed', 'validated')
+            )
+          )
+        LIMIT 1
+      `).get(candidate.runId);
+      if (gated) {
+        throw new Error(
+          `Runtime continuation is fenced by an open plan amendment: ${input.id}`,
+        );
+      }
       if (
         !(
           (candidate.status === "pending" && candidate.availableAt <= input.now) ||
@@ -435,17 +580,20 @@ export class RuntimeContinuationRepository {
   }
 
   complete(id: string, ownerToken: string, now: string): RuntimeContinuation {
-    const completed = this.database.prepare(`
-      UPDATE runtime_continuations
-      SET status = 'completed', lease_owner = NULL, lease_expires_at = NULL,
-        completed_at = ?, updated_at = ?, last_error = NULL
-      WHERE id = ? AND status = 'processing' AND lease_owner = ?
-        AND lease_expires_at > ?
-    `).run(now, now, id, ownerToken, now);
-    if (completed.changes !== 1) {
-      throw new Error(`Runtime continuation completion fence lost: ${id}`);
-    }
-    return this.get(id);
+    return inImmediateTransaction(this.database, () => {
+      this.assertRunMutation(this.runIdForContinuation(id));
+      const completed = this.database.prepare(`
+        UPDATE runtime_continuations
+        SET status = 'completed', lease_owner = NULL, lease_expires_at = NULL,
+          completed_at = ?, updated_at = ?, last_error = NULL
+        WHERE id = ? AND status = 'processing' AND lease_owner = ?
+          AND lease_expires_at > ?
+      `).run(now, now, id, ownerToken, now);
+      if (completed.changes !== 1) {
+        throw new Error(`Runtime continuation completion fence lost: ${id}`);
+      }
+      return this.get(id);
+    });
   }
 
   heartbeat(
@@ -457,17 +605,20 @@ export class RuntimeContinuationRepository {
     if (!Number.isFinite(leaseTtlMs) || leaseTtlMs <= 0) {
       throw new RangeError("Continuation leaseTtlMs must be positive");
     }
-    const expiresAt = new Date(Date.parse(now) + leaseTtlMs).toISOString();
-    const renewed = this.database.prepare(`
-      UPDATE runtime_continuations
-      SET lease_expires_at = ?, updated_at = ?
-      WHERE id = ? AND status = 'processing' AND lease_owner = ?
-        AND lease_expires_at > ?
-    `).run(expiresAt, now, id, ownerToken, now);
-    if (renewed.changes !== 1) {
-      throw new Error(`Runtime continuation heartbeat fence lost: ${id}`);
-    }
-    return this.get(id);
+    return inImmediateTransaction(this.database, () => {
+      this.assertRunMutation(this.runIdForContinuation(id));
+      const expiresAt = new Date(Date.parse(now) + leaseTtlMs).toISOString();
+      const renewed = this.database.prepare(`
+        UPDATE runtime_continuations
+        SET lease_expires_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'processing' AND lease_owner = ?
+          AND lease_expires_at > ?
+      `).run(expiresAt, now, id, ownerToken, now);
+      if (renewed.changes !== 1) {
+        throw new Error(`Runtime continuation heartbeat fence lost: ${id}`);
+      }
+      return this.get(id);
+    });
   }
 
   retry(input: {
@@ -477,18 +628,21 @@ export class RuntimeContinuationRepository {
     readonly availableAt: string;
     readonly error: string;
   }): RuntimeContinuation {
-    const message = safeError(input.error, "Continuation handler failed");
-    const released = this.database.prepare(`
-      UPDATE runtime_continuations
-      SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL,
-        available_at = ?, updated_at = ?, last_error = ?
-      WHERE id = ? AND status = 'processing' AND lease_owner = ?
-        AND lease_expires_at > ?
-    `).run(input.availableAt, input.now, message, input.id, input.ownerToken, input.now);
-    if (released.changes !== 1) {
-      throw new Error(`Runtime continuation retry fence lost: ${input.id}`);
-    }
-    return this.get(input.id);
+    return inImmediateTransaction(this.database, () => {
+      this.assertRunMutation(this.runIdForContinuation(input.id));
+      const message = safeError(input.error, "Continuation handler failed");
+      const released = this.database.prepare(`
+        UPDATE runtime_continuations
+        SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL,
+          available_at = ?, updated_at = ?, last_error = ?
+        WHERE id = ? AND status = 'processing' AND lease_owner = ?
+          AND lease_expires_at > ?
+      `).run(input.availableAt, input.now, message, input.id, input.ownerToken, input.now);
+      if (released.changes !== 1) {
+        throw new Error(`Runtime continuation retry fence lost: ${input.id}`);
+      }
+      return this.get(input.id);
+    });
   }
 
   fail(input: {
@@ -497,26 +651,32 @@ export class RuntimeContinuationRepository {
     readonly now: string;
     readonly error: string;
   }): RuntimeContinuation {
-    const message = safeError(input.error, "Continuation retry budget exhausted");
-    const failed = this.database.prepare(`
-      UPDATE runtime_continuations
-      SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
-        updated_at = ?, last_error = ?
-      WHERE id = ? AND status = 'processing' AND lease_owner = ?
-        AND lease_expires_at > ?
-    `).run(input.now, message, input.id, input.ownerToken, input.now);
-    if (failed.changes !== 1) {
-      throw new Error(`Runtime continuation failure fence lost: ${input.id}`);
-    }
-    return this.get(input.id);
+    return inImmediateTransaction(this.database, () => {
+      this.assertRunMutation(this.runIdForContinuation(input.id));
+      const message = safeError(input.error, "Continuation retry budget exhausted");
+      const failed = this.database.prepare(`
+        UPDATE runtime_continuations
+        SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
+          updated_at = ?, last_error = ?
+        WHERE id = ? AND status = 'processing' AND lease_owner = ?
+          AND lease_expires_at > ?
+      `).run(input.now, message, input.id, input.ownerToken, input.now);
+      if (failed.changes !== 1) {
+        throw new Error(`Runtime continuation failure fence lost: ${input.id}`);
+      }
+      return this.get(input.id);
+    });
   }
 
   cancelOpen(runId: string, now: string, reason: string): number {
-    return this.database.prepare(`
-      UPDATE runtime_continuations
-      SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
-        updated_at = ?, last_error = ?
-      WHERE run_id = ? AND status IN ('pending', 'processing')
-    `).run(now, safeError(reason, "Run reached a terminal state"), runId).changes;
+    return inImmediateTransaction(this.database, () => {
+      this.assertRunMutation(runId);
+      return this.database.prepare(`
+        UPDATE runtime_continuations
+        SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
+          updated_at = ?, last_error = ?
+        WHERE run_id = ? AND status IN ('pending', 'processing')
+      `).run(now, safeError(reason, "Run reached a terminal state"), runId).changes;
+    });
   }
 }

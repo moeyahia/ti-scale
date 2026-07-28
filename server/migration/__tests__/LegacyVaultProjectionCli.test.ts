@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -11,7 +12,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDatabaseConnection, migrateDatabase } from "../../db";
 import { MemoryRepository } from "../../memory";
-import { ObsidianVaultBridge, VaultPathPolicy } from "../../vault";
+import {
+  ATTACK_KNOWLEDGE_VAULT_DISPLAY_NAME,
+  ATTACK_KNOWLEDGE_VAULT_RELATIVE_PATH,
+  attackKnowledgeVaultSyncScope,
+  ObsidianVaultBridge,
+  VaultPathPolicy,
+} from "../../vault";
 import { LegacyMigrationService } from "../LegacyMigrationService";
 
 const temporaryDirectories: string[] = [];
@@ -41,6 +48,10 @@ function markdownFiles(root: string): string[] {
   return found.sort();
 }
 
+function opaqueMemoryId(label: string): string {
+  return `mem_${createHash("sha256").update(label).digest("hex")}`;
+}
+
 async function runCli(args: readonly string[]): Promise<{
   readonly exitCode: number;
   readonly stdout: string;
@@ -66,7 +77,7 @@ async function runCli(args: readonly string[]): Promise<{
 }
 
 describe("approved legacy Vault projection CLI", () => {
-  test("previews without writes, binds approval to both hashes, then projects idempotently", async () => {
+  test("projects only reviewed reusable attack knowledge and binds approval to both hashes", async () => {
     const root = temporaryDirectory();
     const databasePath = join(root, "ti-scale.sqlite");
     const sourceRoot = join(root, "historical-engagements");
@@ -111,16 +122,81 @@ describe("approved legacy Vault projection CLI", () => {
       reconciliationHash = (setup.prepare(`
         SELECT report_hash FROM legacy_migration_reconciliation WHERE migration_id = ?
       `).get(migration.migrationId) as { report_hash: string }).report_hash;
+      const memory = new MemoryRepository(setup, {
+        clock: () => new Date("2026-07-17T10:01:00.000Z"),
+      });
+      const provenance = {
+        method: "derived" as const,
+        explanation: "Generalized locally from a hash-verified private migration receipt after operator review.",
+        sources: [{
+          sourceType: "legacy_migration_receipt",
+          sourceId: migration.migrationId,
+          acquiredAt: "2026-07-17T10:00:00.000Z",
+        }],
+      };
+      const procedure = memory.createNode({
+        id: opaqueMemoryId("legacy-vault-reviewed-procedure"),
+        nodeType: "attack_procedure",
+        title: "Bounded service-validation procedure",
+        summary: "Verify service health before applying a bounded, reversible validation step.",
+        body: "Stop when the health gate fails and preserve the prior state before choosing a recovery pattern.",
+        scope: { kind: "global" },
+        sensitivity: "internal",
+        confidence: 0.95,
+        lifecycleStatus: "verified",
+        confirmationState: "confirmed",
+        provenance,
+        authorType: "operator",
+        authorId: "operator:test",
+      });
+      const evidencePattern = memory.createNode({
+        id: opaqueMemoryId("legacy-vault-reviewed-evidence-pattern"),
+        nodeType: "evidence_pattern",
+        title: "Service-health evidence pattern",
+        summary: "A successful bounded request and stable worker response establish the precondition.",
+        body: "Retain the normalized response class, timing, and state transition without operational locators.",
+        scope: { kind: "global" },
+        sensitivity: "internal",
+        confidence: 0.95,
+        lifecycleStatus: "verified",
+        confirmationState: "confirmed",
+        provenance,
+        authorType: "operator",
+        authorId: "operator:test",
+      });
+      memory.createEdge({
+        sourceNodeId: procedure.id,
+        targetNodeId: evidencePattern.id,
+        edgeType: "depends_on",
+        title: "Procedure depends on health evidence",
+        summary: "The procedure may advance only after the reusable health-evidence pattern is satisfied.",
+        scope: { kind: "global" },
+        sensitivity: "internal",
+        confidence: 0.95,
+        lifecycleStatus: "verified",
+        provenance,
+        explanation: "The operator-reviewed procedure explicitly requires this evidence gate.",
+        authorType: "operator",
+        authorId: "operator:test",
+      });
+      const mapNode = setup.prepare(`
+        INSERT INTO legacy_engagement_brain_nodes (
+          migration_id, manifest_id, node_id, created_at
+        ) VALUES (?, 'reviewed-attack-knowledge', ?, '2026-07-17T10:01:00.000Z')
+      `);
+      mapNode.run(migration.migrationId, procedure.id);
+      mapNode.run(migration.migrationId, evidencePattern.id);
       const bridge = new ObsidianVaultBridge(
         setup,
-        new MemoryRepository(setup),
+        memory,
         new VaultPathPolicy(vaultSandbox),
         { clock: () => new Date("2026-07-17T10:01:00.000Z") },
       );
       vaultPath = bridge.connect({
-        id: "vault-reapertwo",
-        vaultPath: "Ti-Scale-Brain",
-        displayName: "Ti-Scale Brain",
+        id: "vault-attack-knowledge",
+        vaultPath: ATTACK_KNOWLEDGE_VAULT_RELATIVE_PATH,
+        displayName: ATTACK_KNOWLEDGE_VAULT_DISPLAY_NAME,
+        syncScope: attackKnowledgeVaultSyncScope(),
         permissionGranted: true,
       }).vaultPath;
     } finally {
@@ -133,7 +209,7 @@ describe("approved legacy Vault projection CLI", () => {
       "--vault-root", vaultSandbox,
       "--migration-id", migration.migrationId,
       "--reconciliation-hash", reconciliationHash!,
-      "--connection", "vault-reapertwo",
+      "--connection", "vault-attack-knowledge",
     ];
     const previewRun = await runCli(["project-vault", ...common, "--dry-run"]);
     expect(previewRun.exitCode).toBe(0);
@@ -146,8 +222,10 @@ describe("approved legacy Vault projection CLI", () => {
     };
     expect(preview).toMatchObject({ status: "ready_for_approval", dryRun: true });
     expect(preview.projectionHash).toMatch(/^[a-f0-9]{64}$/u);
-    expect(preview.counts.eligible).toBeGreaterThanOrEqual(6);
-    expect(preview.counts.excludedByPolicyOrConnectionScope).toBe(1);
+    expect(preview.counts.eligible).toBe(2);
+    expect(preview.counts.excludedByPolicyOrConnectionScope)
+      .toBe(preview.counts.mapped - preview.counts.eligible);
+    expect(preview.counts.excludedByPolicyOrConnectionScope).toBeGreaterThan(0);
     expect(markdownFiles(vaultPath!)).toHaveLength(0);
 
     const afterPreview = createDatabaseConnection({ filename: databasePath, readonly: true, fileMustExist: true });
@@ -200,7 +278,10 @@ describe("approved legacy Vault projection CLI", () => {
     });
     const projectedNotes = markdownFiles(vaultPath!);
     expect(projectedNotes).toHaveLength(applied.projectedNodes);
-    expect(projectedNotes.map((path) => readFileSync(path, "utf8")).join("\n")).toContain("[[");
+    const projectedText = projectedNotes.map((path) => readFileSync(path, "utf8")).join("\n");
+    expect(projectedText).toContain("[[");
+    expect(projectedText).not.toContain("ReaperTwo");
+    expect(projectedText).not.toContain("web-01");
 
     const verified = createDatabaseConnection({ filename: databasePath, readonly: true, fileMustExist: true });
     try {
@@ -212,7 +293,7 @@ describe("approved legacy Vault projection CLI", () => {
         migration_id: migration.migrationId,
         reconciliation_hash: reconciliationHash!,
         projection_hash: preview.projectionHash,
-        connection_id: "vault-reapertwo",
+        connection_id: "vault-attack-knowledge",
         approved_by: "operator:test",
         status: "completed",
         projected_nodes: preview.counts.eligible,

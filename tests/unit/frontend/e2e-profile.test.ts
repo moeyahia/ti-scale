@@ -9,10 +9,13 @@ const releaseEnvironment = (overrides: Record<string, string | undefined> = {}) 
   TI_SCALE_E2E_PROFILE: "release",
   TI_SCALE_E2E_REQUIRE_API: "1",
   TI_SCALE_E2E_ENFORCE_MANIFEST: "1",
+  TI_SCALE_E2E_ENFORCE_ACTIVATION_RECEIPTS: "1",
+  TI_SCALE_E2E_ENFORCE_RELEASE_RESULT_POLICY: "1",
   TI_SCALE_E2E_SERVER_MODE: PLAYWRIGHT_MANAGED_STATIC_SERVER_MODE,
   TI_SCALE_E2E_EXTERNAL_SERVERS: "false",
   TI_SCALE_E2E_BASE_URL: "http://127.0.0.1:43141",
   TI_SCALE_E2E_API_URL: "http://127.0.0.1:43141",
+  TI_SCALE_E2E_CANDIDATE_SHA: "a".repeat(40),
   ...overrides,
 });
 
@@ -87,11 +90,31 @@ describe("E2E execution profile parser", () => {
       ["required API", { TI_SCALE_E2E_REQUIRE_API: undefined }, "TI_SCALE_E2E_REQUIRE_API must equal \"1\""],
       ["exact required API", { TI_SCALE_E2E_REQUIRE_API: " 1 " }, "TI_SCALE_E2E_REQUIRE_API must equal \"1\""],
       ["manifest", { TI_SCALE_E2E_ENFORCE_MANIFEST: "0" }, "TI_SCALE_E2E_ENFORCE_MANIFEST must equal \"1\""],
+      [
+        "activation receipts",
+        { TI_SCALE_E2E_ENFORCE_ACTIVATION_RECEIPTS: undefined },
+        "TI_SCALE_E2E_ENFORCE_ACTIVATION_RECEIPTS must equal \"1\"",
+      ],
+      [
+        "release result policy",
+        { TI_SCALE_E2E_ENFORCE_RELEASE_RESULT_POLICY: undefined },
+        "TI_SCALE_E2E_ENFORCE_RELEASE_RESULT_POLICY must equal \"1\"",
+      ],
       ["server", { TI_SCALE_E2E_SERVER_MODE: "vite-development" }, "TI_SCALE_E2E_SERVER_MODE must equal \"playwright-managed-static\""],
       ["external server", { TI_SCALE_E2E_EXTERNAL_SERVERS: "true" }, "TI_SCALE_E2E_EXTERNAL_SERVERS must equal \"false\""],
       ["missing external declaration", { TI_SCALE_E2E_EXTERNAL_SERVERS: undefined }, "TI_SCALE_E2E_EXTERNAL_SERVERS must equal \"false\""],
       ["missing UI URL", { TI_SCALE_E2E_BASE_URL: undefined }, "TI_SCALE_E2E_BASE_URL must be explicitly set"],
       ["missing API URL", { TI_SCALE_E2E_API_URL: undefined }, "TI_SCALE_E2E_API_URL must be explicitly set"],
+      [
+        "missing candidate",
+        { TI_SCALE_E2E_CANDIDATE_SHA: undefined },
+        "TI_SCALE_E2E_CANDIDATE_SHA must be the exact lowercase 40-character checked-out Git commit",
+      ],
+      [
+        "invalid candidate",
+        { TI_SCALE_E2E_CANDIDATE_SHA: "not-a-git-commit" },
+        "TI_SCALE_E2E_CANDIDATE_SHA must be the exact lowercase 40-character checked-out Git commit",
+      ],
     ];
     for (const [, overrides, expectedMessage] of cases) {
       expect(() => parseE2EProfile(releaseEnvironment(overrides))).toThrow(expectedMessage);

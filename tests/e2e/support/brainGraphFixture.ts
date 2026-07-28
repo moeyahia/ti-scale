@@ -1,6 +1,8 @@
 import { createDatabaseConnection } from "../../../server/db";
 import { MemoryRepository } from "../../../server/memory/MemoryRepository";
 import {
+  ATTACK_CENTRIC_EDGE_TYPES,
+  isAttackCentricReusableNodeType,
   MEMORY_EDGE_TYPES,
   MEMORY_NODE_TYPES,
   type MemoryEdgeType,
@@ -9,6 +11,7 @@ import {
   type MemoryScope,
   type MemorySensitivity,
 } from "../../../server/memory/types";
+import { ATTACK_CENTRIC_EDGE_ENDPOINTS } from "../../../server/memory/AttackKnowledgeTaxonomy";
 import { hashCanonical } from "../../../server/missions/canonical";
 import { MissionRepository } from "../../../server/missions/MissionRepository";
 import { validateMissionCreateRequest } from "../../../server/missions/validation";
@@ -16,6 +19,7 @@ import { E2E_DATABASE_PATH } from "./environment";
 import { normalizeFixtureNamespace } from "./fixtureNamespace";
 
 const FIXTURE_TIME = "2099-07-16T12:00:00.000Z";
+const CLI_RESULT_PREFIX = "TI_SCALE_BRAIN_GRAPH_FIXTURE=";
 export const BRAIN_GRAPH_FIXTURE_NODE_COUNT = 276;
 export const BRAIN_GRAPH_FIXTURE_INITIAL_LIMIT = 250;
 
@@ -44,6 +48,10 @@ export interface BrainGraphFixture {
   readonly preferenceTitle: string;
   readonly secondaryNodeId: string;
   readonly secondaryTitle: string;
+  readonly attackTacticNodeId: string;
+  readonly attackTacticTitle: string;
+  readonly technologyProductNodeId: string;
+  readonly technologyProductTitle: string;
   readonly contextPackId: string;
   readonly nodeCount: number;
   readonly edgeCount: number;
@@ -64,12 +72,18 @@ function databasePath(): string {
 function clusterFor(nodeType: MemoryNodeType): GraphCluster {
   if (nodeType === "operator" || nodeType === "preference") return "operator";
   if (["mission", "run", "plan", "phase", "step", "target", "asset", "entity", "decision"].includes(nodeType)) return "mission";
-  if (["tactic", "technique", "procedure"].includes(nodeType)) return "attack";
-  if (nodeType === "tool" || nodeType === "mcp_capability") return "tool";
+  if ([
+    "tactic", "technique", "procedure", "attack_tactic", "attack_vector",
+    "attack_technique", "attack_procedure", "procedure_version", "strategy",
+  ].includes(nodeType)) return "attack";
+  if (["tool", "mcp_capability", "tool_artifact", "script_artifact"].includes(nodeType)) return "tool";
   if (["evidence", "finding", "artifact", "report", "source"].includes(nodeType)) return "evidence";
   if (nodeType === "agent") return "agent";
-  if (nodeType === "failure" || nodeType === "recovery") return "failure";
-  if (nodeType === "lesson" || nodeType === "evaluation") return "lesson";
+  if ([
+    "failure", "recovery", "failure_mode", "operational_hazard",
+    "target_state_transition", "recovery_pattern", "health_check", "alternative",
+  ].includes(nodeType)) return "failure";
+  if (["lesson", "evaluation", "attack_lesson", "research"].includes(nodeType)) return "lesson";
   return "other";
 }
 
@@ -85,6 +99,7 @@ function titleFor(nodeType: MemoryNodeType, namespace: string): string {
 
 function lifecycleFor(nodeType: MemoryNodeType): MemoryLifecycle {
   if (nodeType === "operator" || nodeType === "preference") return "confirmed";
+  if (nodeType === "attack_lesson") return "confirmed";
   if (nodeType === "failure") return "disputed";
   if (nodeType === "evaluation") return "stale";
   return "verified";
@@ -105,6 +120,13 @@ function coreNodeId(
 ): string {
   if (nodeType === "mission") return missionId;
   if (nodeType === "run") return runId;
+  // Production deliberately rejects descriptive IDs for reusable attack
+  // knowledge because an ID can otherwise leak target or procedure details
+  // through URLs, logs, graph links, and Vault filenames. Keep this browser
+  // seed deterministic without weakening that boundary.
+  if (isAttackCentricReusableNodeType(nodeType)) {
+    return `mem_${hashCanonical({ fixture: "brain_graph", namespace, nodeType })}`;
+  }
   return `mem-brain-graph-${namespace}-${nodeType}`;
 }
 
@@ -113,6 +135,7 @@ function sourceScope(
   engagementId: string,
   missionId: string,
 ): MemoryScope {
+  if (isAttackCentricReusableNodeType(nodeType)) return { kind: "global" };
   return nodeType === "operator" || nodeType === "preference"
     ? { kind: "engagement", engagementId }
     : { kind: "mission", engagementId, missionId };
@@ -164,6 +187,7 @@ export function createBrainGraphFixture(instanceId: string): BrainGraphFixture {
       const id = coreNodeId(nodeType, namespace, created.mission.id, created.run.id);
       coreIds.set(nodeType, id);
       const lifecycleStatus = lifecycleFor(nodeType);
+      const attackKnowledge = isAttackCentricReusableNodeType(nodeType);
       repository.createNode({
         id,
         nodeType,
@@ -174,7 +198,7 @@ export function createBrainGraphFixture(instanceId: string): BrainGraphFixture {
         sensitivity: sensitivityFor(nodeType),
         confidence: nodeType === "evaluation" ? 0.55 : nodeType === "failure" ? 0.72 : 0.96,
         lifecycleStatus,
-        confirmationState: lifecycleStatus === "confirmed" ? "confirmed" : "not_required",
+        confirmationState: lifecycleStatus === "confirmed" || attackKnowledge ? "confirmed" : "not_required",
         provenance: {
           method: nodeType === "operator" || nodeType === "preference" ? "operator_statement" : "evidence",
           explanation: `The isolated browser fixture created this ${nodeType.replaceAll("_", " ")} node through the canonical memory repository.`,
@@ -182,16 +206,26 @@ export function createBrainGraphFixture(instanceId: string): BrainGraphFixture {
             sourceType: "e2e_fixture",
             sourceId: `brain-graph-source-${namespace}-${nodeType}`,
             acquiredAt: FIXTURE_TIME,
-            excerptRedacted: `Sanitized ${nodeType.replaceAll("_", " ")} fixture source.`,
+            ...(!attackKnowledge
+              ? { excerptRedacted: `Sanitized ${nodeType.replaceAll("_", " ")} fixture source.` }
+              : {}),
           }],
         },
-        authorType: nodeType === "operator" || nodeType === "preference" ? "operator" : "agent",
-        authorId: nodeType === "operator" || nodeType === "preference" ? "e2e-local-operator" : "brain-graph-fixture-agent",
+        authorType: nodeType === "operator" || nodeType === "preference" || attackKnowledge ? "operator" : "agent",
+        authorId: nodeType === "operator" || nodeType === "preference" || attackKnowledge
+          ? "e2e-local-operator"
+          : "brain-graph-fixture-agent",
         retentionPolicy: { allowGuided: true, allowAutonomous: nodeType !== "failure", journeys: ["guided"] },
       });
     }
 
-    const fillerCount = BRAIN_GRAPH_FIXTURE_NODE_COUNT - MEMORY_NODE_TYPES.length;
+    // The engagement graph keeps its original 276-node progressive-loading
+    // contract. Reusable attack knowledge is deliberately global and is an
+    // additional Vault corpus, not engagement-owned filler.
+    const engagementCoreCount = MEMORY_NODE_TYPES.filter(
+      (nodeType) => !isAttackCentricReusableNodeType(nodeType),
+    ).length;
+    const fillerCount = BRAIN_GRAPH_FIXTURE_NODE_COUNT - engagementCoreCount;
     const fillerNodes: Array<{ readonly id: string; readonly nodeType: MemoryNodeType }> = [];
     for (let index = 0; index < fillerCount; index += 1) {
       const nodeType = FILLER_NODE_TYPES[index % FILLER_NODE_TYPES.length]!;
@@ -224,8 +258,15 @@ export function createBrainGraphFixture(instanceId: string): BrainGraphFixture {
     }
 
     let edgeCount = 0;
-    const createEdge = (sourceNodeId: string, targetNodeId: string, edgeType: MemoryEdgeType, purpose: string) => {
+    const createEdge = (
+      sourceNodeId: string,
+      targetNodeId: string,
+      edgeType: MemoryEdgeType,
+      purpose: string,
+      scope: MemoryScope = { kind: "mission", engagementId, missionId: created.mission.id },
+    ) => {
       edgeCount += 1;
+      const attackKnowledgeEdge = attackEdgeTypes.has(edgeType);
       repository.createEdge({
         id: `medge-brain-graph-${namespace}-${String(edgeCount).padStart(4, "0")}`,
         sourceNodeId,
@@ -233,7 +274,7 @@ export function createBrainGraphFixture(instanceId: string): BrainGraphFixture {
         edgeType,
         title: `${edgeType.replaceAll("_", " ")} relationship`,
         summary: purpose,
-        scope: { kind: "mission", engagementId, missionId: created.mission.id },
+        scope,
         sensitivity: "internal",
         confidence: 0.95,
         lifecycleStatus: "verified",
@@ -247,23 +288,38 @@ export function createBrainGraphFixture(instanceId: string): BrainGraphFixture {
           }],
         },
         explanation: purpose,
-        authorType: "system",
-        authorId: "brain-graph-fixture",
+        authorType: attackKnowledgeEdge ? "operator" : "system",
+        authorId: attackKnowledgeEdge ? "e2e-local-operator" : "brain-graph-fixture",
       });
     };
 
     const coreEntries = MEMORY_NODE_TYPES.map((nodeType) => ({ nodeType, id: coreIds.get(nodeType)! }));
-    for (let index = 1; index < coreEntries.length; index += 1) {
+    const attackEdgeTypes = new Set<MemoryEdgeType>(ATTACK_CENTRIC_EDGE_TYPES);
+    const legacyEdgeTypes = MEMORY_EDGE_TYPES.filter((edgeType) => !attackEdgeTypes.has(edgeType));
+    for (let index = 1; index <= legacyEdgeTypes.length; index += 1) {
       createEdge(
-        coreEntries[index - 1]!.id,
-        coreEntries[index]!.id,
-        MEMORY_EDGE_TYPES[(index - 1) % MEMORY_EDGE_TYPES.length]!,
-        `The fixture preserves a typed ${MEMORY_EDGE_TYPES[(index - 1) % MEMORY_EDGE_TYPES.length]!.replaceAll("_", " ")} explanation between adjacent canonical domains.`,
+        coreEntries[(index - 1) % coreEntries.length]!.id,
+        coreEntries[index % coreEntries.length]!.id,
+        legacyEdgeTypes[index - 1]!,
+        `The fixture preserves a typed ${legacyEdgeTypes[index - 1]!.replaceAll("_", " ")} explanation between adjacent canonical domains.`,
+      );
+    }
+    for (const edgeType of ATTACK_CENTRIC_EDGE_TYPES) {
+      const rule = ATTACK_CENTRIC_EDGE_ENDPOINTS[edgeType];
+      const sourceType = [...rule.sources][0]!;
+      const targetType = [...rule.targets].find((candidate) => candidate !== sourceType)
+        ?? [...rule.targets][0]!;
+      createEdge(
+        coreIds.get(sourceType)!,
+        coreIds.get(targetType)!,
+        edgeType,
+        `The fixture preserves a valid reusable ${edgeType.replaceAll("_", " ")} knowledge relationship.`,
+        { kind: "global" },
       );
     }
     const missionNodeId = coreIds.get("mission")!;
     for (const entry of coreEntries) {
-      if (entry.id === missionNodeId) continue;
+      if (entry.id === missionNodeId || isAttackCentricReusableNodeType(entry.nodeType)) continue;
       createEdge(entry.id, missionNodeId, "belongs_to", "This canonical memory belongs to the represented mission cluster.");
     }
 
@@ -338,6 +394,10 @@ export function createBrainGraphFixture(instanceId: string): BrainGraphFixture {
       preferenceTitle: titleFor("preference", namespace),
       secondaryNodeId: coreIds.get("evidence")!,
       secondaryTitle: titleFor("evidence", namespace),
+      attackTacticNodeId: coreIds.get("attack_tactic")!,
+      attackTacticTitle: titleFor("attack_tactic", namespace),
+      technologyProductNodeId: coreIds.get("technology_product")!,
+      technologyProductTitle: titleFor("technology_product", namespace),
       contextPackId,
       nodeCount: BRAIN_GRAPH_FIXTURE_NODE_COUNT,
       edgeCount,
@@ -356,8 +416,15 @@ export function readBrainGraphFixtureState(fixture: BrainGraphFixture): BrainGra
   try {
     const nodeCount = database.prepare(`
       SELECT COUNT(*) AS count FROM memory_nodes
-      WHERE engagement_id = ? AND lifecycle_status != 'forgotten'
-    `).get(fixture.engagementId) as { readonly count: number };
+      WHERE (id LIKE ? OR id IN (?, ?))
+        AND engagement_id = ?
+        AND lifecycle_status != 'forgotten'
+    `).get(
+      `mem-brain-graph-${fixture.namespace}-%`,
+      fixture.missionId,
+      fixture.runId,
+      fixture.engagementId,
+    ) as { readonly count: number };
     const edgeCount = database.prepare(`
       SELECT COUNT(*) AS count FROM memory_edges WHERE id LIKE ?
     `).get(`medge-brain-graph-${fixture.namespace}-%`) as { readonly count: number };
@@ -376,5 +443,28 @@ export function readBrainGraphFixtureState(fixture: BrainGraphFixture): BrainGra
     };
   } finally {
     database.close();
+  }
+}
+
+function runCli(): void {
+  const operation = process.argv[2];
+  const input = JSON.parse(process.argv[3] ?? "null") as unknown;
+  let result: BrainGraphFixture | BrainGraphFixtureState;
+  if (operation === "create" && typeof input === "string") {
+    result = createBrainGraphFixture(input);
+  } else if (operation === "read" && input && typeof input === "object") {
+    result = readBrainGraphFixtureState(input as BrainGraphFixture);
+  } else {
+    throw new Error(`Unsupported Brain-graph fixture operation: ${String(operation)}`);
+  }
+  process.stdout.write(`${CLI_RESULT_PREFIX}${JSON.stringify(result)}\n`);
+}
+
+if (import.meta.main) {
+  try {
+    runCli();
+  } catch (error) {
+    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    process.exitCode = 1;
   }
 }

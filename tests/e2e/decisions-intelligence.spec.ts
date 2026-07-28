@@ -2,6 +2,7 @@ import { expect, test, type Download, type Locator, type Page, type Response, ty
 import { readFileSync } from "node:fs";
 import { BrowserAudit } from "./support/browserAudit";
 import { canonicalFixtureNamespace } from "./support/fixtureNamespace";
+import { readTitaniumOptions, selectTitaniumOption } from "./support/titaniumSelect";
 import {
   createDecisionsIntelligenceFixture,
   readDecisionsIntelligenceFixtureSnapshot,
@@ -54,6 +55,12 @@ function apiResponse(
   });
 }
 
+function mutationResponse(page: Page, path: string): Promise<Response> {
+  return page.waitForResponse((response) => (
+    response.request().method() === "POST" && pathname(response) === path
+  ));
+}
+
 async function pagePayload(response: Response): Promise<{
   readonly items: readonly Record<string, unknown>[];
   readonly nextCursor: string | null;
@@ -74,8 +81,13 @@ async function strictAudit(audit: BrowserAudit, testInfo: TestInfo): Promise<voi
 }
 
 async function activate(control: Locator, input: "keyboard" | "pointer"): Promise<void> {
+  const application = control.page().locator(".ti-boot-boundary__application");
+  if (await application.count() > 0) {
+    await expect(application).not.toHaveAttribute("inert", "");
+  }
   if (input === "keyboard") {
     await control.focus();
+    await expect(control).toBeFocused();
     await control.press("Enter");
   } else {
     await control.click();
@@ -92,9 +104,7 @@ async function toggle(control: Locator, input: "keyboard" | "pointer"): Promise<
 }
 
 async function optionLabels(control: Locator): Promise<string[]> {
-  await expect(control).toBeVisible();
-  await expect(control.locator("option").first()).toBeAttached();
-  return control.locator("option").allTextContents();
+  return (await readTitaniumOptions(control)).map((option) => option.label);
 }
 
 async function expectHeading(page: Page, name: string): Promise<void> {
@@ -110,15 +120,14 @@ async function setSelectFilter(
   value: string,
 ): Promise<readonly Record<string, unknown>[]> {
   const response = apiResponse(page, path, (url) => url.searchParams.get(parameter) === value);
-  await control.selectOption(value);
+  await selectTitaniumOption(control, value, "pointer");
   const payload = await pagePayload(await response);
   await expect.poll(() => new URL(page.url()).searchParams.get(parameter)).toBe(value);
   return payload.items;
 }
 
 async function clearSelectFilter(page: Page, _path: string, control: Locator, parameter: string): Promise<void> {
-  await control.selectOption("");
-  await expect(control).toHaveValue("");
+  await selectTitaniumOption(control, "", "keyboard");
   await expect.poll(() => new URL(page.url()).searchParams.has(parameter)).toBe(false);
 }
 
@@ -215,7 +224,7 @@ test(`${TEST_IDS.decisionFilters} reads every canonical kind/state filter and tr
   await strictAudit(audit, testInfo);
 });
 
-test(`${TEST_IDS.decisionCards} exercises every rendered card control without invoking the fail-closed execution routes`, async ({ page }, testInfo) => {
+test(`${TEST_IDS.decisionCards} exercises every rendered card control and persists one exact Guided replan decision`, async ({ page }, testInfo) => {
   test.setTimeout(180_000);
   const before = fixtureSnapshot();
   const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
@@ -231,10 +240,12 @@ test(`${TEST_IDS.decisionCards} exercises every rendered card control without in
   });
   await expect(toolCard).toBeVisible();
   await expect(manualCard).toBeVisible();
-  await expect(page.getByText(
-    "Exact Guided runtime controls are read-only because this V2 process has no callable Guided provider/runtime boundary. Connect and attest that boundary before executing a represented step.",
-    { exact: true },
-  )).toBeVisible();
+  await expect(page.getByRole("status").filter({
+    hasText: "Manual Guided runtime is active.",
+  })).toBeVisible();
+  await expect(toolCard.getByRole("status").filter({
+    hasText: "Agent tool execution is unavailable in this Guided runtime mode.",
+  })).toBeVisible();
   const toolParameters = toolCard.locator("details").filter({ hasText: "Exact normalized parameters" });
   await activate(toolParameters.locator("summary"), "keyboard");
   await expect(toolParameters).toHaveJSProperty("open", true);
@@ -247,18 +258,19 @@ test(`${TEST_IDS.decisionCards} exercises every rendered card control without in
   await toolCard.getByLabel("Optional authorization note", { exact: true }).fill("Bounded read-only execution only");
   await expect(toolCard.getByRole("button", { name: "Run this exact step", exact: true })).toBeDisabled();
   await expect(manualCard.getByRole("button", { name: "Run this exact step", exact: true })).toHaveCount(0);
-  await expect(manualCard.getByText("This operator-run step cannot be dispatched through MCP.", { exact: false })).toBeVisible();
+  await expect(manualCard.getByText(/This operator-run step cannot be dispatched/u)).toBeVisible();
 
   const rejection = toolCard.getByLabel("Required rejection reason", { exact: true });
   const reject = toolCard.getByRole("button", { name: "Reject and replan", exact: true });
+  const rejectionReason = "Use a different bounded observation source";
   await expect(reject).toBeDisabled();
-  await rejection.fill("Use a different bounded observation source");
-  await expect(reject).toBeDisabled();
+  await rejection.fill(rejectionReason);
+  await expect(reject).toBeEnabled();
   const skipReason = toolCard.getByLabel("Required skip reason", { exact: true });
   const skip = toolCard.getByRole("button", { name: "Skip exact step", exact: true });
   await expect(skip).toBeDisabled();
   await skipReason.fill("The bounded observation is not required for this fixture review");
-  await expect(skip).toBeDisabled();
+  await expect(skip).toBeEnabled();
   const stopReason = toolCard.getByLabel("Required stop reason", { exact: true });
   const stopConfirmation = toolCard.getByRole("checkbox", { name: "I understand this stops the entire mission, not only this step.", exact: true });
   const stop = toolCard.getByRole("button", { name: "Stop mission", exact: true });
@@ -266,9 +278,10 @@ test(`${TEST_IDS.decisionCards} exercises every rendered card control without in
   await expect(stop).toBeDisabled();
   await toggle(stopConfirmation, "keyboard");
   await expect(stopConfirmation).toBeChecked();
-  await expect(stop).toBeDisabled();
+  await expect(stop).toBeEnabled();
   await toggle(stopConfirmation, "pointer");
   await expect(stopConfirmation).not.toBeChecked();
+  await expect(stop).toBeDisabled();
 
   const guidedLink = toolCard.getByRole("link", { name: "Open Guided result review", exact: true });
   await expect(guidedLink).toHaveAttribute("href", `/guided/${fixture.toolMissionId}`);
@@ -285,6 +298,176 @@ test(`${TEST_IDS.decisionCards} exercises every rendered card control without in
   await page.goBack({ waitUntil: "domcontentloaded" });
   await pagePayload(await guidedReturnRead);
   await expectHeading(page, "Decisions");
+
+  await rejection.fill(rejectionReason);
+  const rejectedMutation = mutationResponse(
+    page,
+    `/api/v2/guided-decisions/${fixture.toolDecisionId}/reject`,
+  );
+  await activate(reject, "pointer");
+  const rejectedResponse = await rejectedMutation;
+  expect(rejectedResponse.status(), await rejectedResponse.text()).toBe(200);
+  expect(await rejectedResponse.json()).toEqual({
+    schemaVersion: "2.4",
+    decisionId: fixture.toolDecisionId,
+    status: "rejected",
+  });
+  const replacementQuery = new URLSearchParams({
+    kind: "guided_decision",
+    query: fixture.searchToken,
+    limit: "50",
+  });
+  const readReplacementPage = async (): Promise<{
+    readonly items: ReadonlyArray<{
+      readonly id: string;
+      readonly status: string;
+      readonly mission: { readonly id: string };
+      readonly run: { readonly id: string };
+      readonly exactStep: {
+        readonly stepId: string;
+        readonly requestedParameters: Record<string, unknown>;
+      };
+    }>;
+  }> => {
+    const response = await audit.request(page.request, {
+      method: "GET",
+      url: `/api/v2/decision-inbox?${replacementQuery.toString()}`,
+    });
+    expect(response.status(), await response.text()).toBe(200);
+    return response.json() as Promise<{
+      readonly items: ReadonlyArray<{
+        readonly id: string;
+        readonly status: string;
+        readonly mission: { readonly id: string };
+        readonly run: { readonly id: string };
+        readonly exactStep: {
+          readonly stepId: string;
+          readonly requestedParameters: Record<string, unknown>;
+        };
+      }>;
+    }>;
+  };
+  await expect.poll(async () => {
+    const current = await readReplacementPage();
+    return current.items.some((item) => (
+      item.mission.id === fixture.toolMissionId
+      && item.run.id === fixture.toolRunId
+      && item.id !== fixture.toolDecisionId
+      && item.status === "pending"
+    ));
+  }).toBe(true);
+  const replacementPage = await readReplacementPage();
+  expect(replacementPage.items).toContainEqual(expect.objectContaining({
+    id: fixture.toolDecisionId,
+    status: "rejected",
+  }));
+  const replacement = replacementPage.items.find((item) => (
+    item.mission.id === fixture.toolMissionId
+    && item.run.id === fixture.toolRunId
+    && item.id !== fixture.toolDecisionId
+  ));
+  expect(replacement).toMatchObject({
+    id: expect.any(String),
+    mission: { id: fixture.toolMissionId },
+    run: { id: fixture.toolRunId },
+    status: "pending",
+    exactStep: {
+      stepId: expect.any(String),
+      requestedParameters: {
+        actionType: "guided_manual_baseline",
+        target: `https://tool-${fixture.namespace}.fixture.test`,
+        kind: "manual",
+        arguments: {
+          executionMode: "operator_manual_only",
+          noProviderCall: true,
+          noToolDispatch: true,
+        },
+      },
+    },
+  });
+  await expect(page.getByText(`Step ${String(replacement?.exactStep.stepId)}`, { exact: true })).toBeVisible();
+
+  const runResponse = await audit.request(page.request, {
+    method: "GET",
+    url: `/api/v2/runs/${fixture.toolRunId}`,
+  });
+  expect(runResponse.status(), await runResponse.text()).toBe(200);
+  const runPayload = await runResponse.json() as {
+    readonly run: Record<string, unknown>;
+  };
+  expect(runPayload.run).toMatchObject({
+    id: fixture.toolRunId,
+    status: "waiting_guided_decision",
+    currentPlanId: expect.any(String),
+    currentStepId: replacement?.exactStep.stepId,
+    statusReason: "The first Guided step is explained and awaits one exact operator decision",
+  });
+
+  const plansResponse = await audit.request(page.request, {
+    method: "GET",
+    url: `/api/v2/runs/${fixture.toolRunId}/plans`,
+  });
+  expect(plansResponse.status(), await plansResponse.text()).toBe(200);
+  const plansPayload = await plansResponse.json() as {
+    readonly items: readonly Record<string, unknown>[];
+  };
+  expect(plansPayload.items).toMatchObject([
+    {
+      version: 2,
+      status: "active",
+      steps: [{
+        id: replacement?.exactStep.stepId,
+        status: "waiting_guided_decision",
+        action: {
+          actionType: "guided_manual_baseline",
+          kind: "manual",
+        },
+      }],
+    },
+    {
+      version: 1,
+      status: "superseded",
+      steps: [{
+        id: fixture.toolStepId,
+        status: "cancelled",
+      }],
+    },
+  ]);
+
+  const eventsResponse = await audit.request(page.request, {
+    method: "GET",
+    url: `/api/v2/observability/events?runId=${encodeURIComponent(fixture.toolRunId)}&eventType=run.state_changed&limit=20`,
+  });
+  expect(eventsResponse.status(), await eventsResponse.text()).toBe(200);
+  const eventsPayload = await eventsResponse.json() as {
+    readonly items: ReadonlyArray<{
+      readonly sequence: number;
+      readonly summary: string;
+    }>;
+  };
+  expect(
+    [...eventsPayload.items]
+      .sort((left, right) => left.sequence - right.sequence)
+      .map((event) => event.summary),
+  ).toEqual([
+    `waiting_guided_decision -> recovering: Operator rejected the Guided step: ${rejectionReason}`,
+    "recovering -> running: Guided plan activated so the first represented decision can be published",
+    "running -> waiting_guided_decision: The first Guided step is explained and awaits one exact operator decision",
+  ]);
+  const afterGuidedDecision = fixtureSnapshot();
+  expect(afterGuidedDecision).toMatchObject({
+    evidenceCount: before.evidenceCount,
+    findingCount: before.findingCount,
+    artifactCount: before.artifactCount,
+    toolDecisionStatus: "rejected",
+    manualDecisionStatus: "pending",
+    terminalApprovalStatus: before.terminalApprovalStatus,
+    activeApprovalStatus: before.activeApprovalStatus,
+    systemApprovalStatus: before.systemApprovalStatus,
+    fixtureAuditCount: before.fixtureAuditCount + 1,
+    primaryFindingReview: before.primaryFindingReview,
+    relationlessFindingReview: before.relationlessFindingReview,
+  });
 
   const contractResponse = apiResponse(page, "/api/v2/decision-inbox", (url) => url.searchParams.get("kind") === "autonomous_contract");
   await audit.withExpectedDocumentNavigationTeardown(page, () => page.goto(
@@ -381,7 +564,7 @@ test(`${TEST_IDS.decisionCards} exercises every rendered card control without in
   await pagePayload(await approvalReturnRead);
   await expectHeading(page, "Decisions");
 
-  expect(fixtureSnapshot()).toEqual(before);
+  expect(fixtureSnapshot()).toEqual(afterGuidedDecision);
   await strictAudit(audit, testInfo);
 });
 
@@ -508,17 +691,43 @@ test(`${TEST_IDS.evidence} exercises evidence tabs, filters, cursor, provenance,
   await activate(operationalLink, "keyboard");
   expect((await operationalDetailResponse).status()).toBe(200);
   await expect(page.getByRole("note")).toContainText("Historical operational log — not verified evidence.");
-  await page.goBack({ waitUntil: "domcontentloaded" });
+  await audit.withExpectedHistoryTraversal(
+    page,
+    () => page.goBack({ waitUntil: "domcontentloaded" }),
+  );
+  await expect.poll(() => {
+    const url = new URL(page.url());
+    return {
+      pathname: url.pathname,
+      missionId: url.searchParams.get("missionId"),
+      runId: url.searchParams.get("runId"),
+      recordClass: url.searchParams.get("recordClass"),
+    };
+  }).toEqual({
+    pathname: "/intelligence/evidence",
+    missionId: fixture.intelligenceMissionId,
+    runId: fixture.intelligenceRunId,
+    recordClass: "operational_log",
+  });
+  const returnedRecordClass = page.getByRole("combobox", { name: "Record class", exact: true });
+  await expect(
+    returnedRecordClass.locator("xpath=..").locator("select.os-titanium-select__form-proxy"),
+  ).toHaveValue("operational_log");
+  await expect(
+    page.getByRole("link", { name: fixture.operationalLogEvidenceSummary, exact: true }),
+  ).toBeVisible();
+  await audit.waitForPageApiSettlement(page, { quietMs: 1_000 });
+  const returnedVerification = page.getByRole("combobox", { name: "Verification", exact: true });
   const allRecords = await setSelectFilter(
     page,
     "/api/v2/intelligence/evidence",
-    recordClass,
+    returnedRecordClass,
     "recordClass",
     "all",
   );
   expect(allRecords.map((item) => item.id)).toContain(fixture.operationalLogEvidenceId);
   expect(allRecords.some((item) => item.recordClass === "evidence")).toBe(true);
-  await clearSelectFilter(page, "/api/v2/intelligence/evidence", recordClass, "recordClass");
+  await clearSelectFilter(page, "/api/v2/intelligence/evidence", returnedRecordClass, "recordClass");
   await expect(page.getByText("Raw command output is hidden by default because a technical log is not proof.", { exact: false })).toBeVisible();
 
   const search = page.getByLabel("Search", { exact: true });
@@ -532,11 +741,11 @@ test(`${TEST_IDS.evidence} exercises evidence tabs, filters, cursor, provenance,
   await expect.poll(() => new URL(page.url()).searchParams.has("query")).toBe(false);
 
   for (const value of EVIDENCE_STATES) {
-    const items = await setSelectFilter(page, "/api/v2/intelligence/evidence", verification, "verificationState", value);
+    const items = await setSelectFilter(page, "/api/v2/intelligence/evidence", returnedVerification, "verificationState", value);
     expect(items.length).toBeGreaterThan(0);
     expect(items.every((item) => item.verificationState === value)).toBe(true);
   }
-  await clearSelectFilter(page, "/api/v2/intelligence/evidence", verification, "verificationState");
+  await clearSelectFilter(page, "/api/v2/intelligence/evidence", returnedVerification, "verificationState");
 
   const nextResponse = apiResponse(page, "/api/v2/intelligence/evidence", (url) => Boolean(url.searchParams.get("cursor")));
   await activate(page.getByRole("button", { name: "Next page", exact: true }), "pointer");
@@ -598,7 +807,7 @@ test(`${TEST_IDS.evidence} exercises evidence tabs, filters, cursor, provenance,
     .toHaveAttribute("href", `/missions/${fixture.relationlessMissionId}`);
   await expect(unavailableEvidence.getByText("No run relation was retained.", { exact: true })).toBeVisible();
   await expect(unavailableEvidence.getByText(
-    "Referenced artifact is unavailable or outside the current scope.",
+    "Referenced artifact is unavailable, deleted, or outside the current scope. Its stable ID is retained for reconciliation, but no link was generated.",
     { exact: true },
   )).toBeVisible();
   await expect(unavailableEvidence.getByRole("link", { name: /artifact-no-longer-present/u })).toHaveCount(0);
@@ -656,6 +865,146 @@ test(`${TEST_IDS.evidence} exercises evidence tabs, filters, cursor, provenance,
     "The retained run reference is unavailable or belongs to another mission.",
   );
 
+  const archivedEvidenceResponse = apiResponse(
+    page,
+    `/api/v2/intelligence/evidence/${fixture.archivedEvidenceId}`,
+  );
+  await audit.withExpectedDocumentNavigationTeardown(page, () => page.goto(
+    `/intelligence/evidence/${fixture.archivedEvidenceId}`,
+    { waitUntil: "domcontentloaded" },
+  ));
+  expect((await archivedEvidenceResponse).status()).toBe(200);
+  await expect(page.getByRole("heading", {
+    name: fixture.archivedEvidenceSummary,
+    exact: true,
+  })).toBeVisible();
+  const archivedEvidence = page.locator(".os-detail-panel");
+  await expect(archivedEvidence.getByRole("link", {
+    name: fixture.archivedMissionTitle,
+    exact: true,
+  })).toHaveAttribute("href", `/missions/${fixture.archivedMissionId}`);
+  const archivedRunLink = archivedEvidence.getByRole("link", {
+    name: fixture.archivedRunId,
+    exact: true,
+  });
+  await expect(archivedRunLink).toHaveAttribute(
+    "href",
+    `/missions/${fixture.archivedMissionId}/runs/${fixture.archivedRunId}`,
+  );
+  const quarantinedArtifactLink = archivedEvidence.getByRole("link", {
+    name: fixture.quarantinedArtifactType,
+    exact: true,
+  });
+  await expect(quarantinedArtifactLink).toHaveAttribute(
+    "href",
+    `/intelligence/artifacts/${fixture.quarantinedArtifactId}`,
+  );
+  await expect(page.getByRole("link", {
+    name: "Export evidence metadata",
+    exact: true,
+  })).toHaveAttribute(
+    "href",
+    `/api/v2/intelligence/evidence/runs/${fixture.archivedRunId}/export`,
+  );
+
+  const archivedRuntimeResponse = apiResponse(
+    page,
+    `/api/v2/missions/${fixture.archivedMissionId}/runtime`,
+  );
+  await activate(archivedRunLink, "keyboard");
+  expect((await archivedRuntimeResponse).status()).toBe(200);
+  await expect.poll(() => new URL(page.url()).pathname).toBe(
+    `/missions/${fixture.archivedMissionId}/runs/${fixture.archivedRunId}`,
+  );
+  await expectHeading(page, fixture.archivedMissionTitle);
+  await audit.withExpectedHistoryTraversal(page, () => page.goBack({
+    waitUntil: "domcontentloaded",
+  }));
+  await expect(page.getByRole("heading", {
+    name: fixture.archivedEvidenceSummary,
+    exact: true,
+  })).toBeVisible();
+
+  const quarantinedArtifactResponse = apiResponse(
+    page,
+    `/api/v2/intelligence/artifacts/${fixture.quarantinedArtifactId}`,
+  );
+  await activate(page.locator(".os-detail-panel").getByRole("link", {
+    name: fixture.quarantinedArtifactType,
+    exact: true,
+  }), "pointer");
+  expect((await quarantinedArtifactResponse).status()).toBe(200);
+  await expect(page).toHaveURL(`/intelligence/artifacts/${fixture.quarantinedArtifactId}`);
+  await expect(page.getByRole("heading", {
+    name: fixture.quarantinedArtifactType,
+    exact: true,
+  })).toBeVisible();
+  await expect(page.getByText("Quarantined", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", {
+    name: "Artifact content delivery",
+    exact: true,
+  })).toContainText("This artifact is quarantined and cannot be delivered.");
+  await expect(page.getByRole("link", {
+    name: "Download verified content",
+    exact: true,
+  })).toHaveCount(0);
+  await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload({
+    waitUntil: "domcontentloaded",
+  }));
+  await expect(page.getByText("Quarantined", { exact: true })).toBeVisible();
+  await audit.withExpectedHistoryTraversal(page, () => page.goBack({
+    waitUntil: "domcontentloaded",
+  }));
+  await expect(page.getByRole("heading", {
+    name: fixture.archivedEvidenceSummary,
+    exact: true,
+  })).toBeVisible();
+  await audit.withExpectedHistoryTraversal(page, () => page.goForward({
+    waitUntil: "domcontentloaded",
+  }));
+  await expect(page.getByText("Quarantined", { exact: true })).toBeVisible();
+
+  const deletedArtifactEvidenceResponse = apiResponse(
+    page,
+    `/api/v2/intelligence/evidence/${fixture.deletedArtifactEvidenceId}`,
+  );
+  await audit.withExpectedDocumentNavigationTeardown(page, () => page.goto(
+    `/intelligence/evidence/${fixture.deletedArtifactEvidenceId}`,
+    { waitUntil: "domcontentloaded" },
+  ));
+  expect((await deletedArtifactEvidenceResponse).status()).toBe(200);
+  await expect(page.getByRole("heading", {
+    name: fixture.deletedArtifactEvidenceSummary,
+    exact: true,
+  })).toBeVisible();
+  const deletedArtifactEvidence = page.locator(".os-detail-panel");
+  await expect(deletedArtifactEvidence.getByRole("link", {
+    name: fixture.archivedRunId,
+    exact: true,
+  })).toHaveAttribute(
+    "href",
+    `/missions/${fixture.archivedMissionId}/runs/${fixture.archivedRunId}`,
+  );
+  await expect(deletedArtifactEvidence.getByText(
+    "Referenced artifact is unavailable, deleted, or outside the current scope. Its stable ID is retained for reconciliation, but no link was generated.",
+    { exact: true },
+  )).toBeVisible();
+  await expect(deletedArtifactEvidence.getByRole("link", {
+    name: fixture.deletedArtifactId,
+    exact: true,
+  })).toHaveCount(0);
+  await expect(deletedArtifactEvidence.getByText(
+    fixture.deletedArtifactId,
+    { exact: false },
+  )).toHaveCount(0);
+  await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload({
+    waitUntil: "domcontentloaded",
+  }));
+  await expect(page.getByRole("heading", {
+    name: fixture.deletedArtifactEvidenceSummary,
+    exact: true,
+  })).toBeVisible();
+
   await audit.withExpectedDocumentNavigationTeardown(page, () => page.goto(
     intelligenceUrl("evidence", { runId: fixture.intelligenceRunId }),
     { waitUntil: "domcontentloaded" },
@@ -685,8 +1034,8 @@ test(`${TEST_IDS.evidence} exercises evidence tabs, filters, cursor, provenance,
   await strictAudit(audit, testInfo);
 });
 
-test(`${TEST_IDS.findings} exercises every finding filter and review-form control without submitting a mutation`, async ({ page }, testInfo) => {
-  test.setTimeout(180_000);
+test(`${TEST_IDS.findings} exercises finding filters and persists legal pointer and keyboard review submissions`, async ({ page }, testInfo) => {
+  test.setTimeout(300_000);
   const before = fixtureSnapshot();
   const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
   const initial = apiResponse(page, "/api/v2/intelligence/findings", (url) => url.searchParams.get("missionId") === fixture.intelligenceMissionId);
@@ -749,23 +1098,82 @@ test(`${TEST_IDS.findings} exercises every finding filter and review-form contro
   await expect(page.getByRole("heading", { name: fixture.primaryFindingTitle, exact: true })).toBeVisible();
   const reviewStatus = page.getByRole("combobox", { name: "Status", exact: true });
   await expect(reviewStatus).toBeVisible();
-  expect(await optionLabels(reviewStatus)).toEqual(["under_review", "verified", "rejected", "accepted_risk"]);
-  for (const value of ["verified", "rejected", "accepted_risk", "under_review"]) {
-    await reviewStatus.selectOption(value);
-    await expect(reviewStatus).toHaveValue(value);
-  }
+  expect(await optionLabels(reviewStatus)).toEqual(["verified", "rejected", "accepted_risk"]);
   const reason = page.getByLabel("Reason", { exact: true });
   const override = page.getByRole("checkbox", { name: "Explicit evidence-gate override (audited)", exact: true });
   const record = page.getByRole("button", { name: "Record decision", exact: true });
+  await expect(override).toHaveCount(0);
   await expect(record).toBeDisabled();
-  await reason.fill("Retain the current evidence-gated review state");
+  const verificationReason = "Verified against the linked immutable service fingerprint";
+  await reason.fill(verificationReason);
   await expect(record).toBeEnabled();
-  await toggle(override, "pointer");
-  await expect(override).toBeChecked();
-  await toggle(override, "keyboard");
-  await expect(override).not.toBeChecked();
+  const primaryReviewPath = `/api/v2/intelligence/findings/${fixture.primaryFindingId}/review`;
+  const verifiedResponse = mutationResponse(page, primaryReviewPath);
+  await activate(record, "pointer");
+  const verifiedPayload = await (await verifiedResponse).json() as { finding: Record<string, unknown> };
+  expect(verifiedPayload.finding).toMatchObject({
+    id: fixture.primaryFindingId,
+    reviewStatus: "verified",
+    operatorOverride: false,
+    evidenceCount: 1,
+    version: 2,
+  });
+  await expect(page.getByRole("status").filter({ hasText: "Finding review recorded." })).toBeVisible();
+  expect(await optionLabels(reviewStatus)).toEqual(["under_review"]);
+  await expect(reason).toHaveValue("");
+  await expect(record).toBeDisabled();
+
+  const reopeningReason = "Return the conclusion to review for an independent confirmation";
+  await reason.fill(reopeningReason);
+  const reopenedResponse = mutationResponse(page, primaryReviewPath);
+  await activate(record, "keyboard");
+  const reopenedPayload = await (await reopenedResponse).json() as { finding: Record<string, unknown> };
+  expect(reopenedPayload.finding).toMatchObject({
+    id: fixture.primaryFindingId,
+    reviewStatus: "under_review",
+    operatorOverride: false,
+    evidenceCount: 1,
+    version: 3,
+  });
+  expect(await optionLabels(reviewStatus)).toEqual(["verified", "rejected", "accepted_risk"]);
+  await expect(reason).toHaveValue("");
+  const afterPrimary = fixtureSnapshot();
+  expect(afterPrimary.primaryFindingReview).toMatchObject({
+    status: "under_review",
+    version: 3,
+    operatorOverride: false,
+  });
+  expect(afterPrimary.primaryFindingReview.audits).toEqual([
+    {
+      action: "finding.reviewed",
+      reason: verificationReason,
+      details: expect.objectContaining({
+        from: "under_review",
+        to: "verified",
+        operatorOverride: false,
+        evidenceCount: 1,
+        previousVersion: 1,
+        version: 2,
+      }),
+    },
+    {
+      action: "finding.reviewed",
+      reason: reopeningReason,
+      details: expect.objectContaining({
+        from: "verified",
+        to: "under_review",
+        operatorOverride: false,
+        evidenceCount: 1,
+        previousVersion: 2,
+        version: 3,
+      }),
+    },
+  ]);
   await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload({ waitUntil: "domcontentloaded" }));
   await expect(page.getByRole("heading", { name: fixture.primaryFindingTitle, exact: true })).toBeVisible();
+  expect(await optionLabels(page.getByRole("combobox", { name: "Status", exact: true })))
+    .toEqual(["verified", "rejected", "accepted_risk"]);
+  await expect(page.getByLabel("Reason", { exact: true })).toHaveValue("");
 
   const relationlessFindingResponse = apiResponse(page, `/api/v2/intelligence/findings/${fixture.relationlessFindingId}`);
   await audit.withExpectedDocumentNavigationTeardown(page, () => page.goto(
@@ -781,8 +1189,114 @@ test(`${TEST_IDS.findings} exercises every finding filter and review-form contro
     { exact: true },
   )).toBeVisible();
   await expect(relationlessFinding.getByRole("link", { name: /evidence/u })).toHaveCount(0);
+  const relationlessStatus = relationlessFinding.getByRole("combobox", { name: "Status", exact: true });
+  const relationlessReason = relationlessFinding.getByLabel("Reason", { exact: true });
+  const relationlessRecord = relationlessFinding.getByRole("button", { name: "Record decision", exact: true });
+  expect(await optionLabels(relationlessStatus)).toEqual(["under_review"]);
+  await relationlessReason.fill("Begin a deliberate evidence review before reaching a conclusion");
+  const relationlessReviewPath = `/api/v2/intelligence/findings/${fixture.relationlessFindingId}/review`;
+  const underReviewResponse = mutationResponse(page, relationlessReviewPath);
+  await activate(relationlessRecord, "pointer");
+  expect(await (await underReviewResponse).json()).toMatchObject({
+    finding: {
+      id: fixture.relationlessFindingId,
+      reviewStatus: "under_review",
+      operatorOverride: false,
+      evidenceCount: 0,
+      version: 2,
+    },
+  });
+  expect(await optionLabels(relationlessStatus)).toEqual(["verified", "rejected", "accepted_risk"]);
+  await selectTitaniumOption(relationlessStatus, "verified", "keyboard");
+  const relationlessOverride = relationlessFinding.getByRole("checkbox", {
+    name: "Explicit evidence-gate override (audited)",
+    exact: true,
+  });
+  await expect(relationlessOverride).toBeVisible();
+  await relationlessReason.fill("12345678901");
+  await toggle(relationlessOverride, "pointer");
+  await expect(relationlessOverride).toBeChecked();
+  await expect(relationlessRecord).toBeDisabled();
+  await relationlessReason.fill("123456789012");
+  await expect(relationlessRecord).toBeEnabled();
+
+  audit.expectHttpResponse({
+    id: "intelligence.finding-review.override-permission-denied",
+    transport: "browser",
+    method: "POST",
+    pathname: relationlessReviewPath,
+    query: {},
+    status: 403,
+    occurrences: 1,
+    reason: "Prove that satisfying the 12-character UI gate cannot bypass the server's independent reviewer permission.",
+  });
+  const deniedOverrideResponse = mutationResponse(page, relationlessReviewPath);
+  await activate(relationlessRecord, "keyboard");
+  expect((await deniedOverrideResponse).status()).toBe(403);
+  await expect(relationlessFinding.getByRole("alert")).toContainText(
+    "This identity cannot override the finding evidence gate.",
+  );
+  const afterDeniedOverride = fixtureSnapshot();
+  expect(afterDeniedOverride.relationlessFindingReview).toMatchObject({
+    status: "under_review",
+    version: 2,
+    operatorOverride: false,
+  });
+  expect(afterDeniedOverride.relationlessFindingReview.audits).toHaveLength(1);
+
+  await selectTitaniumOption(relationlessStatus, "rejected", "pointer");
+  await expect(relationlessOverride).toHaveCount(0);
+  const rejectionReason = "No attributable evidence supports this imported conclusion";
+  await relationlessReason.fill(rejectionReason);
+  const rejectedResponse = mutationResponse(page, relationlessReviewPath);
+  await activate(relationlessRecord, "keyboard");
+  expect(await (await rejectedResponse).json()).toMatchObject({
+    finding: {
+      id: fixture.relationlessFindingId,
+      reviewStatus: "rejected",
+      operatorOverride: false,
+      evidenceCount: 0,
+      version: 3,
+    },
+  });
+  expect(await optionLabels(relationlessStatus)).toEqual(["under_review"]);
+  await expect(relationlessReason).toHaveValue("");
+  const afterRelationless = fixtureSnapshot();
+  expect(afterRelationless.relationlessFindingReview).toMatchObject({
+    status: "rejected",
+    version: 3,
+    operatorOverride: false,
+  });
+  expect(afterRelationless.relationlessFindingReview.audits).toEqual([
+    {
+      action: "finding.reviewed",
+      reason: "Begin a deliberate evidence review before reaching a conclusion",
+      details: expect.objectContaining({
+        from: "draft",
+        to: "under_review",
+        operatorOverride: false,
+        evidenceCount: 0,
+        previousVersion: 1,
+        version: 2,
+      }),
+    },
+    {
+      action: "finding.reviewed",
+      reason: rejectionReason,
+      details: expect.objectContaining({
+        from: "under_review",
+        to: "rejected",
+        operatorOverride: false,
+        evidenceCount: 0,
+        previousVersion: 2,
+        version: 3,
+      }),
+    },
+  ]);
   await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload({ waitUntil: "domcontentloaded" }));
   await expect(page.getByRole("heading", { name: fixture.relationlessFindingTitle, exact: true })).toBeVisible();
+  expect(await optionLabels(page.getByRole("combobox", { name: "Status", exact: true }))).toEqual(["under_review"]);
+  await expect(page.getByLabel("Reason", { exact: true })).toHaveValue("");
 
   const artifactTab = page.getByRole("link", { name: "Artifacts", exact: true });
   const artifactListResponse = apiResponse(page, "/api/v2/intelligence/artifacts");
@@ -791,7 +1305,21 @@ test(`${TEST_IDS.findings} exercises every finding filter and review-form contro
   await expect.poll(() => new URL(page.url()).pathname).toBe("/intelligence/artifacts");
   await page.goBack({ waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: fixture.relationlessFindingTitle, exact: true })).toBeVisible();
-  expect(fixtureSnapshot()).toEqual(before);
+  const after = fixtureSnapshot();
+  expect(after).toMatchObject({
+    evidenceCount: before.evidenceCount,
+    findingCount: before.findingCount,
+    artifactCount: before.artifactCount,
+    decisionInboxCount: before.decisionInboxCount,
+    toolDecisionStatus: before.toolDecisionStatus,
+    manualDecisionStatus: before.manualDecisionStatus,
+    terminalApprovalStatus: before.terminalApprovalStatus,
+    activeApprovalStatus: before.activeApprovalStatus,
+    systemApprovalStatus: before.systemApprovalStatus,
+    fixtureAuditCount: before.fixtureAuditCount,
+  });
+  expect(after.primaryFindingReview.audits).toHaveLength(before.primaryFindingReview.audits.length + 2);
+  expect(after.relationlessFindingReview.audits).toHaveLength(before.relationlessFindingReview.audits.length + 2);
   await strictAudit(audit, testInfo);
 });
 

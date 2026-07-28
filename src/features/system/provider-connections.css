@@ -1,0 +1,89 @@
+.provider-connection {
+  display: grid;
+  gap: var(--os-space-5);
+}
+
+.provider-connection__boundary,
+.provider-connection__restart,
+.provider-connection__compatibility,
+.provider-connection__message {
+  margin: 0;
+  border-inline-start: 1px solid var(--os-line-strong);
+  padding: var(--os-space-3) var(--os-space-4);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--os-info) 9%, transparent), transparent 72%);
+}
+
+.provider-connection__form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--os-space-4);
+  padding-block-start: var(--os-space-2);
+  border-block-start: 1px solid var(--os-line-soft);
+}
+
+.provider-connection__form label {
+  display: grid;
+  align-content: start;
+  gap: var(--os-space-2);
+  min-width: 0;
+}
+
+.provider-connection__form label > span {
+  color: var(--os-text);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.provider-connection__form input {
+  min-height: 44px;
+  width: 100%;
+  border: 1px solid var(--os-line-strong);
+  border-radius: var(--os-radius-md);
+  background: var(--os-surface-1);
+  color: var(--os-text);
+  padding: 0 var(--os-space-3);
+  font: inherit;
+}
+
+.provider-connection__form input:focus-visible {
+  outline: 2px solid var(--os-focus);
+  outline-offset: 2px;
+}
+
+.provider-connection__form small {
+  color: var(--os-text-muted);
+  line-height: 1.45;
+}
+
+.provider-connection__actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--os-space-3);
+}
+
+.provider-connection__restart {
+  border-inline-start-color: var(--os-warning);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--os-warning) 10%, transparent), transparent 72%);
+}
+
+.provider-connection__restart strong,
+.provider-connection__restart p {
+  margin: 0;
+}
+
+.provider-connection__restart p + p {
+  margin-block-start: var(--os-space-2);
+}
+
+.provider-connection__message {
+  border-inline-start-color: var(--os-success);
+}
+
+@media (max-width: 720px) {
+  .provider-connection__form {
+    grid-template-columns: 1fr;
+  }
+}

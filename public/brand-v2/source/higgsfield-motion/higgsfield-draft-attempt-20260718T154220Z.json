@@ -1,0 +1,169 @@
+{
+  "recorded_at_utc": "2026-07-18T15:42:20Z",
+  "request": "Low-cost reference-preserving mechanical transformation draft from the approved Ti-Scale titanium core artwork",
+  "source": {
+    "path": "public/brand-v2/source/ti-scale-higgsfield-recraft-core-20260718-095533-5634dadb-d88e-49f1-a47a-1010008d1543.png",
+    "mime_type": "image/png",
+    "dimensions": "1344x768",
+    "sha256": "4becf93da9ce55dd96d59833870b21ccae128b5e5fd2679443863afc43606107"
+  },
+  "higgsfield_account_check": {
+    "authenticated": true,
+    "subscription_plan_type": "plus",
+    "credits_at_check": 1218.6
+  },
+  "available_higgsfield_mcp_tools": [
+    "mcp__higgsfield__animation_actions",
+    "mcp__higgsfield__balance",
+    "mcp__higgsfield__cancel_trial_auto_renewal",
+    "mcp__higgsfield__create_voice",
+    "mcp__higgsfield__create_voice_from_confirmed_audio",
+    "mcp__higgsfield__create_website",
+    "mcp__higgsfield__deploy_game",
+    "mcp__higgsfield__deploy_website",
+    "mcp__higgsfield__dubbing",
+    "mcp__higgsfield__explainer_video",
+    "mcp__higgsfield__generate_3d",
+    "mcp__higgsfield__generate_audio",
+    "mcp__higgsfield__generate_image",
+    "mcp__higgsfield__generate_video",
+    "mcp__higgsfield__get_explainer_presets",
+    "mcp__higgsfield__get_game_creation_bundle_file",
+    "mcp__higgsfield__get_game_creation_instructions",
+    "mcp__higgsfield__get_website_creation_bundle_file",
+    "mcp__higgsfield__get_website_creation_instructions",
+    "mcp__higgsfield__get_workflow_bundle_file",
+    "mcp__higgsfield__get_workflow_instructions",
+    "mcp__higgsfield__job_display",
+    "mcp__higgsfield__list_voices",
+    "mcp__higgsfield__list_websites",
+    "mcp__higgsfield__list_workspaces",
+    "mcp__higgsfield__media_confirm",
+    "mcp__higgsfield__media_import_url",
+    "mcp__higgsfield__media_upload",
+    "mcp__higgsfield__media_upload_widget",
+    "mcp__higgsfield__models_explore",
+    "mcp__higgsfield__motion_control",
+    "mcp__higgsfield__outpaint_image",
+    "mcp__higgsfield__participate_in_contest",
+    "mcp__higgsfield__personal_clipper_create",
+    "mcp__higgsfield__personal_clipper_jobs",
+    "mcp__higgsfield__personal_clipper_status",
+    "mcp__higgsfield__presets_show",
+    "mcp__higgsfield__publish_game",
+    "mcp__higgsfield__publish_website",
+    "mcp__higgsfield__reframe",
+    "mcp__higgsfield__remove_background",
+    "mcp__higgsfield__rename_website",
+    "mcp__higgsfield__resolve_explainer_preset",
+    "mcp__higgsfield__select_workspace",
+    "mcp__higgsfield__shorts_studio_create",
+    "mcp__higgsfield__shorts_studio_create_preset",
+    "mcp__higgsfield__shorts_studio_list_presets",
+    "mcp__higgsfield__shorts_studio_list_sessions",
+    "mcp__higgsfield__shorts_studio_status",
+    "mcp__higgsfield__show_characters",
+    "mcp__higgsfield__show_generations",
+    "mcp__higgsfield__show_marketing_studio",
+    "mcp__higgsfield__show_marketing_studio_generations",
+    "mcp__higgsfield__show_medias",
+    "mcp__higgsfield__show_plans_and_credits",
+    "mcp__higgsfield__show_reference_elements",
+    "mcp__higgsfield__sync_agents",
+    "mcp__higgsfield__transactions",
+    "mcp__higgsfield__upscale_image",
+    "mcp__higgsfield__upscale_video",
+    "mcp__higgsfield__video_analysis_create",
+    "mcp__higgsfield__video_analysis_jobs",
+    "mcp__higgsfield__video_analysis_status",
+    "mcp__higgsfield__virality_predictor",
+    "mcp__higgsfield__voice_change",
+    "mcp__higgsfield__website_db",
+    "mcp__higgsfield__website_repo_access",
+    "mcp__higgsfield__website_secrets",
+    "mcp__higgsfield__website_status"
+  ],
+  "higgsfield_tools_called": [
+    "mcp__higgsfield__balance",
+    "mcp__higgsfield__models_explore",
+    "mcp__higgsfield__media_upload",
+    "mcp__higgsfield__show_medias"
+  ],
+  "recommended_video_models": [
+    {
+      "id": "seedance_2_0",
+      "name": "Seedance 2.0",
+      "provider": "Bytedance",
+      "roles": ["start_image", "end_image", "image_references", "video_references", "audio_references"],
+      "duration_seconds": "4-15",
+      "resolutions": ["480p", "720p", "1080p", "4k"]
+    },
+    {
+      "id": "seedance_2_0_mini",
+      "name": "Seedance 2.0 Mini",
+      "provider": "Bytedance",
+      "roles": ["start_image", "end_image", "image_references", "video_references", "audio_references"],
+      "duration_seconds": "4-15",
+      "resolutions": ["480p", "720p"]
+    },
+    {
+      "id": "grok_video_v15",
+      "name": "Grok Video 1.5",
+      "provider": "xAI",
+      "roles": ["start_image"],
+      "duration_seconds": "2-15",
+      "resolutions": ["480p", "720p"]
+    },
+    {
+      "id": "kling3_0_turbo",
+      "name": "Kling 3.0 Turbo",
+      "provider": "Kling",
+      "roles": ["start_image"],
+      "duration_seconds": "3-15",
+      "resolutions": ["720p", "1080p"]
+    },
+    {
+      "id": "happy_horse_video",
+      "name": "Happy Horse Video",
+      "provider": "Happy Horse",
+      "roles": ["start_image"],
+      "duration_seconds": "3-15",
+      "resolutions": ["720p", "1080p"]
+    }
+  ],
+  "selected_draft_configuration": {
+    "model": "seedance_2_0_mini",
+    "count": 1,
+    "duration_seconds": 4,
+    "resolution": "480p",
+    "aspect_ratio": "16:9",
+    "generate_audio": false,
+    "start_image": "approved source PNG",
+    "end_image": "same approved source PNG"
+  },
+  "upload_attempt": {
+    "tool": "mcp__higgsfield__media_upload",
+    "status": "failed",
+    "exact_response": "user cancelled MCP tool call"
+  },
+  "existing_higgsfield_media_check": {
+    "matching_source_found": false,
+    "checked_media_ids": [
+      "2b8577b8-8f29-4906-8387-d7be9a6e9ad7",
+      "bdc0c10c-037b-489d-8799-7c84c698125d"
+    ],
+    "verification": "Both existing images were visually inspected and are unrelated calligraphy artwork, so neither was used."
+  },
+  "generation": {
+    "submitted": false,
+    "generation_id": null,
+    "batch_id": null,
+    "history_identifier": null,
+    "output_location": null,
+    "output_dimensions": null,
+    "output_duration_seconds": null,
+    "credits_spent": 0,
+    "original_start_end_identity_preserved": "not assessable because no generation was submitted"
+  },
+  "blocker": "Higgsfield authentication and catalog access succeeded, but the required approved local source could not be registered because mcp__higgsfield__media_upload returned: user cancelled MCP tool call. generate_video requires a Higgsfield media UUID and does not accept a local path or raw URL."
+}

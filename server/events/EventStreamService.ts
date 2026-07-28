@@ -3,6 +3,7 @@ import { EventRepository } from "./EventRepository";
 import type {
   EventSensitivity,
   JsonValue,
+  OutboxRecord,
   RunEvent,
 } from "./types";
 
@@ -66,6 +67,16 @@ export interface OutboxPumpResult {
   readonly claimed: number;
   readonly delivered: number;
   readonly failed: number;
+  /**
+   * The durable outbox was left untouched because SQLite was temporarily busy.
+   * Callers may surface this state, while the periodic pump observes the
+   * returned retry boundary without treating contention as a service failure.
+   */
+  readonly deferred?: {
+    readonly reason: "database_busy";
+    readonly retryAfterMs: number;
+    readonly consecutiveAttempts: number;
+  };
 }
 
 export interface EventStreamServiceOptions {
@@ -79,10 +90,15 @@ export interface EventStreamServiceOptions {
   readonly retryBaseDelayMs?: number;
   readonly retryMaxDelayMs?: number;
   readonly retryJitterRatio?: number;
+  readonly databaseBusyBaseDelayMs?: number;
+  readonly databaseBusyMaxDelayMs?: number;
+  readonly databaseBusyJitterRatio?: number;
   readonly clock?: () => Date;
   readonly random?: () => number;
   /** Optional durable transport hook. Throwing retains the outbox row for retry. */
   readonly beforeBroadcast?: (event: RunEvent) => void | Promise<void>;
+  /** Scheduled-pump fault observer. Timer callbacks never reject globally. */
+  readonly onPumpError?: (error: Error) => void;
 }
 
 interface StreamClient {
@@ -197,6 +213,27 @@ function nonNegativeInteger(value: number | undefined, fallback: number, label: 
   return normalized;
 }
 
+function jitterRatio(value: number | undefined, fallback: number, label: string): number {
+  const normalized = value ?? fallback;
+  if (!Number.isFinite(normalized) || normalized < 0 || normalized > 1) {
+    throw new RangeError(`${label} must be between 0 and 1`);
+  }
+  return normalized;
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { readonly code?: unknown; readonly errno?: unknown };
+  if (
+    typeof candidate.code === "string" &&
+    (candidate.code === "SQLITE_BUSY" || candidate.code.startsWith("SQLITE_BUSY_"))
+  ) {
+    return true;
+  }
+  // SQLite extended result codes retain the primary code in the low byte.
+  return typeof candidate.errno === "number" && (candidate.errno & 0xff) === 5;
+}
+
 /** Durable outbox publisher plus replay-aware, bounded in-process fanout. */
 export class EventStreamService {
   private readonly repository: EventRepository;
@@ -209,12 +246,18 @@ export class EventStreamService {
   private readonly retryBaseDelayMs: number;
   private readonly retryMaxDelayMs: number;
   private readonly retryJitterRatio: number;
+  private readonly databaseBusyBaseDelayMs: number;
+  private readonly databaseBusyMaxDelayMs: number;
+  private readonly databaseBusyJitterRatio: number;
   private readonly clock: () => Date;
   private readonly random: () => number;
   private readonly beforeBroadcast?: (event: RunEvent) => void | Promise<void>;
+  private readonly onPumpError?: (error: Error) => void;
   private readonly clients = new Map<string, StreamClient>();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private activePump: Promise<OutboxPumpResult> | null = null;
+  private databaseBusyAttempts = 0;
+  private databaseBusyUntilMs = 0;
   private started = false;
 
   constructor(options: EventStreamServiceOptions) {
@@ -230,13 +273,35 @@ export class EventStreamService {
     if (this.retryMaxDelayMs < this.retryBaseDelayMs) {
       throw new RangeError("retryMaxDelayMs cannot be less than retryBaseDelayMs");
     }
-    this.retryJitterRatio = options.retryJitterRatio ?? 0.2;
-    if (!Number.isFinite(this.retryJitterRatio) || this.retryJitterRatio < 0 || this.retryJitterRatio > 1) {
-      throw new RangeError("retryJitterRatio must be between 0 and 1");
+    this.retryJitterRatio = jitterRatio(
+      options.retryJitterRatio,
+      0.2,
+      "retryJitterRatio",
+    );
+    this.databaseBusyBaseDelayMs = positiveInteger(
+      options.databaseBusyBaseDelayMs,
+      250,
+      60_000,
+      "databaseBusyBaseDelayMs",
+    );
+    this.databaseBusyMaxDelayMs = positiveInteger(
+      options.databaseBusyMaxDelayMs,
+      30_000,
+      3_600_000,
+      "databaseBusyMaxDelayMs",
+    );
+    if (this.databaseBusyMaxDelayMs < this.databaseBusyBaseDelayMs) {
+      throw new RangeError("databaseBusyMaxDelayMs cannot be less than databaseBusyBaseDelayMs");
     }
+    this.databaseBusyJitterRatio = jitterRatio(
+      options.databaseBusyJitterRatio,
+      0.2,
+      "databaseBusyJitterRatio",
+    );
     this.clock = options.clock ?? (() => new Date());
     this.random = options.random ?? Math.random;
     this.beforeBroadcast = options.beforeBroadcast;
+    this.onPumpError = options.onPumpError;
   }
 
   get isStarted(): boolean {
@@ -251,15 +316,24 @@ export class EventStreamService {
     if (this.started) return;
     this.started = true;
     const now = this.clock();
-    this.repository.releaseStaleClaims(
-      new Date(now.getTime() - this.staleClaimMs).toISOString(),
-      now.toISOString(),
-    );
+    try {
+      this.repository.releaseStaleClaims(
+        new Date(now.getTime() - this.staleClaimMs).toISOString(),
+        now.toISOString(),
+      );
+    } catch (error) {
+      if (!isSqliteBusy(error)) {
+        this.started = false;
+        throw error;
+      }
+      this.databaseBusyAttempts = 1;
+      this.databaseBusyUntilMs = now.getTime() + this.databaseBusyDelay(1);
+    }
     this.pollTimer = setInterval(() => {
-      void this.pumpOnce();
+      this.pumpScheduled();
     }, this.pollIntervalMs);
     this.pollTimer.unref?.();
-    void this.pumpOnce();
+    this.pumpScheduled();
   }
 
   async stop(): Promise<void> {
@@ -369,13 +443,48 @@ export class EventStreamService {
   }
 
   private async runPump(): Promise<OutboxPumpResult> {
-    const claimed = this.repository.claimOutbox(
-      this.workerId,
-      this.clock().toISOString(),
-      this.outboxBatchSize,
-    );
+    const now = this.clock();
+    if (now.getTime() < this.databaseBusyUntilMs) {
+      return {
+        claimed: 0,
+        delivered: 0,
+        failed: 0,
+        deferred: {
+          reason: "database_busy",
+          retryAfterMs: Math.max(1, this.databaseBusyUntilMs - now.getTime()),
+          consecutiveAttempts: this.databaseBusyAttempts,
+        },
+      };
+    }
+
+    let claimed: OutboxRecord[];
+    try {
+      claimed = this.repository.claimOutbox(
+        this.workerId,
+        now.toISOString(),
+        this.outboxBatchSize,
+      );
+    } catch (error) {
+      if (!isSqliteBusy(error)) throw error;
+      this.databaseBusyAttempts = Math.min(21, this.databaseBusyAttempts + 1);
+      const retryAfterMs = this.databaseBusyDelay(this.databaseBusyAttempts);
+      this.databaseBusyUntilMs = now.getTime() + retryAfterMs;
+      return {
+        claimed: 0,
+        delivered: 0,
+        failed: 0,
+        deferred: {
+          reason: "database_busy",
+          retryAfterMs,
+          consecutiveAttempts: this.databaseBusyAttempts,
+        },
+      };
+    }
+    this.databaseBusyAttempts = 0;
+    this.databaseBusyUntilMs = 0;
     let delivered = 0;
     let failed = 0;
+    let deferred: OutboxPumpResult["deferred"];
     for (const record of claimed) {
       try {
         const event = this.repository.getById(record.eventId);
@@ -387,16 +496,52 @@ export class EventStreamService {
         }
         delivered += 1;
       } catch (error) {
+        if (isSqliteBusy(error)) {
+          deferred = this.deferForDatabaseBusy(this.clock());
+          break;
+        }
         const retryAt = new Date(this.clock().getTime() + this.retryDelay(record.attemptCount));
-        this.repository.markFailed(
-          record.id,
-          error instanceof Error ? error.message : String(error),
-          retryAt.toISOString(),
-        );
+        try {
+          this.repository.markFailed(
+            record.id,
+            error instanceof Error ? error.message : String(error),
+            retryAt.toISOString(),
+          );
+        } catch (markError) {
+          if (!isSqliteBusy(markError)) throw markError;
+          deferred = this.deferForDatabaseBusy(this.clock());
+          break;
+        }
         failed += 1;
       }
     }
-    return { claimed: claimed.length, delivered, failed };
+    return {
+      claimed: claimed.length,
+      delivered,
+      failed,
+      ...(deferred ? { deferred } : {}),
+    };
+  }
+
+  private pumpScheduled(): void {
+    void this.pumpOnce().catch((error: unknown) => {
+      this.onPumpError?.(
+        error instanceof Error
+          ? error
+          : new Error("Event outbox pump failed"),
+      );
+    });
+  }
+
+  private deferForDatabaseBusy(now: Date): NonNullable<OutboxPumpResult["deferred"]> {
+    this.databaseBusyAttempts = Math.min(21, this.databaseBusyAttempts + 1);
+    const retryAfterMs = this.databaseBusyDelay(this.databaseBusyAttempts);
+    this.databaseBusyUntilMs = now.getTime() + retryAfterMs;
+    return {
+      reason: "database_busy",
+      retryAfterMs,
+      consecutiveAttempts: this.databaseBusyAttempts,
+    };
   }
 
   private retryDelay(attempt: number): number {
@@ -404,6 +549,18 @@ export class EventStreamService {
     const base = Math.min(this.retryMaxDelayMs, this.retryBaseDelayMs * 2 ** exponent);
     const jitter = base * this.retryJitterRatio * (this.random() * 2 - 1);
     return Math.max(0, Math.round(base + jitter));
+  }
+
+  private databaseBusyDelay(attempt: number): number {
+    const exponent = Math.max(0, Math.min(20, attempt - 1));
+    const base = Math.min(
+      this.databaseBusyMaxDelayMs,
+      this.databaseBusyBaseDelayMs * 2 ** exponent,
+    );
+    const jitter = base * this.databaseBusyJitterRatio * (this.random() * 2 - 1);
+    // A positive floor prevents an explicitly configured jitter ratio from
+    // collapsing contention handling into a tight retry loop.
+    return Math.max(1, Math.round(base + jitter));
   }
 
   private broadcast(event: RunEvent): void {

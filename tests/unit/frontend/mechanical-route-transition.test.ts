@@ -165,6 +165,52 @@ describe("mechanical route transition controller", () => {
     expect(presentations.filter(({ phase }) => phase === "committing")).toHaveLength(1);
   });
 
+  test("consumes native skip rejections before latest-request-wins cancellation", async () => {
+    let firstUpdateReject: ((reason?: unknown) => void) | undefined;
+    let firstFinishedReject: ((reason?: unknown) => void) | undefined;
+    let attachedCatchHandlers = 0;
+    let nativeCalls = 0;
+    const trackCatch = (promise: Promise<void>): Promise<void> => {
+      const originalCatch = promise.catch.bind(promise);
+      Object.defineProperty(promise, "catch", {
+        configurable: true,
+        value: (onRejected: (reason: unknown) => unknown) => {
+          attachedCatchHandlers += 1;
+          return originalCatch(onRejected);
+        },
+      });
+      return promise;
+    };
+    const controller = new MechanicalRouteTransitionController({
+      shouldBypass: () => false,
+      sleep: async () => true,
+      publish: () => undefined,
+      startViewTransition: (update) => {
+        nativeCalls += 1;
+        if (nativeCalls > 1) return nativeTransition(update);
+        const updateCallbackDone = trackCatch(new Promise<void>((_resolve, reject) => { firstUpdateReject = reject; }));
+        const finished = trackCatch(new Promise<void>((_resolve, reject) => { firstFinishedReject = reject; }));
+        return {
+          updateCallbackDone,
+          finished,
+          skipTransition: () => {
+            const abort = new DOMException("Skipping view transition because skipTransition() was called.", "AbortError");
+            firstUpdateReject?.(abort);
+            firstFinishedReject?.(abort);
+          },
+        };
+      },
+    });
+
+    const first = controller.transition({ from: "/", to: "/missions", commit: () => undefined });
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+    const second = controller.transition({ from: "/", to: "/brain", commit: () => undefined });
+
+    expect(await first).toBe("cancelled");
+    expect(await second).toBe("completed");
+    expect(attachedCatchHandlers).toBeGreaterThanOrEqual(2);
+  });
+
   test("classifies exact, query-only, hash-only, and route changes without ambiguity", () => {
     const current = { pathname: "/brain/graph", search: "?view=mission", hash: "" };
     expect(classifyLocationChange(current, { ...current })).toBe("noop");

@@ -1,4 +1,4 @@
-import type { AutonomousMissionRequest, GuidedMissionRequest, Journey, MissionCreateRequest } from "./commandOs";
+import type { AutonomousAgentModelAssignment, AutonomousMissionRequest, AutonomousOutcomeProfileId, AutonomousPlanningSelection, GuidedMissionRequest, GuidedReconnaissanceSelection, GuidedTcpPortPresetId, Journey, MissionCreateRequest, MissionEnvironmentClassification } from "./commandOs";
 
 export type MissionTemplateId =
   | "safe_recon"
@@ -6,6 +6,7 @@ export type MissionTemplateId =
   | "internal_network_assessment"
   | "active_directory_lab"
   | "cloud_read_only"
+  | "htb_web_full_path"
   | "full_authorized_lab_compromise"
   | "custom";
 export type BudgetPresetId = "quick" | "standard" | "deep" | "custom";
@@ -35,9 +36,13 @@ export interface MissionIntakeRequest {
   boundedDestructiveTargetIds?: string[];
   budgetPresetId?: BudgetPresetId;
   engagementId?: string;
+  environmentClassification?: MissionEnvironmentClassification;
   explanationDepth?: GuidedMissionRequest["explanationDepth"];
   executionPreference?: GuidedMissionRequest["executionPreference"];
+  guidedReconnaissance?: GuidedReconnaissanceSelection;
   specialistAgentIds?: string[];
+  agentModelAssignments?: AutonomousAgentModelAssignment[];
+  planningSelection?: AutonomousPlanningSelection;
   memoryScopes?: string[];
   contextNodeIds?: string[];
 }
@@ -184,11 +189,44 @@ export interface IntakeRegistrySnapshot {
   templates: { templates: Record<string, IntakeMissionTemplate> };
   safeStops: { mandatory: SafeStopDefinition[]; optional: SafeStopDefinition[] };
   budgets: Record<"quick" | "standard" | "deep", MissionBudgetPreset>;
+  guidedReconnaissance: {
+    registryVersion: 1;
+    modes: Array<{
+      id: "host_liveness" | "tcp_service_scan";
+      label: string;
+      description: string;
+      toolId: string;
+      readiness: "ready" | "unavailable";
+      readinessExplanation: string;
+      remediation: string;
+      manualFallbackAvailable: true;
+    }>;
+    tcpPortPresets: Array<{
+      id: GuidedTcpPortPresetId;
+      version: number;
+      label: string;
+      description: string;
+      ports: number[];
+    }>;
+    customPorts: {
+      maximumIndividualPorts: number;
+      example: string;
+      explanation: string;
+    };
+  };
 }
 
 export interface ResolvedMissionIntake {
   schemaVersion: "2.4";
   request: MissionCreateRequest;
+  autonomousOutcome?: {
+    id: AutonomousOutcomeProfileId;
+    label: string;
+    concisePromise: string;
+    completionMeaning: string;
+    requiredTerminalSuccessCriteria: string[];
+    requiredActionClassIds: string[];
+  };
   normalizedTargets: Array<MissionIntakeTargetInput & { id: string; type: NonNullable<MissionIntakeTargetInput["type"]> }>;
   template: { id: MissionTemplateId; version: number };
   policyMatrix: IntakeActionClassRegistry;

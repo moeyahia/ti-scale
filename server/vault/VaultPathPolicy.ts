@@ -535,7 +535,7 @@ export class VaultPathPolicy {
 }
 
 export function safeVaultSegment(value: string, fallback: string): string {
-  const normalized = value
+  let normalized = value
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
@@ -546,5 +546,9 @@ export function safeVaultSegment(value: string, fallback: string): string {
     .replace(/-+/g, "-")
     .slice(0, 96)
     .toLowerCase();
+  // Obsidian and common file browsers treat dot-prefixed names as hidden.
+  // Keep identity in YAML/frontmatter and make the human-facing projection
+  // visible without relying on a platform-specific "show hidden" setting.
+  normalized = normalized.replace(/^\.+/u, "dot-").replace(/-+/gu, "-");
   return normalized && normalized !== "." && normalized !== ".." ? normalized : fallback;
 }

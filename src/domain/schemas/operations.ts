@@ -5,6 +5,7 @@ import type {
   AdministrativeApprovalReviewRecord, DecisionInboxRecord,
   McpRecord, MissionReference, OperationsPage, PolicyRecord, ProviderRecord, RecoveryMutationRecord, RunRecoveryRecord,
   TraceDetailRecord, TraceRecord, TraceSummaryRecord,
+  ReportGenerationRecord,
 } from "../types/operations";
 import { array, boolean, nonEmpty, nullableNumber, nullableString, number, object, schema, string } from "./common";
 
@@ -283,10 +284,32 @@ export function parseRunRecovery(payload: unknown): RunRecoveryRecord {
     }),
     providerCandidates: array(root.providerCandidates, "providerCandidates").map((value) => {
       const item = object(value, "provider candidate");
-      if (item.status !== "healthy") throw new Error("provider candidate status is invalid");
+      const status = item.status === "healthy" || item.status === "degraded" || item.status === "unhealthy" ||
+        item.status === "unknown" || item.status === "missing"
+        ? item.status
+        : (() => { throw new Error("provider candidate status is invalid"); })();
+      const eligibility = item.eligibility === "compatible" || item.eligibility === "unavailable" ||
+        item.eligibility === "stale" || item.eligibility === "budget_incompatible" ||
+        item.eligibility === "enforcement_incompatible"
+        ? item.eligibility
+        : (() => { throw new Error("provider candidate eligibility is invalid"); })();
+      const modelId = nullableString(item.modelId, "provider.modelId");
+      const modelConfigurationHash = nullableString(item.modelConfigurationHash, "provider.modelConfigurationHash");
+      const enabled = boolean(item.enabled, "provider.enabled");
+      if (
+        (modelId === null) !== (modelConfigurationHash === null) ||
+        (modelConfigurationHash !== null && !/^[a-f0-9]{64}$/u.test(modelConfigurationHash)) ||
+        enabled !== (eligibility === "compatible") ||
+        (enabled && modelId === null)
+      ) throw new Error("provider candidate model pin is invalid");
       return {
         providerId: nonEmpty(item.providerId, "provider.providerId"),
-        status: "healthy" as const,
+        modelId,
+        modelConfigurationHash,
+        status,
+        eligibility,
+        enabled,
+        reason: nonEmpty(item.reason, "provider.reason"),
         supportsGuided: boolean(item.supportsGuided, "provider.supportsGuided"),
         enforcesAutonomousBoundary: boolean(item.enforcesAutonomousBoundary, "provider.enforcesAutonomousBoundary"),
         reportsExactTokenUsage: boolean(item.reportsExactTokenUsage, "provider.reportsExactTokenUsage"),
@@ -384,6 +407,18 @@ export function parseRecoveryMutation(payload: unknown): RecoveryMutationRecord 
   const journey = run.journey === "autonomous" || run.journey === "guided"
     ? run.journey
     : (() => { throw new Error("recovery mutation journey is invalid"); })();
+  const providerId = nullableString(mutation.providerId, "mutation.providerId");
+  const modelId = nullableString(mutation.modelId, "mutation.modelId");
+  const modelConfigurationHash = nullableString(mutation.modelConfigurationHash, "mutation.modelConfigurationHash");
+  if (modelConfigurationHash !== null && !/^[a-f0-9]{64}$/u.test(modelConfigurationHash)) {
+    throw new Error("mutation.modelConfigurationHash is invalid");
+  }
+  if (kind === "change_provider" && (!providerId || !modelId || !modelConfigurationHash)) {
+    throw new Error("provider recovery mutation model pin is incomplete");
+  }
+  if (kind !== "change_provider" && (providerId !== null || modelId !== null || modelConfigurationHash !== null)) {
+    throw new Error("non-provider recovery mutation contains a provider model pin");
+  }
   return {
     schemaVersion: "2.4",
     mutation: {
@@ -393,7 +428,9 @@ export function parseRecoveryMutation(payload: unknown): RecoveryMutationRecord 
       continuationId: nullableString(mutation.continuationId, "mutation.continuationId"),
       agentId: nullableString(mutation.agentId, "mutation.agentId"),
       assignmentId: nullableString(mutation.assignmentId, "mutation.assignmentId"),
-      providerId: nullableString(mutation.providerId, "mutation.providerId"),
+      providerId,
+      modelId,
+      modelConfigurationHash,
       providerRouteVersion: nullableNumber(mutation.providerRouteVersion, "mutation.providerRouteVersion"),
     },
     run: {
@@ -517,6 +554,37 @@ export function parseArtifact(value: unknown): ArtifactRecord {
   };
 }
 export function parseArtifactPage(payload: unknown): OperationsPage<ArtifactRecord> { return page(payload, parseArtifact); }
+
+export function parseReportGeneration(payload: unknown): ReportGenerationRecord {
+  const root = object(payload, "report generation");
+  schema(root);
+  if (root.reportSchemaVersion !== "2.4-report.1") throw new Error("unsupported report schema version");
+  if (root.idempotent !== true) throw new Error("report generation is not idempotent");
+  return {
+    schemaVersion: "2.4",
+    reportSchemaVersion: "2.4-report.1",
+    missionId: nonEmpty(root.missionId, "report.missionId"),
+    runId: nonEmpty(root.runId, "report.runId"),
+    reportVersion: number(root.reportVersion, "report.reportVersion"),
+    sourceSnapshotHash: nonEmpty(root.sourceSnapshotHash, "report.sourceSnapshotHash"),
+    snapshotThrough: nonEmpty(root.snapshotThrough, "report.snapshotThrough"),
+    idempotent: true,
+    artifacts: array(root.artifacts, "report.artifacts").map((value, index) => {
+      const artifact = object(value, `report.artifacts[${index}]`);
+      const format = artifact.format === "markdown" || artifact.format === "json"
+        ? artifact.format
+        : (() => { throw new Error("report artifact format is invalid"); })();
+      return {
+        id: nonEmpty(artifact.id, "report artifact ID"),
+        format,
+        mediaType: nonEmpty(artifact.mediaType, "report artifact media type"),
+        contentHash: nonEmpty(artifact.contentHash, "report artifact hash"),
+        byteSize: number(artifact.byteSize, "report artifact size"),
+        downloadUrl: nonEmpty(artifact.downloadUrl, "report artifact download URL"),
+      };
+    }),
+  };
+}
 
 export function parseAction(value: unknown): ActionRecord {
   const item = object(value, "action");

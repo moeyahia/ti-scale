@@ -4,7 +4,8 @@ import { createDatabaseConnection, migrateDatabase } from "../../../server/db";
 import { PlanChangeService } from "../../../server/plan-changes";
 import { planChangesApi } from "../../../src/data/api/planChanges";
 import { parsePlanChangeApply, parsePlanChangeDetail } from "../../../src/domain/schemas/planChanges";
-import { PlanChangeRequestCard, reviseEffectiveStrategyOperation } from "../../../src/features/missions/PlanChangePanel";
+import { PlanChangeRequestCard, PlanVersionHistory, reviseEffectiveStrategyOperation } from "../../../src/features/missions/PlanChangePanel";
+import type { RunPlan, RuntimeRun } from "../../../src/domain/types/runtimeV2";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -79,6 +80,7 @@ describe("strict plan-change client boundary", () => {
         request: fixture.request,
         resultPlanId: "plan-ui-plan-v2",
         resultPlanVersion: 2,
+        guidedDecisionId: null,
         contextPackId: "ctx-plan-apply",
       }).contextPackId).toBe("ctx-plan-apply");
       expect(parsed.request.structuredDiff).toEqual([expect.objectContaining({ path: "strategySummary" })]);
@@ -145,19 +147,55 @@ describe("strict plan-change client boundary", () => {
     } finally { fixture.database.close(); }
   });
 
+  test("parses the exact immutable restore operation and rejects extra fields", () => {
+    const fixture = proposalFixture();
+    try {
+      const restoreRequest = {
+        ...fixture.request,
+        normalizedChange: {
+          summary: "Restore historical plan v1 as a new immutable version.",
+          operations: [{ kind: "restore_plan_version", targetPlanId: "plan-ui-plan-v1", targetPlanVersion: 1 }],
+        },
+      };
+      expect(parsePlanChangeDetail({ schemaVersion: "2.4", request: restoreRequest }).request.normalizedChange.operations)
+        .toEqual([{ kind: "restore_plan_version", targetPlanId: "plan-ui-plan-v1", targetPlanVersion: 1 }]);
+      expect(() => parsePlanChangeDetail({
+        schemaVersion: "2.4",
+        request: {
+          ...restoreRequest,
+          normalizedChange: {
+            ...restoreRequest.normalizedChange,
+            operations: [{ kind: "restore_plan_version", targetPlanId: "plan-ui-plan-v1", targetPlanVersion: 1, mutateHistoricalRecord: true }],
+          },
+        },
+      })).toThrow("operation[0] contains unsupported field mutateHistoricalRecord");
+    } finally { fixture.database.close(); }
+  });
+
   test("uses the canonical run-scoped mutation path with an idempotency key", async () => {
     const fixture = proposalFixture();
     try {
+      const keys: string[] = [];
+      let attempts = 0;
       globalThis.fetch = (async (input, init) => {
         expect(String(input)).toBe("/api/v2/runs/run-ui-plan/plan-changes");
         expect(init?.method).toBe("POST");
-        expect(new Headers(init?.headers).get("Idempotency-Key")).toMatch(/^plan-change-create:/u);
+        const idempotencyKey = new Headers(init?.headers).get("Idempotency-Key");
+        expect(idempotencyKey).toMatch(/^plan-change-create:[a-f0-9-]{36}$/u);
+        keys.push(idempotencyKey!);
         expect(JSON.parse(String(init?.body))).toMatchObject({ basePlanId: "plan-ui-plan", expectedRunVersion: 1 });
+        attempts += 1;
+        if (attempts === 1) throw new TypeError("connection ended before a response was received");
         return new Response(JSON.stringify({ schemaVersion: "2.4", request: fixture.request, contextPackId: "ctx-plan-proposal" }), { status: 201, headers: { "content-type": "application/json", "x-request-id": "request-plan-change" } });
       }) as typeof fetch;
-      const result = await planChangesApi.create("run-ui-plan", { basePlanId: "plan-ui-plan", expectedRunVersion: 1, expectedPlanVersion: 1, operations: [{ kind: "update_plan", strategySummary: "Evidence-backed scope validation" }] });
+      const mutation = { basePlanId: "plan-ui-plan", expectedRunVersion: 1, expectedPlanVersion: 1, operations: [{ kind: "update_plan" as const, strategySummary: "Evidence-backed scope validation" }] };
+      await expect(planChangesApi.create("run-ui-plan", mutation)).rejects.toThrow("connection ended before a response was received");
+      const result = await planChangesApi.create("run-ui-plan", mutation);
+      await planChangesApi.create("run-ui-plan", mutation);
       expect(result.request.id).toBe(fixture.request.id);
       expect(result.contextPackId).toBe("ctx-plan-proposal");
+      expect(keys[0]).toBe(keys[1]);
+      expect(keys[2]).not.toBe(keys[0]);
     } finally { fixture.database.close(); }
   });
 });
@@ -212,7 +250,7 @@ describe("PlanChangeRequestCard", () => {
       const markup = renderToStaticMarkup(<PlanChangeRequestCard request={request} runVersion={1} basePlanVersion={1} />);
       expect(markup).toContain("This proposal cannot be applied yet");
       expect(markup).toContain("will not cancel or reinterpret its work");
-      expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Apply new plan version<\/button>/u);
+      expect(markup).toMatch(/<button[^>]*aria-label="Apply new plan version from [^"]+"[^>]*disabled=""/u);
     } finally { fixture.database.close(); }
   });
 
@@ -225,5 +263,63 @@ describe("PlanChangeRequestCard", () => {
       expect(markup).not.toContain(`Revised strategy summary for ${fixture.request.id}`);
       expect(markup).toContain("Apply new plan version");
     } finally { fixture.database.close(); }
+  });
+
+  test("does not offer a direct editor that could rewrite a historical snapshot", () => {
+    const fixture = proposalFixture();
+    try {
+      const request = {
+        ...fixture.request,
+        normalizedChange: {
+          summary: "Restore historical plan v1 as a new immutable version.",
+          operations: [{ kind: "restore_plan_version" as const, targetPlanId: "plan-ui-plan-v1", targetPlanVersion: 1 }],
+        },
+      };
+      const markup = renderToStaticMarkup(<PlanChangeRequestCard request={request} runVersion={1} basePlanVersion={1} />);
+      expect(markup).toContain("Historical snapshot:");
+      expect(markup).toContain("plan v1");
+      expect(markup).not.toContain("this proposal restores plan-ui-plan-v1");
+      expect(markup).toContain("Apply new plan version");
+      expect(markup).not.toContain("Edit structured proposal");
+    } finally { fixture.database.close(); }
+  });
+});
+
+describe("PlanVersionHistory", () => {
+  const run = {
+    id: "run-history", missionId: "mission-history", missionName: "History fixture", objective: "Review plan history", journey: "guided", status: "queued",
+    statusReason: null, progress: 0, nextAction: null, currentPlanId: "plan-v2", currentStepId: "step-v2", currentOwnerId: null, lastHeartbeatAt: null,
+    leaseExpiresAt: null, startedAt: null, endedAt: null, createdAt: "2026-07-16T16:00:00.000Z", updatedAt: "2026-07-16T16:00:00.000Z", version: 2,
+  } satisfies RuntimeRun;
+  const historical = {
+    id: "plan-v1", runId: run.id, version: 1, status: "superseded", strategySummary: "Map the approved surface", rationaleSummary: "Begin with attributable discovery", createdAt: run.createdAt, activatedAt: run.createdAt,
+    steps: [{ id: "step-v1", ordinal: 0, phase: "Recon", title: "Map scope", objective: "Map approved scope", status: "cancelled", assignedAgentId: "agent-recon", riskClass: "low", successCriteria: ["Scope mapped"], dependencyStepIds: [], action: { actionType: "passive_intelligence_osint", actionClass: "passive_intelligence_osint", target: "fixture.local", arguments: {}, intentSummary: "Map scope", kind: "manual", idempotent: true, destructive: false }, explanation: "Map approved scope.", rationale: "Reduce uncertainty.", reversibility: "Read-only" }],
+  } satisfies RunPlan;
+  const active = {
+    ...historical,
+    id: "plan-v2",
+    version: 2,
+    status: "active",
+    strategySummary: "Validate a narrower hypothesis",
+    steps: [{ ...historical.steps[0], id: "step-v2", title: "Validate hypothesis" }],
+  } satisfies RunPlan;
+
+  test("renders an application-owned history selector, readable comparison, and disabled reviewed rollback", () => {
+    const markup = renderToStaticMarkup(<PlanVersionHistory run={run} activePlan={active} plans={[active, historical]} />);
+    expect(markup).toContain("Compare and prepare a rollback");
+    expect(markup).toContain('role="combobox"');
+    expect(markup).toContain("Plan v2 and plan v1 comparison");
+    expect(markup).toContain("Validate hypothesis");
+    expect(markup).toContain("Map scope");
+    expect(markup).toMatch(/<button[^>]*data-control-id="plan-version-rollback-prepare"[^>]*disabled=""/u);
+    expect(markup).toContain("never reactivates or edits an old record");
+  });
+
+  test("disables rollback controls when plan history is a stale cached projection", () => {
+    const markup = renderToStaticMarkup(<PlanVersionHistory run={run} activePlan={active} plans={[active, historical]} historyCurrent={false} />);
+    expect(markup).toContain("Plan history is not current");
+    expect(markup).toContain("cached history cannot authorize a restore");
+    expect(markup).toMatch(/<button[^>]*data-control-id="plan-version-rollback-prepare"[^>]*disabled=""/u);
+    expect(markup).toMatch(/<button[^>]*role="combobox"[^>]*disabled=""[^>]*aria-label="Historical plan to compare"/u);
   });
 });

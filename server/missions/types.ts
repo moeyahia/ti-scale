@@ -1,6 +1,23 @@
 import type { JsonValue, Journey } from "../events";
+import type { AttackCentricReusableNodeType } from "../memory";
+import type {
+  AutonomousOutcomeProfileId,
+} from "../domain/autonomous-outcome-registry";
+import type { GuidedReconnaissanceSelection } from "./GuidedReconnaissance";
+import type {
+  AgentModelAssignmentReceipt,
+  AgentModelAssignmentSelection,
+  AutonomousPlanningSelection,
+} from "../model-config";
 
 export type { Journey };
+
+export type MissionEnvironmentClassification =
+  | "client_or_public"
+  | "internal"
+  | "htb"
+  | "ctf"
+  | "local_disposable_lab";
 
 export type RunStatus =
   | "queued"
@@ -22,6 +39,7 @@ export interface AutonomousMissionRequest {
   readonly successCriteria: readonly string[];
   readonly authorization: {
     readonly engagementId?: string;
+    readonly environmentClassification?: MissionEnvironmentClassification;
     readonly allowedTargets: readonly string[];
     readonly prohibitedTargets: readonly string[];
     readonly authorizationConfirmed: true;
@@ -29,6 +47,12 @@ export interface AutonomousMissionRequest {
     readonly dataHandling?: string;
   };
   readonly contract: {
+    /**
+     * The completion promise inside the Autonomous journey. Older imported
+     * contracts may omit this and are classified deterministically during
+     * preflight; every newly resolved contract persists it explicitly.
+     */
+    readonly outcomeProfile?: AutonomousOutcomeProfileId;
     readonly allowedActionClasses: readonly string[];
     readonly prohibitedActionClasses: readonly string[];
     readonly destructivePolicy: "prohibited" | "validate_without_executing" | "bounded_lab_only";
@@ -57,17 +81,30 @@ export interface AutonomousMissionRequest {
     readonly retentionPolicy: "operator_managed";
     /** Provider selection is automatic and restricted to enforcing provider paths. */
     readonly providerPolicy: "automatic_enforcing_only";
+    /**
+     * Signed authority for constructing the plan. It is never an execution
+     * assignment: local deterministic planning has no model pin, while a
+     * provider-backed route is advisory-only and explicitly carries no
+     * execution authority. Older stored contracts normalize to the local
+     * deterministic selection during validation and hashing.
+     */
+    readonly planningSelection?: AutonomousPlanningSelection;
     /** Every tool action must match the signed action-class and target allowlist. */
     readonly toolPolicy: "contract_allowlist";
     /** Exact specialists permitted for this run; the planner cannot assign outside this pool. */
     readonly specialistAgentIds: readonly string[];
+    /**
+     * Exact live-catalog provider/model choices reviewed with this contract.
+     * These immutable IDs, rather than mutable defaults, are pinned to a run.
+     */
+    readonly agentModelAssignments: readonly AgentModelAssignmentSelection[];
     readonly memoryScopes: readonly string[];
     /** Exact, operator-selected memory nodes; no broader memory may be retrieved. */
     readonly contextNodeIds: readonly string[];
     readonly safeStopConditions: readonly string[];
     readonly deliverables: readonly string[];
   };
-  /** Optional for API compatibility. The current UI always submits the server-issued review. */
+  /** Required by launch; omitted only on the preflight request that issues it. */
   readonly contractReview?: {
     readonly version: 1;
     readonly hash: string;
@@ -76,7 +113,7 @@ export interface AutonomousMissionRequest {
 
 export interface AutonomousContextCandidate {
   readonly id: string;
-  readonly nodeType: "preference" | "lesson";
+  readonly nodeType: "preference" | "lesson" | AttackCentricReusableNodeType;
   readonly title: string;
   readonly summary: string;
   readonly lifecycleStatus: "confirmed" | "verified";
@@ -144,11 +181,20 @@ export interface AutonomousExecutionPreview {
     readonly invalidSelectedAgentIds: readonly string[];
     readonly recommendedAgentIds: readonly string[];
     readonly effectiveAgentIds: readonly string[];
+    readonly modelAssignments: readonly AgentModelAssignmentReceipt[];
   };
 }
 
 export interface AutonomousMissionPreflight {
   readonly schemaVersion: "2.4";
+  readonly outcome: {
+    readonly id: AutonomousOutcomeProfileId;
+    readonly label: string;
+    readonly concisePromise: string;
+    readonly completionMeaning: string;
+    readonly requiredTerminalSuccessCriteria: readonly string[];
+    readonly requiredActionClassIds: readonly string[];
+  };
   readonly contract: {
     readonly version: 1;
     readonly hash: string;
@@ -181,6 +227,21 @@ export interface GuidedMissionRequest {
   readonly explanationDepth: "concise" | "balanced" | "deep";
   readonly executionPreference: "manual" | "single_step_agent";
   readonly evidenceExpectations: readonly string[];
+  /** Optional first represented reconnaissance step. Missing preserves target-derived behavior. */
+  readonly guidedReconnaissance?: GuidedReconnaissanceSelection;
+  /** One optional reviewed Windows/identity read; never contains credential material. */
+  readonly guidedWindowsIdentity?: Readonly<{
+    readonly operation:
+      | "smb_share_list"
+      | "smb_identity_summary"
+      | "ldap_root_dse"
+      | "rpc_domain_info";
+    readonly authenticationMode: "anonymous" | "credential_reference";
+    readonly credentialReference: Readonly<{
+      readonly kind: "systemd_credential_bundle";
+      readonly id: string;
+    }> | null;
+  }>;
 }
 
 export type MissionCreateRequest =
@@ -219,7 +280,20 @@ export interface MissionIntakeContextBinding {
   readonly auditRecordId: string;
   readonly status: "ready" | "no_relevant_memory" | "degraded";
   readonly retrievedCount: number;
-  readonly memoryInfluencedDefaults: false;
+  readonly memoryInfluencedDefaults: boolean;
+  /**
+   * Presentation-only defaults selected from explicit, typed, confirmed
+   * operator preference profiles. These values cannot alter the signed
+   * objective, authorization, targets, action policy, evidence policy,
+   * budgets, tools, providers, safe stops, or deliverables.
+   */
+  readonly safeOptionalDefaults?: {
+    readonly autonomyPresentation?: "high_autonomy";
+    readonly explanationTemplate?: "technical_readable";
+    readonly reportTemplate?: "evidence_first";
+    readonly safetyBoundary: "presentation_only_contract_unchanged";
+  };
+  readonly influenceExplanation?: string;
   readonly degradation?: {
     readonly code: string;
     readonly explanation: string;
@@ -428,6 +502,11 @@ export interface OverviewSnapshot {
   readonly agents: readonly AgentSummary[];
   readonly brain: {
     readonly confirmed: number;
+    /** Canonical graph nodes whose lifecycle is still candidate. */
+    readonly candidateNodes: number;
+    /** Pending proposals that can actually be reviewed in the Memory Inbox. */
+    readonly pendingReviews: number;
+    /** @deprecated Compatibility alias for pendingReviews. */
     readonly candidates: number;
     readonly stale: number;
     readonly conflicts: number;

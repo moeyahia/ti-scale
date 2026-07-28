@@ -12,6 +12,10 @@ export interface ExperimentIntegrityPayload {
   readonly evaluatorHash: string;
   readonly benchmarkSnapshotHash: string;
   readonly containerImageDigest: string;
+  readonly executionEnvironment?: {
+    readonly kind: "local_bwrap" | "oci_container";
+    readonly identityHash: string;
+  };
   readonly toolManifestHash: string;
   readonly providerModel: {
     readonly providerId: string;
@@ -24,6 +28,26 @@ export interface ExperimentIntegrityPayload {
   readonly evidenceHash: string;
   readonly metricsHash: string;
   readonly exposureReceiptIds: readonly string[];
+  readonly evaluationStage:
+    | "development"
+    | "validation"
+    | "hidden_holdout"
+    | "shadow"
+    | "canary";
+  readonly evaluationAction:
+    | "development_pass"
+    | "development_fail"
+    | "validation_pass"
+    | "validation_fail"
+    | "hidden_holdout_pass"
+    | "hidden_holdout_fail"
+    | "shadow_pass"
+    | "shadow_fail"
+    | "canary_pass"
+    | "canary_fail";
+  readonly evaluationResult: "pass" | "fail";
+  readonly evaluationAttemptId: string;
+  readonly hardGateFailures: readonly string[];
   readonly signedAt: string;
 }
 
@@ -42,6 +66,8 @@ export interface ExpectedIntegrityBindings {
   readonly candidateStrategyHash?: string;
   readonly evaluatorVersion?: string;
   readonly containerImageDigest?: string;
+  readonly executionEnvironmentKind?: "local_bwrap" | "oci_container";
+  readonly executionEnvironmentIdentityHash?: string;
   readonly toolManifestHash?: string;
   readonly providerId?: string | null;
   readonly modelId?: string | null;
@@ -52,6 +78,11 @@ export interface ExpectedIntegrityBindings {
   readonly evidenceHash?: string;
   readonly metricsHash?: string;
   readonly exposureReceiptIds?: readonly string[];
+  readonly evaluationStage?: ExperimentIntegrityPayload["evaluationStage"];
+  readonly evaluationAction?: ExperimentIntegrityPayload["evaluationAction"];
+  readonly evaluationResult?: ExperimentIntegrityPayload["evaluationResult"];
+  readonly evaluationAttemptId?: string;
+  readonly hardGateFailures?: readonly string[];
 }
 
 export interface IntegrityVerification {
@@ -101,7 +132,19 @@ function payloadValidationReasons(payload: ExperimentIntegrityPayload): string[]
       reasons.push(`Integrity ${label} hash is invalid.`);
     }
   }
-  if (typeof payload.containerImageDigest !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(payload.containerImageDigest)) {
+  if (payload.executionEnvironment?.kind === "local_bwrap") {
+    if (
+      payload.containerImageDigest !== "not_applicable:local_bwrap"
+      || !/^[a-f0-9]{64}$/u.test(
+        payload.executionEnvironment.identityHash,
+      )
+    ) {
+      reasons.push("Integrity local-bwrap execution identity is invalid.");
+    }
+  } else if (
+    typeof payload.containerImageDigest !== "string"
+    || !/^sha256:[a-f0-9]{64}$/u.test(payload.containerImageDigest)
+  ) {
     reasons.push("Integrity container image digest is invalid.");
   }
   const validateIds = (label: string, values: readonly string[], requireOne: boolean): void => {
@@ -117,6 +160,59 @@ function payloadValidationReasons(payload: ExperimentIntegrityPayload): string[]
   validateIds("context packs", payload.contextPackIds, true);
   validateIds("random seeds", payload.randomSeeds, true);
   validateIds("provider exposure receipts", payload.exposureReceiptIds, payload.providerModel !== null);
+  const expectedResult = payload.evaluationAction?.endsWith("_pass") ? "pass" : "fail";
+  if (
+    ![
+      "development",
+      "validation",
+      "hidden_holdout",
+      "shadow",
+      "canary",
+    ].includes(payload.evaluationStage)
+  ) {
+    reasons.push("Integrity evaluation stage is invalid.");
+  }
+  if (
+    ![
+      "development_pass",
+      "development_fail",
+      "validation_pass",
+      "validation_fail",
+      "hidden_holdout_pass",
+      "hidden_holdout_fail",
+      "shadow_pass",
+      "shadow_fail",
+      "canary_pass",
+      "canary_fail",
+    ].includes(payload.evaluationAction)
+    || !payload.evaluationAction?.startsWith(`${payload.evaluationStage}_`)
+  ) {
+    reasons.push("Integrity evaluation action is not bound to its stage.");
+  }
+  if (payload.evaluationResult !== expectedResult) {
+    reasons.push("Integrity evaluation result is not bound to its action.");
+  }
+  if (
+    typeof payload.evaluationAttemptId !== "string"
+    || payload.evaluationAttemptId.trim().length === 0
+    || payload.evaluationAttemptId.length > 240
+  ) {
+    reasons.push("Integrity evaluation attempt ID is invalid.");
+  }
+  const hardGateFailures = Array.isArray(payload.hardGateFailures)
+    ? payload.hardGateFailures
+    : [];
+  if (!Array.isArray(payload.hardGateFailures)) {
+    reasons.push("Integrity hard-gate failures are malformed.");
+  }
+  validateIds(
+    "hard-gate failures",
+    hardGateFailures,
+    false,
+  );
+  if (payload.evaluationResult === "pass" && hardGateFailures.length > 0) {
+    reasons.push("A passing integrity result cannot contain hard-gate failures.");
+  }
   if (payload.providerModel !== null) {
     if (
       typeof payload.providerModel?.providerId !== "string" ||
@@ -218,6 +314,16 @@ export class IntegrityAuthority {
     if (expected.containerImageDigest !== undefined && receipt.containerImageDigest !== expected.containerImageDigest) {
       reasons.push("Container image binding does not match.");
     }
+    if (
+      expected.executionEnvironmentKind !== undefined
+      && receipt.executionEnvironment?.kind
+        !== expected.executionEnvironmentKind
+    ) reasons.push("Execution-environment kind does not match.");
+    if (
+      expected.executionEnvironmentIdentityHash !== undefined
+      && receipt.executionEnvironment?.identityHash
+        !== expected.executionEnvironmentIdentityHash
+    ) reasons.push("Execution-environment identity does not match.");
     if (expected.toolManifestHash !== undefined && receipt.toolManifestHash !== expected.toolManifestHash) {
       reasons.push("Tool manifest binding does not match.");
     }
@@ -254,6 +360,26 @@ export class IntegrityAuthority {
     ) {
       reasons.push("Provider-exposure receipt bindings do not match.");
     }
+    if (
+      expected.evaluationStage !== undefined
+      && receipt.evaluationStage !== expected.evaluationStage
+    ) reasons.push("Evaluation-stage binding does not match.");
+    if (
+      expected.evaluationAction !== undefined
+      && receipt.evaluationAction !== expected.evaluationAction
+    ) reasons.push("Evaluation-action binding does not match.");
+    if (
+      expected.evaluationResult !== undefined
+      && receipt.evaluationResult !== expected.evaluationResult
+    ) reasons.push("Evaluation-result binding does not match.");
+    if (
+      expected.evaluationAttemptId !== undefined
+      && receipt.evaluationAttemptId !== expected.evaluationAttemptId
+    ) reasons.push("Evaluation-attempt binding does not match.");
+    if (
+      expected.hardGateFailures !== undefined
+      && !sameStrings(receipt.hardGateFailures, expected.hardGateFailures)
+    ) reasons.push("Hard-gate failure bindings do not match.");
     return { valid: reasons.length === 0, reasons };
   }
 
@@ -264,5 +390,52 @@ export class IntegrityAuthority {
     const verification = this.verifyReceipt(receipt, expected);
     if (!verification.valid) throw new Error(`Integrity verification failed: ${verification.reasons.join("; ")}`);
     return receipt;
+  }
+}
+
+/**
+ * Content-free local round trip used only for readiness. It proves that the
+ * configured authority can sign and verify the complete current receipt
+ * schema; it does not claim that a lab or worker is ready.
+ */
+export function attestIntegrityAuthority(
+  authority: IntegrityAuthority | undefined,
+): boolean {
+  if (!authority) return false;
+  const hash = "0".repeat(64);
+  try {
+    const receipt = authority.createReceipt({
+      experimentId: "readiness-self-test",
+      charterHash: hash,
+      strategyHashes: { baseline: hash, candidate: hash },
+      evaluatorVersion: "readiness-self-test",
+      evaluatorHash: hash,
+      benchmarkSnapshotHash: hash,
+      containerImageDigest: `sha256:${hash}`,
+      toolManifestHash: hash,
+      providerModel: null,
+      contextPackIds: ["readiness-context"],
+      randomSeeds: ["readiness-seed"],
+      eventHash: hash,
+      evidenceHash: hash,
+      metricsHash: hash,
+      exposureReceiptIds: [],
+      evaluationStage: "development",
+      evaluationAction: "development_pass",
+      evaluationResult: "pass",
+      evaluationAttemptId: "readiness-attempt",
+      hardGateFailures: [],
+      signedAt: "2000-01-01T00:00:00.000Z",
+    });
+    return authority.verifyReceipt(receipt, {
+      experimentId: "readiness-self-test",
+      evaluationStage: "development",
+      evaluationAction: "development_pass",
+      evaluationResult: "pass",
+      evaluationAttemptId: "readiness-attempt",
+      hardGateFailures: [],
+    }).valid;
+  } catch {
+    return false;
   }
 }

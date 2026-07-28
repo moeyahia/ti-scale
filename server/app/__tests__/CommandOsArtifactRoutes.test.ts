@@ -145,8 +145,7 @@ describe("CommandOsApplication artifact and page-capture composition", () => {
     const directory = mkdtempSync(join(tmpdir(), "ti-scale-artifact-app-"));
     directories.push(directory);
     const databasePath = join(directory, "ti-scale.sqlite");
-    const fixture = createPageCaptureFixtureDatabase();
-    await fixture.backup(databasePath);
+    const fixture = createPageCaptureFixtureDatabase(databasePath);
     fixture.close();
 
     const state: {

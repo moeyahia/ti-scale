@@ -8,10 +8,30 @@ import {
 import { BrowserAudit } from "./support/browserAudit";
 import { parseE2EProfile } from "./support/e2eProfile";
 import { STATIC_ROUTE_CASES } from "./support/routes";
+import { selectTitaniumOption } from "./support/titaniumSelect";
 
 const TEST_ID = "e2e.manifest.coverage-audit";
 const IPHONE_GRAPH_TEARDOWN_IMAGE = "/brand-v2/optimized/empty-brain-512.avif";
 const MANIFEST_EMPTY_MISSION_SCOPE = "__manifest-coverage-empty-scope__";
+const DEDICATED_RESEARCH_CAMPAIGN_STATE_ENTRY_IDS = new Set([
+  "research.campaign-controls",
+  "research.stop-reason",
+  "research.stop-campaign",
+]);
+const DEDICATED_MATERIAL_STATE_TEST_ID_BY_ENTRY_ID = new Map([
+  // The procedural renderer's healthy initial state cannot also expose its
+  // precise unavailable-WebGL recovery action or an already-open fallback
+  // panel. Its dedicated spec creates both states and traverses them. The
+  // canvas itself is also owned there because renderer availability varies by
+  // browser/host and must not be fabricated by the generic static crawl.
+  ["particle-core.runtime-retry", "e2e.motion-lab.particle-core"],
+  ["particle-core.field-close", "e2e.motion-lab.particle-core"],
+  ["particle-core.canvas", "e2e.motion-lab.particle-core"],
+  ["overview.particle-core", "e2e.overview.particle-core"],
+  ["particle-module-transition.canvas", "e2e.motion-lab.particle-module-transition"],
+  ["particle-module-transition.module-links", "e2e.motion-lab.particle-module-transition"],
+  ["particle-module-transition.runtime-retry", "e2e.motion-lab.particle-module-transition"],
+]);
 // Use the same validated profile contract as Playwright configuration. A
 // second ad-hoc environment variable here previously let a release-profile
 // run report `enforced: false` even though its declared profile required
@@ -76,7 +96,7 @@ function matches(entry: InteractionManifestEntry, control: RenderedControl): boo
 }
 
 async function controlsOnCurrentPage(page: Page, route: string): Promise<RenderedControl[]> {
-  return page.locator('a[href], button, summary, input:not([type="hidden"]), select, textarea, [role="tab"], [role="menuitem"], [role="listbox"], [role="option"]').evaluateAll((elements, currentRoute) => {
+  return page.locator('a[href], button, summary, input:not([type="hidden"]), select, textarea, [role="application"], [role="tab"], [role="menuitem"], [role="listbox"], [role="option"]').evaluateAll((elements, currentRoute) => {
     const normalized = (value: string | null | undefined) => (value ?? "").replace(/\s+/gu, " ").trim();
     const labelledBy = (element: Element) => normalized((element.getAttribute("aria-labelledby") ?? "")
       .split(/\s+/u)
@@ -108,6 +128,8 @@ async function controlsOnCurrentPage(page: Page, route: string): Promise<Rendere
         const inputType = element instanceof HTMLInputElement ? element.type : "";
         const locator = inputType === "date" || inputType === "datetime-local"
           ? "native-date-input"
+          : inputType === "range"
+            ? "slider"
           : explicitRole
             ?? (tag === "a" ? "link"
             : tag === "summary" ? "native-summary"
@@ -195,13 +217,29 @@ async function renderedIntakeControls(page: Page, route: string, audit: BrowserA
   await expect(page.getByRole("group", { name: "Authorization and exact scope", exact: true })).toBeVisible();
   await openVisibleDetails(page);
   controls.push(...await controlsOnCurrentPage(page, route));
+  if (journey === "Autonomous") {
+    // The bounded destructive-policy state is intentionally available only
+    // after the operator explicitly classifies the environment as disposable.
+    // Keep the generic manifest crawl truthful by entering that represented
+    // scope state instead of expecting a lab target checkbox under the safe
+    // default `client_or_public` classification.
+    await selectTitaniumOption(
+      page.getByRole("combobox", { name: "Environment classification", exact: false }),
+      "htb",
+      "pointer",
+    );
+  }
   await page.getByLabel("Authorized targets or environment references", { exact: false }).fill(`lab:manifest-audit-${journey.toLocaleLowerCase("en-US")}`);
   await page.getByRole("checkbox", { name: /I confirm these targets/u }).check();
   await advanceIntake(page, "Outcome and collaboration");
   await openVisibleDetails(page);
   controls.push(...await controlsOnCurrentPage(page, route));
   await advanceIntake(page, journey === "Autonomous" ? "Autonomous operating contract" : "Guided proposal boundaries");
-  await page.getByLabel("Destructive-action policy", { exact: false }).selectOption("bounded_lab_only");
+  await selectTitaniumOption(
+    page.getByRole("combobox", { name: "Destructive-action policy", exact: false }),
+    "bounded_lab_only",
+    "pointer",
+  );
   await page.getByRole("group", { name: "Named disposable lab targets", exact: true }).getByRole("checkbox").check();
   await openVisibleDetails(page);
   controls.push(...await controlsOnCurrentPage(page, route));
@@ -238,6 +276,12 @@ test(`${TEST_ID} discovers rendered controls and reports exact initial coverage 
       ? renderedIntakeControls(page, route.path, audit)
       : renderedControls(page, route.path, audit, expectedPreNavigationOptionalImagePath)));
   }
+  // `/learning` intentionally defaults to verified lessons. Research is a
+  // material query-state surface with its own always-rendered ownership,
+  // strategy, and bounded-draft controls, so crawl that canonical URL too.
+  // Campaign stop controls remain owned by the dedicated mutation fixture
+  // because they require a persisted nonterminal campaign.
+  controls.push(...await renderedControls(page, "/learning?view=research", audit));
   await page.context().clearCookies();
   controls.push(...await renderedControls(page, "/", audit));
 
@@ -253,12 +297,26 @@ test(`${TEST_ID} discovers rendered controls and reports exact initial coverage 
     entry.requiredState.startsWith("Fixture required:"));
   const unresolvedFixtureEntries = unmatchedFixtureEntries.filter((entry) =>
     entry.testIds.includes(TEST_ID));
-  const dedicatedFixtureEntries = unmatchedFixtureEntries.filter((entry) =>
-    !entry.testIds.includes(TEST_ID));
+  // An entry owned by a dedicated browser test is intentionally absent from
+  // this generic static-state crawl even when its material state is described
+  // without the legacy `Fixture required:` prefix. Test ownership, rather
+  // than wording convention, is the durable source of truth.
+  const dedicatedFixtureEntries = unmatched.filter((entry) =>
+    entry.testIds.length > 0 && !entry.testIds.includes(TEST_ID));
+  const dedicatedResearchCampaignStateEntries = unmatched.filter((entry) =>
+    DEDICATED_RESEARCH_CAMPAIGN_STATE_ENTRY_IDS.has(entry.id)
+    && entry.testIds.includes("e2e.research-lab.bounded-campaign-lifecycle")
+    && !entry.testIds.includes(TEST_ID));
+  const dedicatedMaterialStateEntries = unmatched.filter((entry) =>
+    entry.testIds.includes(DEDICATED_MATERIAL_STATE_TEST_ID_BY_ENTRY_ID.get(entry.id) ?? "")
+    && !entry.testIds.includes(TEST_ID));
   // Dedicated fixture specs own their exact rendered states, including static
   // routes such as Decisions and Intelligence lists. This generic crawl omits
   // only those dedicated groups; anything still assigned here remains stale.
-  const stale = unmatched.filter((entry) => !dedicatedFixtureEntries.includes(entry));
+  const stale = unmatched.filter((entry) =>
+    !dedicatedFixtureEntries.includes(entry)
+    && !dedicatedResearchCampaignStateEntries.includes(entry)
+    && !dedicatedMaterialStateEntries.includes(entry));
   const report = {
     enforced: enforce,
     manifestEntries: manifest.entries.length,

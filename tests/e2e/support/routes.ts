@@ -4,6 +4,32 @@ export interface StaticRouteCase {
   readonly expectedPath?: string;
 }
 
+export type GeneratedHrefNavigationKind = "document" | "same-document" | "duplicate";
+
+/**
+ * Classifies the browser transition required to visit one generated internal
+ * href from the currently loaded URL.
+ *
+ * A fragment is not part of an HTTP document identity. Moving between
+ * fragments on the same path/query must therefore be audited as a
+ * same-document transition, while a repeated exact URL is already covered by
+ * the current document. Path, query, and origin changes still require an
+ * independently observed top-level document request.
+ */
+export function classifyGeneratedHrefNavigation(
+  currentHref: string,
+  targetHref: string,
+): GeneratedHrefNavigationKind {
+  const current = new URL(currentHref);
+  const target = new URL(targetHref, current);
+  if (
+    current.origin !== target.origin
+    || current.pathname !== target.pathname
+    || current.search !== target.search
+  ) return "document";
+  return current.hash === target.hash ? "duplicate" : "same-document";
+}
+
 export const STATIC_ROUTE_CASES: readonly StaticRouteCase[] = [
   { id: "overview", path: "/" },
   { id: "missions", path: "/missions" },
@@ -21,6 +47,7 @@ export const STATIC_ROUTE_CASES: readonly StaticRouteCase[] = [
   { id: "agents", path: "/agents" },
   { id: "brain", path: "/brain" },
   { id: "brain-graph", path: "/brain/graph" },
+  { id: "brain-preferences", path: "/brain/preferences" },
   { id: "brain-inbox", path: "/brain/inbox" },
   { id: "brain-control", path: "/brain/control" },
   { id: "brain-vault", path: "/brain/vault" },
@@ -33,6 +60,12 @@ export const STATIC_ROUTE_CASES: readonly StaticRouteCase[] = [
   { id: "system-policies", path: "/system/policies" },
   { id: "system-settings", path: "/system/settings" },
   { id: "manual", path: "/manual" },
+  { id: "motion-lab", path: "/motion-lab" },
+  { id: "motion-lab-assembly-retired-alias", path: "/motion-lab/assembly", expectedPath: "/motion-lab/particle-core" },
+  { id: "motion-lab-particle-core", path: "/motion-lab/particle-core" },
+  { id: "motion-lab-particle-module-transition", path: "/motion-lab/particle-module-transition" },
+  { id: "motion-lab-webgl-retired-alias", path: "/motion-lab/webgl", expectedPath: "/motion-lab/particle-core" },
+  { id: "motion-lab-candidates", path: "/motion-lab/candidates" },
 ] as const;
 
 export const DYNAMIC_ROUTE_PATTERNS: readonly RegExp[] = [

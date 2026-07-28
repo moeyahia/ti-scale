@@ -17,6 +17,7 @@ import {
   type MemoryScope,
   type MemorySensitivity,
 } from "./types";
+import { validateAttackCentricReusableNode } from "./AttackKnowledgeTaxonomy";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const NON_EMPTY_MAX = 20_000;
@@ -137,6 +138,7 @@ export function validateCreateNode(input: CreateMemoryNodeInput): void {
   if (input.lifecycleStatus === "confirmed" && input.confirmationState !== "confirmed") {
     throw new TypeError("confirmed memory requires confirmed consent state");
   }
+  validateAttackCentricReusableNode(input);
 }
 
 export function validateCreateEdge(input: CreateMemoryEdgeInput): void {

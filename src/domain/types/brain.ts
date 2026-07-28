@@ -2,14 +2,33 @@ export const MEMORY_NODE_TYPES = [
   "operator", "preference", "mission", "run", "plan", "phase", "step", "agent",
   "tool", "mcp_capability", "tactic", "technique", "procedure", "target", "asset",
   "entity", "decision", "evidence", "finding", "artifact", "failure", "recovery",
-  "evaluation", "lesson", "report", "source",
+  "evaluation", "lesson", "report", "source", "technology_product",
+  "exact_version_fingerprint", "version_range_fingerprint", "operating_system",
+  "kernel", "framework", "runtime", "database", "firewall", "waf", "proxy",
+  "security_control", "topology_pattern", "topology_role", "cve", "advisory",
+  "cwe", "misconfiguration", "attack_vector", "prerequisite", "attribute",
+  "discovery_pattern", "fingerprint_pattern", "script_artifact", "tool_artifact",
+  "outcome", "failure_mode", "alternative", "evidence_pattern",
+  "validation_pattern", "detection", "remediation", "strategy", "research",
+  "procedure_version", "operational_hazard", "target_state_transition",
+  "recovery_pattern", "health_check",
+  "attack_tactic", "attack_technique", "attack_procedure", "attack_lesson",
 ] as const;
 
 export const MEMORY_EDGE_TYPES = [
   "prefers", "applies_to", "belongs_to", "executed_by", "delegated_to", "used_in",
   "targets", "produced", "supports", "contradicts", "depends_on", "derived_from",
   "learned_from", "failed_in", "recovered_by", "similar_to", "supersedes",
-  "verified_by", "mentioned_in", "influenced",
+  "verified_by", "mentioned_in", "influenced", "has_exact_version",
+  "has_version_range", "version_in_range", "runs_on", "built_with",
+  "uses_runtime", "uses_database", "protected_by", "has_topology_role",
+  "matches_fingerprint", "discovered_by", "fingerprinted_by", "affects",
+  "classified_as", "exploits", "requires", "has_attribute", "implemented_by",
+  "tested_against", "produces_outcome", "failed_because", "recovered_with",
+  "alternative_to", "validated_by", "detected_by", "remediated_by",
+  "applicable_to", "not_applicable_to", "mitigates", "bypasses", "improves",
+  "caused", "leaves_in_state", "requires_recovery", "avoid_after", "safe_when",
+  "mitigated_by",
 ] as const;
 
 export const MEMORY_LIFECYCLE_STATES = [
@@ -17,12 +36,28 @@ export const MEMORY_LIFECYCLE_STATES = [
 ] as const;
 
 export const MEMORY_SENSITIVITIES = ["public", "internal", "private", "restricted"] as const;
+export const MEMORY_OUTCOME_TAGS = ["success", "failed"] as const;
+export const HISTORICAL_REPORTED_OUTCOME_CLASSIFICATIONS = [
+  "reported_success", "reported_failure", "mixed", "unknown",
+] as const;
 
 export type MemoryNodeType = (typeof MEMORY_NODE_TYPES)[number];
 export type MemoryEdgeType = (typeof MEMORY_EDGE_TYPES)[number];
 export type MemoryLifecycle = (typeof MEMORY_LIFECYCLE_STATES)[number];
 export type MemorySensitivity = (typeof MEMORY_SENSITIVITIES)[number];
+export type MemoryOutcomeTag = (typeof MEMORY_OUTCOME_TAGS)[number];
+export type HistoricalReportedOutcomeClassification =
+  (typeof HISTORICAL_REPORTED_OUTCOME_CLASSIFICATIONS)[number];
 export type MemoryGraphView = "global" | "local" | "mission" | "operator";
+
+export interface HistoricalReportedOutcomeSummary {
+  classification: HistoricalReportedOutcomeClassification;
+  /** Confidence in interpreting the historical claim, never proof of success. */
+  classificationConfidence: number;
+  claimCount: number;
+  sourceCount: number;
+  policyVersion: string;
+}
 
 export interface MemoryControlPolicy {
   enabled: boolean;
@@ -45,12 +80,54 @@ export interface MemoryScope {
   missionId?: string;
 }
 
+export interface ProvenanceOrigin {
+  missionId?: string;
+  missionName?: string;
+  runId?: string;
+  runStatus?: string;
+  engagementId?: string;
+  engagementLabel?: string;
+  artifactId?: string;
+  evidenceId?: string;
+  privateSourceReference?: string;
+  sourceLocator?: string;
+}
+
 export interface ProvenanceSource {
+  /** Stable canonical row identity used only for bounded provenance paging. */
+  sourceRecordId?: string;
   sourceType: string;
   sourceId: string;
   acquiredAt: string;
   sourceHash?: string;
   excerptRedacted?: string;
+  /**
+   * Every exact access-controlled custody origin. Reusable memory remains
+   * target-free; these private origins are returned only when the current
+   * operator may inspect each source mission. They are not graph relationships
+   * and are never projected into the reusable Attack Knowledge Vault.
+   */
+  origins?: ProvenanceOrigin[];
+  /** Exact access-controlled origin count, including unloaded origin pages. */
+  originCount?: number;
+  originsNextCursor?: string | null;
+}
+
+export interface MemorySourcePage {
+  schemaVersion: "2.4";
+  nodeId: string;
+  items: ProvenanceSource[];
+  totalCount: number;
+  nextCursor: string | null;
+}
+
+export interface MemoryOriginPage {
+  schemaVersion: "2.4";
+  nodeId: string;
+  sourceRecordId: string;
+  items: ProvenanceOrigin[];
+  totalCount: number;
+  nextCursor: string | null;
 }
 
 export interface MemoryProvenance {
@@ -76,6 +153,15 @@ export interface MemoryNodeSummary {
   updatedAt: string;
   edgeCount: number;
   sourceCount: number;
+  /**
+   * Evidence-linked terminal outcomes that this reusable node participated in.
+   * Both values may be present because the same technique can succeed in one
+   * exact context and fail in another. Missing or empty means unclassified;
+   * clients must never infer an outcome from titles, node type, or lifecycle.
+   */
+  outcomeTags?: MemoryOutcomeTag[];
+  /** Historical source reports, kept separate from verified outcomeTags. */
+  reportedOutcome?: HistoricalReportedOutcomeSummary;
 }
 
 export interface MemoryNode extends MemoryNodeSummary {
@@ -103,6 +189,9 @@ export interface BrainSummary {
   counts: {
     confirmed: number;
     verified: number;
+    candidateNodes: number;
+    pendingReviews: number;
+    /** @deprecated Compatibility alias for pendingReviews. */
     candidates: number;
     stale: number;
     disputed: number;
@@ -154,13 +243,132 @@ export interface MemoryUsage {
   createdAt: string;
 }
 
+export interface OperationalHazardReference {
+  id: string;
+  nodeType: MemoryNodeType;
+  title: string;
+  summary: string;
+  confidence: number;
+  lifecycleStatus: MemoryLifecycle;
+  expiresAt?: string;
+}
+
+export interface OperationalHazardDetail {
+  procedure: OperationalHazardReference | null;
+  procedureVersion: OperationalHazardReference | null;
+  affectedProducts: OperationalHazardReference[];
+  affectedVersions: OperationalHazardReference[];
+  affectedStack: OperationalHazardReference[];
+  prerequisites: OperationalHazardReference[];
+  observedStates: OperationalHazardReference[];
+  orderedSequence: string[];
+  normalizedExecution: {
+    parameters: Record<string, string | number | boolean>;
+    loadMinimum: number | null;
+    concurrencyMinimum: number | null;
+    timingWindowMs: number | null;
+  };
+  applicabilityConstraints: {
+    requireExactProcedureVersion?: boolean;
+    requireVerifiedVersionRelationship?: boolean;
+    requireAllStackNodes?: boolean;
+    requireAllPrerequisites?: boolean;
+    requireObservedState?: boolean;
+  };
+  symptom: { observed: string; affectedComponent: string };
+  stateTransition: { before: string; after: string };
+  corroboration: {
+    exactHangCount: number;
+    observedAttemptCount: number;
+    operatorReportedResetMinimum: number | null;
+  };
+  safeHealthGate: string[];
+  unsafeRetryConditions: string[];
+  recovery: {
+    summary: string;
+    pattern: OperationalHazardReference | null;
+    cost: {
+      resetCount?: number;
+      operatorReportedResetCountMinimum?: number;
+      serviceRecycleCount?: number;
+      downtimeMs?: number;
+      operatorMinutes?: number;
+      requiresDisposableTargetReset?: boolean;
+    };
+  };
+  alternatives: { sequence: string[]; procedure: OperationalHazardReference | null };
+  confidence: number;
+  freshness: {
+    observedAt: string;
+    freshUntil: string | null;
+    status: "current" | "expired" | "unbounded";
+  };
+  provenanceReceipt: {
+    profileVersion: number;
+    sourceCount: number;
+    receiptIds: string[];
+    receiptHash: string;
+    recordedAt: string;
+  };
+}
+
+/**
+ * Run-scoped reset accounting intentionally kept separate from a reusable
+ * procedure profile. An operator statement can preserve the overall recovery
+ * burden, but it is never evidence that a particular procedure caused every
+ * reported reset.
+ */
+export interface OperationalHazardResetTotals {
+  missionId: string;
+  runId: string;
+  exactAttributableResetCount: number;
+  operatorReportedResetMinimum: number | null;
+  minimumUnattributedResetCount: number;
+}
+
+export interface OperationalHazardAggregateObservation {
+  id: string;
+  missionId: string;
+  runId: string;
+  reportedMinimum: number;
+  statementEventId: string;
+  reportedAt: string;
+}
+
+export interface OperationalHazardAggregateObservationResult {
+  observation: OperationalHazardAggregateObservation;
+  totals: OperationalHazardResetTotals;
+  replayed: boolean;
+}
+
 export interface MemoryNodeDetail {
   node: MemoryNode;
   sources: ProvenanceSource[];
+  sourcesNextCursor: string | null;
   versions: MemoryVersion[];
   backlinks: MemoryEdgeSummary[];
   outgoing: MemoryEdgeSummary[];
   usage: MemoryUsage[];
+  operationalHazard?: OperationalHazardDetail;
+}
+
+export interface OperatorPreferenceSummary {
+  node: MemoryNodeSummary;
+  preferenceKey: string;
+  value: Record<string, unknown>;
+  appliesTo: string[];
+  operatorId: string;
+  confirmationState: "confirmed";
+  consentPolicy: string;
+  profileVersion: number;
+  lastConfirmedAt: string;
+  provenance: MemoryProvenance;
+}
+
+export interface OperatorPreferencePage {
+  schemaVersion: "2.4";
+  items: OperatorPreferenceSummary[];
+  totalReturned: number;
 }
 
 export interface MemoryCandidate {
@@ -278,6 +486,27 @@ export interface VaultHealthCheckResult {
   message: string;
 }
 
+export interface VaultDisconnectResult {
+  status: "disconnected";
+  connectionId: string;
+  disconnectedAt: string;
+  connectionVersion: string;
+  projectionState: "healthy" | "degraded";
+  replacementConnectionId?: string;
+  activeRunCount: number;
+  activeRunImpact: "canonical_brain_unaffected";
+  syncStopped: true;
+  filesDeleted: 0;
+  notesRewritten: 0;
+  auditRecordId: string;
+  message: string;
+}
+
+export interface VaultDisconnectMutation {
+  connection: VaultConnection;
+  result: VaultDisconnectResult;
+}
+
 export interface VaultSyncState {
   id: string;
   connectionId: string;
@@ -311,6 +540,88 @@ export interface VaultSnapshot {
   connections: VaultConnection[];
   syncStates: VaultSyncState[];
   conflicts: VaultConflict[];
+}
+
+export interface AttackKnowledgeVaultPresetPreview {
+  enabled: boolean;
+  id: "ti_scale_attack_knowledge_v1";
+  displayName: "Ti-Scale Attack Knowledge Vault";
+  vaultPath: "Attack-Knowledge-Vault";
+  policyHash: string;
+  activationRequired: true;
+  alreadyActiveConnectionId?: string;
+  activePreset?: {
+    connectionId: string;
+    updatedAt: string;
+    includeConfirmed: boolean;
+    includeOperatorProfile: boolean;
+    operatorProfileId?: string;
+    policyHash: string;
+  };
+  confirmedScopeUpgrade?: {
+    connectionId: string;
+    expectedUpdatedAt: string;
+    currentPolicyHash: string;
+    targetPolicyHash: string;
+    eligibleNodeCountBefore: number;
+    eligibleNodeCountAfter: number;
+    eligibleNodeDelta: number;
+  };
+  operatorProfileScopeUpgrade?: {
+    connectionId: string;
+    expectedUpdatedAt: string;
+    currentPolicyHash: string;
+    targetPolicyHash: string;
+    eligibleNodeCountBefore: number;
+    eligibleNodeCountAfter: number;
+    eligibleNodeDelta: number;
+    operatorProfileNodeCount: number;
+  };
+  operatorProfileAvailability: {
+    requested: boolean;
+    available: boolean;
+    status: "available" | "no_eligible_confirmed_profile";
+    eligibleNodeCount: number;
+  };
+  projection: {
+    nodeTypes: string[];
+    scopeKinds: ["global"];
+    lifecycleStatuses: Array<"verified" | "confirmed">;
+    sensitivities: MemorySensitivity[];
+    folders: string[];
+    policyEligibleNodeCount: number;
+    excludedOperationalNodeCount: number;
+    confirmedKnowledgeIsOptIn: boolean;
+    operatorProfileIncluded: boolean;
+    operatorProfileNodeCount: number;
+  };
+  privacyBoundary: {
+    excludesNodeTypes: string[];
+    excludesOperationalLocators: string[];
+    restrictedSensitivityWithheld: true;
+  };
+}
+
+export interface AttackKnowledgeVaultScopeAmendment {
+  connection: VaultConnection;
+  result: {
+    previousPolicyHash: string;
+    targetPolicyHash: string;
+    eligibleNodeCountBefore: number;
+    eligibleNodeCountAfter: number;
+    eligibleNodeDelta: number;
+    amendedAt: string;
+    auditRecordId: string;
+    filesystemHealth: { checkedAt: string; checks: VaultHealthChecks };
+    connectionIdChanged: false;
+    vaultPathChanged: false;
+    filesDeleted: 0;
+    notesWritten: 0;
+    operatorProfileFolder?: "10 Operator";
+    operatorProfileFolderCreated?: boolean;
+    operatorProfileNodeCount?: number;
+  };
+  preset: AttackKnowledgeVaultPresetPreview;
 }
 
 export interface VaultOperationResult {
@@ -378,6 +689,8 @@ export interface MemoryNodeQuery {
   engagementId?: string;
   missionId?: string;
   sensitivity?: MemorySensitivity;
+  outcome?: MemoryOutcomeTag | "unclassified";
+  reportedOutcome?: HistoricalReportedOutcomeClassification | "not_reported";
 }
 
 export interface MemoryGraphQuery {
@@ -396,4 +709,6 @@ export interface MemoryGraphQuery {
   updatedAfter?: string;
   updatedBefore?: string;
   preset?: "attack_path" | "lessons_failures";
+  outcome?: MemoryOutcomeTag | "unclassified";
+  reportedOutcome?: HistoricalReportedOutcomeClassification | "not_reported";
 }

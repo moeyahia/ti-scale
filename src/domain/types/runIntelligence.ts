@@ -213,6 +213,15 @@ export interface AttackAttemptEvidenceLink {
   readonly createdAt: string;
 }
 
+export interface AttackAttemptActionBinding {
+  readonly actionType: string;
+  readonly actionClass: string;
+  readonly normalizedArguments: Readonly<Record<string, RunIntelligenceJson>>;
+  readonly scopedTarget: string;
+  readonly bindingHash: string;
+  readonly createdAt: string;
+}
+
 export interface AttackAttempt {
   readonly id: string;
   readonly missionId: string;
@@ -221,6 +230,8 @@ export interface AttackAttempt {
   readonly stepId: string | null;
   readonly targetAssetId: string | null;
   readonly targetServiceId: string | null;
+  readonly recoverySourceAttackAttemptId: string | null;
+  readonly representedActionBinding: AttackAttemptActionBinding | null;
   readonly objective: string;
   readonly techniqueId: string | null;
   readonly techniqueName: string;

@@ -21,6 +21,7 @@ import {
   isExpectedOptionalMediaNavigationTeardown,
   isExpectedWebKitDocumentFetchTeardown,
   isExpectedVerifiedDownloadNavigation,
+  isExactWebKitCoopProvisionalDocumentReplacement,
   type BrowserIssueLike,
 } from "./browserAuditPolicy";
 import {
@@ -79,6 +80,13 @@ export interface BrowserAuditController {
   verifyGeneratedDownload(page: Page, download: Download, suggestedFilename: string): Promise<void>;
   request(api: APIRequestContext, audited: AuditedApiRequest): Promise<APIResponse>;
   waitForPageApiSettlement(page: Page, options?: PageApiSettlementOptions): Promise<void>;
+  /**
+   * Close an audited page before a test-owned backend or other required
+   * dependency is stopped. The automatic page fixture remains the normal
+   * owner; this early-close path preserves the same exact stream and request
+   * reconciliation and is idempotent with fixture teardown.
+   */
+  closePageBeforeDependencyShutdown(page: Page): Promise<void>;
   withExpectedDocumentNavigationTeardown<T>(
     page: Page,
     operation: () => Promise<T>,
@@ -197,10 +205,33 @@ interface HistoryTraversalBoundary extends NavigationBoundary {
 
 interface ActiveBrowserRequest {
   readonly page: Page;
+  readonly frame: Frame;
   readonly url: string;
   readonly method: string;
   readonly resourceType: string;
+  readonly navigationRequest: boolean;
+  readonly startingPageUrl: string;
   readonly referrer?: string;
+}
+
+interface WebKitCoopProvisionalDocumentBoundary {
+  readonly predecessor: PlaywrightRequest;
+  readonly successor: PlaywrightRequest;
+  readonly page: Page;
+  readonly frame: Frame;
+  readonly predecessorRequest: ActiveBrowserRequest;
+  readonly successorRequest: ActiveBrowserRequest;
+  responseStatus?: number;
+  responseUrl?: string;
+  responseCrossOriginOpenerPolicy?: string;
+}
+
+interface WebKitCoopProvisionalDocumentReplacementReceipt {
+  readonly url: string;
+  readonly method: string;
+  readonly status: number;
+  readonly crossOriginOpenerPolicy: "same-origin";
+  readonly resolvedPageUrl: string;
 }
 
 interface PendingEventStreamFailure {
@@ -488,9 +519,20 @@ export class BrowserAuditSession {
   private readonly popupListeners = new Map<Page, (popup: Page) => void>();
   private readonly downloadListeners = new Map<Page, (download: Download) => void>();
   private readonly contextListeners: ContextListenerSet;
+  private readonly browserName: string | undefined;
   private readonly activeDocumentNavigationTeardown = new Map<Page, NavigationBoundary>();
   private readonly activeHistoryTraversal = new Map<Page, HistoryTraversalBoundary>();
   private readonly activeRequests = new Map<PlaywrightRequest, ActiveBrowserRequest>();
+  private readonly webKitCoopReplacementByPredecessor = new Map<
+    PlaywrightRequest,
+    WebKitCoopProvisionalDocumentBoundary
+  >();
+  private readonly webKitCoopReplacementBySuccessor = new Map<
+    PlaywrightRequest,
+    WebKitCoopProvisionalDocumentBoundary
+  >();
+  private readonly webKitCoopProvisionalDocumentReplacementReceipts:
+    WebKitCoopProvisionalDocumentReplacementReceipt[] = [];
   private readonly navigationRequestBoundaries = new WeakMap<PlaywrightRequest, NavigationBoundary>();
   private readonly optionalImageNavigationExpectations: OptionalImageNavigationExpectation[] = [];
   private readonly closingPages = new Set<Page>();
@@ -522,6 +564,7 @@ export class BrowserAuditSession {
   private readonly seenRequests = new WeakSet<PlaywrightRequest>();
   private readonly seenRequestFailures = new WeakSet<PlaywrightRequest>();
   private readonly seenRequestFinished = new WeakSet<PlaywrightRequest>();
+  private readonly requestsWithResponses = new WeakSet<PlaywrightRequest>();
   private readonly pageCloseResolvedRequests = new WeakSet<PlaywrightRequest>();
   private readonly seenResponses = new WeakSet<PlaywrightResponse>();
   private readonly seenConsoleMessages = new WeakSet<ConsoleMessage>();
@@ -546,6 +589,7 @@ export class BrowserAuditSession {
   private readonly onContextPage: (page: Page) => void;
 
   private constructor(private readonly context: BrowserContext, options: BrowserAuditOptions = {}) {
+    this.browserName = context.browser()?.browserType().name();
     this.profile = e2eAuditProfile();
     this.requireApi = this.profile !== "degraded";
     this.expectedOrigin = new URL(
@@ -967,6 +1011,88 @@ export class BrowserAuditSession {
     return true;
   }
 
+  private bindWebKitCoopProvisionalDocumentReplacement(
+    successor: PlaywrightRequest,
+    successorRequest: ActiveBrowserRequest,
+  ): void {
+    if (
+      this.browserName !== "webkit"
+      || !successorRequest.navigationRequest
+      || successorRequest.method !== "GET"
+      || successorRequest.resourceType !== "document"
+      || successorRequest.startingPageUrl !== "about:blank"
+      || successorRequest.frame !== successorRequest.page.mainFrame()
+    ) return;
+    const candidates = [...this.activeRequests.entries()].filter(([predecessor, active]) => (
+      predecessor !== successor
+      && !this.webKitCoopReplacementByPredecessor.has(predecessor)
+      && !this.requestsWithResponses.has(predecessor)
+      && active.page === successorRequest.page
+      && active.frame === successorRequest.frame
+      && active.navigationRequest
+      && active.method === successorRequest.method
+      && active.resourceType === successorRequest.resourceType
+      && active.url === successorRequest.url
+      && active.startingPageUrl === "about:blank"
+    ));
+    if (candidates.length !== 1) return;
+    const [predecessor, predecessorRequest] = candidates[0]!;
+    const boundary: WebKitCoopProvisionalDocumentBoundary = {
+      predecessor,
+      successor,
+      page: successorRequest.page,
+      frame: successorRequest.frame,
+      predecessorRequest,
+      successorRequest,
+    };
+    this.webKitCoopReplacementByPredecessor.set(predecessor, boundary);
+    this.webKitCoopReplacementBySuccessor.set(successor, boundary);
+  }
+
+  private abandonWebKitCoopProvisionalDocumentBoundary(request: PlaywrightRequest): void {
+    const boundary = this.webKitCoopReplacementByPredecessor.get(request)
+      ?? this.webKitCoopReplacementBySuccessor.get(request);
+    if (!boundary) return;
+    this.webKitCoopReplacementByPredecessor.delete(boundary.predecessor);
+    this.webKitCoopReplacementBySuccessor.delete(boundary.successor);
+  }
+
+  private reconcileWebKitCoopProvisionalDocumentReplacement(
+    successor: PlaywrightRequest,
+  ): void {
+    const boundary = this.webKitCoopReplacementBySuccessor.get(successor);
+    if (!boundary) return;
+    const reconciled = isExactWebKitCoopProvisionalDocumentReplacement({
+      browserName: this.browserName ?? "",
+      samePage: boundary.predecessorRequest.page === boundary.successorRequest.page,
+      sameFrame: boundary.predecessorRequest.frame === boundary.successorRequest.frame,
+      predecessor: boundary.predecessorRequest,
+      successor: boundary.successorRequest,
+      response: {
+        status: boundary.responseStatus,
+        url: boundary.responseUrl,
+        crossOriginOpenerPolicy: boundary.responseCrossOriginOpenerPolicy,
+      },
+      successorFinished: true,
+      resolvedPageUrl: boundary.page.url(),
+    });
+    if (
+      reconciled
+      && this.activeRequests.has(boundary.predecessor)
+      && boundary.responseStatus !== undefined
+    ) {
+      this.activeRequests.delete(boundary.predecessor);
+      this.webKitCoopProvisionalDocumentReplacementReceipts.push({
+        url: boundary.successorRequest.url,
+        method: boundary.successorRequest.method,
+        status: boundary.responseStatus,
+        crossOriginOpenerPolicy: "same-origin",
+        resolvedPageUrl: boundary.page.url(),
+      });
+    }
+    this.abandonWebKitCoopProvisionalDocumentBoundary(successor);
+  }
+
   private handleRequest(request: PlaywrightRequest): void {
     if (this.pageCloseResolvedRequests.has(request)) return;
     if (this.seenRequests.has(request)) return;
@@ -983,16 +1109,20 @@ export class BrowserAuditSession {
     }
     if (!page) return;
     this.attach(page);
+    const requestFrame = request.frame();
     const active: ActiveBrowserRequest = {
       page,
+      frame: requestFrame,
       url: request.url(),
       method: request.method(),
       resourceType: request.resourceType(),
+      navigationRequest: request.isNavigationRequest(),
+      startingPageUrl: page.url(),
       referrer: request.headers()["referer"],
     };
+    this.bindWebKitCoopProvisionalDocumentReplacement(request, active);
     this.activeRequests.set(request, active);
     const state = this.pageStates.get(page)!;
-    const requestFrame = request.frame();
     const activeNavigationBoundary = this.activeDocumentNavigationTeardown.get(page);
     if (activeNavigationBoundary) {
       this.bindOptionalImageNavigationRequest(activeNavigationBoundary, request, active);
@@ -1057,6 +1187,8 @@ export class BrowserAuditSession {
   private handleRequestFinished(request: PlaywrightRequest): void {
     if (this.seenRequestFinished.has(request)) return;
     this.seenRequestFinished.add(request);
+    this.reconcileWebKitCoopProvisionalDocumentReplacement(request);
+    this.abandonWebKitCoopProvisionalDocumentBoundary(request);
     this.activeRequests.delete(request);
     this.eventStreamRequests.delete(request);
   }
@@ -1093,12 +1225,14 @@ export class BrowserAuditSession {
 
   private handleRequestFailed(request: PlaywrightRequest): void {
     if (this.pageCloseResolvedRequests.has(request)) {
+      this.abandonWebKitCoopProvisionalDocumentBoundary(request);
       this.activeRequests.delete(request);
       this.eventStreamRequests.delete(request);
       return;
     }
     if (this.seenRequestFailures.has(request)) return;
     this.seenRequestFailures.add(request);
+    this.abandonWebKitCoopProvisionalDocumentBoundary(request);
     const page = this.pageForRequest(request);
     if (page) this.attach(page);
     const issue: BrowserIssue = {
@@ -1184,8 +1318,15 @@ export class BrowserAuditSession {
   private handleResponse(response: PlaywrightResponse): void {
     if (this.seenResponses.has(response)) return;
     this.seenResponses.add(response);
-    if (response.status() < 400) return;
     const request = response.request();
+    this.requestsWithResponses.add(request);
+    const provisionalReplacement = this.webKitCoopReplacementBySuccessor.get(request);
+    if (provisionalReplacement) {
+      provisionalReplacement.responseStatus = response.status();
+      provisionalReplacement.responseUrl = response.url();
+      provisionalReplacement.responseCrossOriginOpenerPolicy = response.headers()["cross-origin-opener-policy"];
+    }
+    if (response.status() < 400) return;
     const page = this.pageForRequest(request);
     if (page) this.attach(page);
     const issue = issueForResponse({
@@ -1515,6 +1656,10 @@ export class BrowserAuditSession {
     }
   }
 
+  closePageBeforeDependencyShutdown(page: Page): Promise<void> {
+    return this.closeAuditedPage(page);
+  }
+
   private validateExactOptionalImagePath(path: string): string {
     if (!path.startsWith("/")) throw new Error("Optional-image navigation teardown requires one exact root-relative path");
     try {
@@ -1810,12 +1955,16 @@ export class BrowserAuditSession {
       throw error;
     }
     if (this.expiredApiRequestIds.has(id)) return response;
-    const responseUrl = new URL(response.url());
+    // Bun's Playwright APIRequestContext may preserve the relative request URL
+    // in APIResponse.url(). Normalize against the already-validated absolute
+    // request URL before enforcing the exact-origin and response-ledger gates.
+    const responseUrl = new URL(response.url(), requestedUrl);
+    const normalizedResponseUrl = responseUrl.href;
     if (responseUrl.origin !== this.expectedOrigin) {
       this.unexpected.push({
         kind: "response",
         message: `Audited API request ${id} resolved outside the exact V2 origin`,
-        url: response.url(),
+        url: normalizedResponseUrl,
         method: audited.method,
         status: response.status(),
       });
@@ -1824,14 +1973,14 @@ export class BrowserAuditSession {
       id,
       method: audited.method,
       requestedUrl,
-      responseUrl: response.url(),
+      responseUrl: normalizedResponseUrl,
       status: response.status(),
       outcome: "completed",
     });
     const consumption = this.expectedResponseLedger.observe({
       transport: "api-request",
       method: audited.method,
-      url: response.url(),
+      url: normalizedResponseUrl,
       status: response.status(),
     }, audited.expectedResponseId);
     if (response.status() >= 400) {
@@ -1839,7 +1988,7 @@ export class BrowserAuditSession {
         method: audited.method,
         status: response.status(),
         statusText: response.statusText(),
-        url: response.url(),
+        url: normalizedResponseUrl,
       });
       if (consumption.kind === "consumed") this.expectedHttpResponses.push(issue);
       else if (consumption.kind === "extra" || consumption.kind === "mismatch") {
@@ -1849,7 +1998,7 @@ export class BrowserAuditSession {
       this.unexpected.push({
         kind: "response",
         message: `HTTP ${response.status()} did not satisfy expected failure ${audited.expectedResponseId ?? "(missing id)"}`,
-        url: response.url(),
+        url: normalizedResponseUrl,
         method: audited.method,
         status: response.status(),
       });
@@ -2008,6 +2157,8 @@ export class BrowserAuditSession {
     this.eventStreamRequestOrdinals.clear();
     this.pageStates.clear();
     this.activeRequests.clear();
+    this.webKitCoopReplacementByPredecessor.clear();
+    this.webKitCoopReplacementBySuccessor.clear();
   }
 
   private add(page: Page | undefined, issue: BrowserIssue): void {
@@ -2114,6 +2265,8 @@ export class BrowserAuditSession {
         observedAt: entry.observedAt,
       })),
       unresolvedRequests: [...this.activeRequests.values()].map(({ url, method }) => ({ url, method })),
+      webKitCoopProvisionalDocumentReplacementReceipts:
+        this.webKitCoopProvisionalDocumentReplacementReceipts,
       eventStreamCancellations: this.eventStreamCancellations.map((entry) => ({
         url: entry.url,
         consoleObserved: entry.consoleObserved,
@@ -2229,6 +2382,9 @@ export class BrowserAudit {
   request(api: APIRequestContext, audited: AuditedApiRequest): Promise<APIResponse> { return this.session.request(api, audited); }
   waitForPageApiSettlement(page: Page, options?: PageApiSettlementOptions): Promise<void> {
     return this.session.waitForPageApiSettlement(page, options);
+  }
+  closePageBeforeDependencyShutdown(page: Page): Promise<void> {
+    return this.session.closeAuditedPage(page);
   }
   withExpectedDocumentNavigationTeardown<T>(
     page: Page,

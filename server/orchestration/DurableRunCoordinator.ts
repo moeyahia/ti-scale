@@ -4,6 +4,14 @@ import { inImmediateTransaction } from "../db";
 import { EventRepository } from "../events";
 import { RuntimeContinuationRepository } from "../command-runtime/RuntimeContinuationRepository";
 import {
+  AUTONOMOUS_RECOVERY_MEMORY_COMPILER_VERSION,
+  AUTONOMOUS_RECOVERY_MEMORY_SCHEMA_VERSION,
+  RecoveryMemoryDecisionReceiptRepository,
+  type RecoveryMemoryAppliedEffect,
+  type RecoveryMemoryDecisionReceipt,
+  type RecoveryMemoryDecisionSnapshot,
+} from "../recovery-memory";
+import {
   CircuitBreaker,
   RunSupervisor,
   allowedRunTransitions,
@@ -13,6 +21,7 @@ import {
   isTerminalRunState,
   type BudgetValues,
   type FailureCategory,
+  type Journey,
   type RunState,
   type SupervisedRun,
 } from "../supervisor";
@@ -21,6 +30,7 @@ import { CheckpointRepository } from "./CheckpointRepository";
 import { RunRepository } from "./RunRepository";
 import {
   DurableOrchestrationError,
+  ExecutionBoundaryError,
   type CompleteActionInput,
   type CompleteActionResult,
   type DurableAction,
@@ -40,8 +50,64 @@ export interface DurableRunCoordinatorOptions {
   readonly supervisor?: RunSupervisor;
   readonly now?: () => Date;
   readonly leaseTtlMs?: number;
+  /** Runs inside the fenced action-reservation transaction before commit. */
+  readonly beforeActionCommit?: (action: DurableAction) => void;
+  /** Runs after terminal action state is written, inside the same fenced transaction. */
+  readonly afterActionCompleteBeforeCommit?: (
+    action: DurableAction,
+    result: Pick<CompleteActionInput, "success" | "resultSummary" | "operationalResetResult">,
+  ) => void;
   readonly afterActionCommit?: (action: DurableAction) => void;
+  /**
+   * Runs after the durable reservation and final authorization check, but
+   * before the execution adapter is invoked. Runtimes use this boundary to
+   * install lease heartbeats before a dispatch implementation can wait on
+   * long-running work.
+   */
+  readonly beforeActionDispatch?: (
+    started: StartActionResult,
+  ) => ActionDispatchLeaseLifecycle | void;
   readonly afterCancellationCleanup?: (runId: string) => void;
+  /**
+   * Production-owned structured diagnosis sink. It runs inside the same
+   * fenced transaction as the failed action, terminal child state, event and
+   * checkpoint so a process loss cannot expose a failed run without its
+   * operator-readable diagnosis.
+   */
+  readonly recordActionFailure?: (failure: DurableActionFailureContext) => void;
+  /** Optional owning-runtime fence, rechecked inside every write transaction. */
+  readonly assertMutationAuthority?: (runId: string) => void;
+}
+
+export interface ActionDispatchLeaseLifecycle {
+  /** Returns the latest same-owner fencing token while dispatch is active. */
+  readonly currentLease: () => RunLeaseToken;
+  /** Stops renewal synchronously and returns the final usable token. */
+  readonly stop: () => RunLeaseToken;
+}
+
+export interface DurableActionFailureContext {
+  readonly action: DurableAction;
+  readonly assignmentId: string | null;
+  readonly category: FailureCategory;
+  readonly failureCode: string;
+  readonly failureMessage: string;
+  readonly directive: CompleteActionResult["directive"];
+  readonly reason: string;
+  readonly run: DurableRun;
+  readonly eventId: string;
+  readonly checkpointId: string;
+  readonly progressBeforeFailure: CompleteActionInput["before"];
+  readonly retryable: boolean;
+}
+
+export interface GuidedCancellationBoundary {
+  readonly decisionId: string;
+  readonly missionId: string;
+  readonly runId: string;
+  readonly stepId: string;
+  readonly actionFingerprint: string;
+  readonly parameterHash: string;
 }
 
 export type PlanningRetryScheduleResult =
@@ -134,10 +200,16 @@ export class DurableRunCoordinator {
   private readonly events: EventRepository;
   private readonly continuations: RuntimeContinuationRepository;
   private readonly supervisor: RunSupervisor;
+  private readonly recoveryMemoryReceipts: RecoveryMemoryDecisionReceiptRepository;
   private readonly now: () => Date;
   private readonly leaseTtlMs: number;
+  private readonly beforeActionCommit?: (action: DurableAction) => void;
+  private readonly afterActionCompleteBeforeCommit?: DurableRunCoordinatorOptions["afterActionCompleteBeforeCommit"];
   private readonly afterActionCommit?: (action: DurableAction) => void;
+  private readonly beforeActionDispatch?: DurableRunCoordinatorOptions["beforeActionDispatch"];
   private readonly afterCancellationCleanup?: (runId: string) => void;
+  private readonly recordActionFailure?: (failure: DurableActionFailureContext) => void;
+  private readonly assertRuntimeMutationAuthority?: (runId: string) => void;
   private readonly controllers = new Map<string, AbortController>();
 
   constructor(
@@ -149,12 +221,21 @@ export class DurableRunCoordinator {
     this.actions = new ActionRepository(database);
     this.checkpoints = new CheckpointRepository(database, this.actions);
     this.events = new EventRepository(database);
-    this.continuations = new RuntimeContinuationRepository(database);
+    this.continuations = new RuntimeContinuationRepository(
+      database,
+      (runId) => this.assertMutationAuthority(runId),
+    );
     this.supervisor = options.supervisor ?? new RunSupervisor();
+    this.recoveryMemoryReceipts = new RecoveryMemoryDecisionReceiptRepository(database);
     this.now = options.now ?? (() => new Date());
     this.leaseTtlMs = options.leaseTtlMs ?? 30_000;
+    this.beforeActionCommit = options.beforeActionCommit;
+    this.afterActionCompleteBeforeCommit = options.afterActionCompleteBeforeCommit;
     this.afterActionCommit = options.afterActionCommit;
+    this.beforeActionDispatch = options.beforeActionDispatch;
     this.afterCancellationCleanup = options.afterCancellationCleanup;
+    this.recordActionFailure = options.recordActionFailure;
+    this.assertRuntimeMutationAuthority = options.assertMutationAuthority;
     if (!Number.isFinite(this.leaseTtlMs) || this.leaseTtlMs <= 0) {
       throw new Error("leaseTtlMs must be positive");
     }
@@ -162,6 +243,21 @@ export class DurableRunCoordinator {
 
   private timestamp(): string {
     return this.now().toISOString();
+  }
+
+  private assertMutationAuthority(runId: string): void {
+    this.assertRuntimeMutationAuthority?.(runId);
+  }
+
+  private hasControlPlaneOwnership(
+    runId: string,
+    controlPlane: "legacy" | "ti_scale",
+  ): boolean {
+    return Boolean(this.database.prepare(`
+      SELECT 1 AS owned
+      FROM runs r JOIN missions m ON m.id = r.mission_id
+      WHERE r.id = ? AND r.control_plane = ? AND m.control_plane = ?
+    `).get(runId, controlPlane, controlPlane));
   }
 
   private load(runId: string): DurableRun {
@@ -183,13 +279,68 @@ export class DurableRunCoordinator {
 
   acquireRunLease(runId: string, ownerId: string, ttlMs = this.leaseTtlMs): RunLeaseToken {
     if (!ownerId.trim()) throw new DurableOrchestrationError("invalid_lease_owner", "Lease owner is required");
-    return inImmediateTransaction(this.database, () =>
-      this.runs.acquire(runId, ownerId.trim(), this.timestamp(), ttlMs));
+    return inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(runId);
+      return this.runs.acquire(runId, ownerId.trim(), this.timestamp(), ttlMs);
+    });
   }
 
   heartbeatRunLease(token: RunLeaseToken, ttlMs = this.leaseTtlMs): RunLeaseToken {
-    return inImmediateTransaction(this.database, () =>
-      this.runs.heartbeat(token, this.timestamp(), ttlMs));
+    return inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(token.runId);
+      return this.runs.heartbeat(token, this.timestamp(), ttlMs);
+    });
+  }
+
+  /**
+   * Heartbeat the run and its exact active specialist assignment as one
+   * fenced mutation. An expired or replaced assignment is never revived.
+   */
+  heartbeatActionLease(
+    actionId: string,
+    token: RunLeaseToken,
+    ttlMs = this.leaseTtlMs,
+  ): RunLeaseToken {
+    return inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(token.runId);
+      const now = this.timestamp();
+      const action = this.database.prepare(`
+        SELECT assignment_id
+        FROM actions
+        WHERE id = ? AND run_id = ? AND status = 'running'
+      `).get(actionId, token.runId) as { assignment_id: string | null } | undefined;
+      if (!action) {
+        throw new DurableOrchestrationError(
+          "action_not_running",
+          "Only a running action may renew its execution lease",
+        );
+      }
+
+      const refreshed = this.runs.heartbeat(token, now, ttlMs);
+      if (action.assignment_id) {
+        const assignment = this.database.prepare(`
+          UPDATE assignments
+          SET last_heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
+          WHERE id = ? AND run_id = ? AND status = 'active'
+            AND lease_owner = ? AND lease_expires_at > ?
+        `).run(
+          now,
+          refreshed.expiresAt,
+          now,
+          action.assignment_id,
+          token.runId,
+          token.ownerId,
+          now,
+        );
+        if (assignment.changes !== 1) {
+          throw new DurableOrchestrationError(
+            "assignment_lease_lost",
+            "The active specialist assignment lease expired or changed owner",
+          );
+        }
+      }
+      return refreshed;
+    });
   }
 
   getRun(runId: string): DurableRun {
@@ -215,6 +366,7 @@ export class DurableRunCoordinator {
   } {
     const now = this.timestamp();
     return inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(input.lease.runId);
       const current = this.load(input.lease.runId);
       this.runs.assertLease(current, input.lease, now);
       const budget = checkBudget({
@@ -279,6 +431,7 @@ export class DurableRunCoordinator {
   }): PlanningRetryScheduleResult {
     const now = this.timestamp();
     return inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(input.lease.runId);
       const current = this.load(input.lease.runId);
       this.runs.assertLease(current, input.lease, now);
       if (current.run.journey !== "autonomous") {
@@ -410,6 +563,7 @@ export class DurableRunCoordinator {
   }): DurableTransitionResult {
     const now = this.timestamp();
     return inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(input.lease.runId);
       const current = this.load(input.lease.runId);
       this.runs.assertLease(current, input.lease, now);
       const retry = current.control.planningRetry;
@@ -461,6 +615,7 @@ export class DurableRunCoordinator {
   }): DurableTransitionResult {
     const now = this.timestamp();
     return inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(input.lease.runId);
       const current = this.load(input.lease.runId);
       this.runs.assertLease(current, input.lease, now);
       let contractConfirmed = false;
@@ -519,6 +674,7 @@ export class DurableRunCoordinator {
   async startAction(input: StartActionInput): Promise<StartActionResult> {
     const now = this.timestamp();
     const committed: StartActionResult | DeniedActionStart = inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(input.lease.runId);
       const current = this.load(input.lease.runId);
       this.runs.assertLease(current, input.lease, now);
       if (input.intent.runId !== current.run.id || input.intent.missionId !== current.run.missionId) {
@@ -627,12 +783,42 @@ export class DurableRunCoordinator {
         contractId: current.contractId ?? undefined,
         now,
       });
+      // Authorization consumption and the action reservation either commit
+      // together or both roll back. This closes the restart/replay gap for
+      // single-use operational-hazard recovery permissions.
+      this.beforeActionCommit?.(action);
       if (input.intent.assignmentId) {
-        this.database.prepare(`
+        const assignmentLease = this.database.prepare(`
           UPDATE assignments SET status = 'active',
+            lease_owner = ?,
+            lease_acquired_at = COALESCE(lease_acquired_at, ?),
+            last_heartbeat_at = ?, lease_expires_at = ?,
             started_at = COALESCE(started_at, ?), updated_at = ?
           WHERE id = ? AND run_id = ? AND step_id = ?
-        `).run(now, now, input.intent.assignmentId, input.intent.runId, input.intent.stepId);
+            AND status IN ('queued', 'active')
+            AND agent_id = (
+              SELECT assigned_agent_id FROM plan_steps
+              WHERE id = ? AND run_id = ?
+            )
+        `).run(
+          input.lease.ownerId,
+          now,
+          now,
+          input.lease.expiresAt,
+          now,
+          now,
+          input.intent.assignmentId,
+          input.intent.runId,
+          input.intent.stepId,
+          input.intent.stepId,
+          input.intent.runId,
+        );
+        if (assignmentLease.changes !== 1) {
+          throw new DurableOrchestrationError(
+            "assignment_owner_fence_failed",
+            "The exact specialist assignment changed before its owner fence could be established",
+          );
+        }
       }
       this.database.prepare(`
         UPDATE plan_steps SET status = 'running',
@@ -710,24 +896,42 @@ export class DurableRunCoordinator {
       throw new DurableOrchestrationError(finalAuthorization.code, finalAuthorization.humanMessage);
     }
 
+    let dispatchLeaseLifecycle: ActionDispatchLeaseLifecycle | undefined;
     try {
+      const preparedLifecycle = this.beforeActionDispatch?.(committed);
+      if (preparedLifecycle) dispatchLeaseLifecycle = preparedLifecycle;
       await this.execution.dispatch(committed.action, this.signal(committed.action.runId));
-      return committed;
+      return {
+        ...committed,
+        lease: dispatchLeaseLifecycle?.currentLease() ?? committed.lease,
+      };
     } catch (error) {
+      const completionLease = dispatchLeaseLifecycle?.stop() ?? committed.lease;
+      const boundary = error instanceof ExecutionBoundaryError ? error : null;
+      const code = boundary?.code ?? "dispatch_failed";
+      const message = boundary?.message ?? "The execution adapter rejected the persisted action without a structured diagnosis.";
+      const category = boundary?.failureCategory ?? classifyFailure({
+        source: "worker",
+        code,
+        message: error instanceof Error ? error.message : "Dispatch failed",
+      });
       await this.completeAction({
-        lease: committed.lease,
+        lease: completionLease,
         actionId: committed.action.id,
         success: false,
-        resultSummary: "Execution boundary rejected the persisted action dispatch",
+        resultSummary: boundary
+          ? `Execution boundary stopped this action: ${message}`
+          : "Execution boundary rejected the persisted action dispatch without a structured diagnosis.",
         before: this.load(committed.action.runId).control.progress,
         after: this.load(committed.action.runId).control.progress,
         failure: {
-          source: "worker",
-          code: "dispatch_failed",
-          message: error instanceof Error ? error.message : "Dispatch failed",
+          source: boundary ? "tool" : "worker",
+          code,
+          message,
         },
+        failureCategory: category,
       }).catch(() => undefined);
-      throw new DurableOrchestrationError("dispatch_failed", "Persisted action could not be dispatched");
+      throw new DurableOrchestrationError(code, message);
     }
   }
 
@@ -795,6 +999,7 @@ export class DurableRunCoordinator {
   ): void {
     const now = this.timestamp();
     inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(lease.runId);
       const current = this.load(lease.runId);
       this.runs.assertLease(current, lease, now);
       const row = this.database.prepare(`
@@ -844,6 +1049,7 @@ export class DurableRunCoordinator {
   async completeAction(input: CompleteActionInput): Promise<CompleteActionResult> {
     const now = this.timestamp();
     return inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(input.lease.runId);
       const current = this.load(input.lease.runId);
       this.runs.assertLease(current, input.lease, now);
       const pendingAction = this.actions.get(input.actionId);
@@ -853,6 +1059,38 @@ export class DurableRunCoordinator {
       const category = input.success
         ? undefined
         : input.failureCategory ?? classifyFailure(input.failure ?? { source: "unknown" });
+      const recoveryMemory = input.recoveryMemory;
+      if (recoveryMemory) {
+        if (
+          input.success || current.run.journey !== "autonomous" ||
+          recoveryMemory.schemaVersion !== AUTONOMOUS_RECOVERY_MEMORY_SCHEMA_VERSION ||
+          recoveryMemory.compilerVersion !== AUTONOMOUS_RECOVERY_MEMORY_COMPILER_VERSION ||
+          recoveryMemory.hook !== "failure" ||
+          recoveryMemory.missionId !== current.run.missionId ||
+          recoveryMemory.runId !== current.run.id ||
+          recoveryMemory.stepId !== pendingAction.stepId ||
+          recoveryMemory.actionId !== pendingAction.id ||
+          recoveryMemory.failureCategory !== category
+        ) {
+          throw new DurableOrchestrationError(
+            "recovery_memory_boundary_mismatch",
+            "Recovery memory does not match the exact failed Autonomous action boundary",
+          );
+        }
+        for (const candidate of recoveryMemory.candidates) {
+          if (
+            !candidate.nodeId.trim() ||
+            (candidate.minimumBackoffMs !== undefined &&
+              (!Number.isSafeInteger(candidate.minimumBackoffMs) ||
+                candidate.minimumBackoffMs < 0 || candidate.minimumBackoffMs > 30_000))
+          ) {
+            throw new DurableOrchestrationError(
+              "recovery_memory_constraint_invalid",
+              "Recovery memory contains an invalid or unbounded retry constraint",
+            );
+          }
+        }
+      }
       const evaluation = this.supervisor.evaluateCompletedAction({
         history: this.actions.observations(current.run.id),
         observation: {
@@ -897,6 +1135,12 @@ export class DurableRunCoordinator {
       let reason = evaluation.humanReason;
       let retryIncrement = 0;
       let recoveryState: DurableControlState["recovery"];
+      let recoveryMemoryReceipt: RecoveryMemoryDecisionReceipt | undefined;
+      let recoveryMemoryBaseline: RecoveryMemoryDecisionSnapshot | undefined;
+      let recoveryMemoryResolved: RecoveryMemoryDecisionSnapshot | undefined;
+      let recoveryMemoryEffects: RecoveryMemoryAppliedEffect[] = [];
+      let recoveryMemoryAppliedNodeIds: string[] = [];
+      const recoveryMemoryAdditionalIgnored: Record<string, string> = {};
       if (!evaluation.budget.allowed) {
         targetState = "blocked";
         directive = "blocked";
@@ -917,27 +1161,91 @@ export class DurableRunCoordinator {
           || evaluation.progress.dimensions.includes("entity_discovered")
           || evaluation.progress.dimensions.includes("dependency_resolved")
           || evaluation.progress.dimensions.includes("uncertainty_reduced");
-        const recovery = this.supervisor.decideRecovery({
+        const retrySafe =
+          pendingAction.idempotent &&
+          !pendingAction.destructive &&
+          current.control.retryCount <
+            (current.control.budget.limits.retries ?? Number.POSITIVE_INFINITY);
+        // Use one sampled jitter value for both snapshots. The memory compiler
+        // is fully deterministic, and this makes the before/after comparison
+        // exact even though the base retry policy intentionally includes jitter.
+        const retryRandom = Math.random();
+        const recoveryInput = {
           journey: current.run.journey,
           category: category ?? "unknown",
           retriesUsed: current.control.retryCount,
-          retrySafe:
-            pendingAction.idempotent &&
-            !pendingAction.destructive &&
-            current.control.retryCount <
-              (current.control.budget.limits.retries ?? Number.POSITIVE_INFINITY),
+          retrySafe,
           inContract,
           materiallyNewReplanAvailable,
           replanBudgetAvailable,
           retryAfterMs: input.retryAfterMs,
+          random: () => retryRandom,
           guidedRecommendation:
             "Prepare one materially different represented action, explain it, and wait for a new exact decision.",
+        } as const;
+        const baselineRecovery = this.supervisor.decideRecovery(recoveryInput);
+        const denyRetryNodeIds = recoveryMemory?.candidates
+          .filter((candidate) => candidate.denyRetry)
+          .map((candidate) => candidate.nodeId) ?? [];
+        const maximumMemoryBackoff = Math.max(
+          0,
+          ...(recoveryMemory?.candidates.map((candidate) => candidate.minimumBackoffMs ?? 0) ?? []),
+        );
+        const raisedRetryAfter = maximumMemoryBackoff > (input.retryAfterMs ?? 0)
+          ? maximumMemoryBackoff
+          : input.retryAfterMs;
+        const recovery = recoveryMemory
+          ? this.supervisor.decideRecovery({
+              ...recoveryInput,
+              retrySafe: retrySafe && denyRetryNodeIds.length === 0,
+              ...(raisedRetryAfter === undefined ? {} : { retryAfterMs: raisedRetryAfter }),
+            })
+          : baselineRecovery;
+        const snapshot = (
+          decision: typeof baselineRecovery,
+          effectiveRetrySafe: boolean,
+        ): RecoveryMemoryDecisionSnapshot => ({
+          retryEligible: effectiveRetrySafe && inContract && decision.retry.retry
+            && decision.recovery.kind === "retry",
+          retryDelayMs: decision.recovery.kind === "retry" ? decision.recovery.delayMs : null,
+          recoveryKind: decision.recovery.kind,
+          alternativeStepId: decision.recovery.kind === "bounded_alternative"
+            ? decision.recovery.alternativeId
+            : null,
         });
+        recoveryMemoryBaseline = snapshot(baselineRecovery, retrySafe);
+        recoveryMemoryResolved = snapshot(recovery, retrySafe && denyRetryNodeIds.length === 0);
+        if (
+          recoveryMemory && baselineRecovery.recovery.kind === "retry" &&
+          recovery.recovery.kind !== "retry" && denyRetryNodeIds.length > 0
+        ) {
+          recoveryMemoryEffects.push("retry_denied");
+          recoveryMemoryAppliedNodeIds.push(...denyRetryNodeIds);
+        }
+        if (
+          recoveryMemory && baselineRecovery.recovery.kind === "retry" &&
+          recovery.recovery.kind === "retry" &&
+          recovery.recovery.delayMs > baselineRecovery.recovery.delayMs
+        ) {
+          recoveryMemoryEffects.push("bounded_backoff_raised");
+          recoveryMemoryAppliedNodeIds.push(...recoveryMemory.candidates
+            .filter((candidate) => candidate.minimumBackoffMs === maximumMemoryBackoff)
+            .map((candidate) => candidate.nodeId));
+        }
+        for (const candidate of recoveryMemory?.candidates ?? []) {
+          if (candidate.alternativeStepId) {
+            recoveryMemoryAdditionalIgnored[candidate.nodeId] =
+              "Alternative dispatch is not enabled by the P0 compiler; memory cannot create or redirect an action.";
+          }
+        }
         if (current.run.journey === "autonomous" && recovery.recovery.kind === "retry") {
           targetState = "recovering";
           directive = "retry";
           retryIncrement = 1;
           reason = recovery.recovery.reason;
+          if (recoveryMemoryEffects.includes("bounded_backoff_raised")) {
+            reason = `${reason} Confirmed recovery memory raised the minimum bounded backoff.`;
+          }
           recoveryState = {
             kind: "retry",
             failedActionId: pendingAction.id,
@@ -948,6 +1256,9 @@ export class DurableRunCoordinator {
           targetState = "recovering";
           directive = "replan";
           reason = recovery.recovery.reason;
+          if (recoveryMemoryEffects.includes("retry_denied")) {
+            reason = `Confirmed recovery memory vetoed an unsafe repeat. ${reason}`;
+          }
           recoveryState = {
             kind: "replan",
             failedActionId: pendingAction.id,
@@ -985,6 +1296,26 @@ export class DurableRunCoordinator {
           targetState = "failed";
           directive = "failed";
           reason = recovery.recovery.reason;
+          if (recoveryMemoryEffects.includes("retry_denied")) {
+            reason = `Confirmed recovery memory vetoed an unsafe repeat. ${reason}`;
+          }
+        }
+      }
+
+      if (recoveryMemory && !recoveryMemoryBaseline) {
+        const higherPriorityKind = !evaluation.budget.allowed ? "budget_safe_stop"
+          : evaluation.loops.length > 0 ? "loop_safe_stop"
+            : directive;
+        recoveryMemoryBaseline = {
+          retryEligible: false,
+          retryDelayMs: null,
+          recoveryKind: higherPriorityKind,
+          alternativeStepId: null,
+        };
+        recoveryMemoryResolved = recoveryMemoryBaseline;
+        for (const candidate of recoveryMemory.candidates) {
+          recoveryMemoryAdditionalIgnored[candidate.nodeId] =
+            "A higher-priority budget or loop safety gate determined recovery before memory constraints were considered.";
         }
       }
 
@@ -996,7 +1327,45 @@ export class DurableRunCoordinator {
         progressSignature: evaluation.progress.afterSignature,
         now,
       });
+      this.afterActionCompleteBeforeCommit?.(action, {
+        success: input.success,
+        resultSummary: input.resultSummary,
+        ...(input.operationalResetResult
+          ? { operationalResetResult: input.operationalResetResult }
+          : {}),
+      });
+      if (recoveryMemory && recoveryMemoryBaseline && recoveryMemoryResolved && category) {
+        recoveryMemoryReceipt = this.recoveryMemoryReceipts.persist({
+          compiled: recoveryMemory,
+          actionId: action.id,
+          stepId: action.stepId,
+          baseline: recoveryMemoryBaseline,
+          resolved: recoveryMemoryResolved,
+          effects: recoveryMemoryEffects,
+          appliedNodeIds: recoveryMemoryAppliedNodeIds,
+          additionalIgnoredReasons: recoveryMemoryAdditionalIgnored,
+          createdAt: now,
+        });
+      }
+      // A result-aware execution adapter reports terminal work through this
+      // same fenced transaction. Close any exact specialist tool-call record
+      // with its canonical action so accepted transport work cannot remain
+      // permanently projected as running after the action is terminal.
+      this.database.prepare(`
+        UPDATE tool_calls SET
+          status = ?, error_category = ?, output_summary = ?, ended_at = ?
+        WHERE action_id = ? AND status IN ('queued', 'running')
+      `).run(
+        input.success ? "succeeded" : "failed",
+        category ?? null,
+        input.resultSummary,
+        now,
+        action.id,
+      );
       let retryAssignmentId: string | null = null;
+      const actionAssignment = this.database.prepare(`
+        SELECT assignment_id FROM actions WHERE id = ? AND run_id = ?
+      `).get(action.id, action.runId) as { assignment_id: string | null } | undefined;
       if (directive === "retry") {
         // A retry is a new action reservation, not a redispatch of the failed
         // action. Revalidate the now-terminal predecessor while its exact
@@ -1037,6 +1406,36 @@ export class DurableRunCoordinator {
           );
         }
         retryAssignmentId = predecessor.assignment_id;
+      } else if (!input.success) {
+        // Every non-retry failure closes the represented work immediately.
+        // Guided recovery may later create a different represented step; it
+        // must never leave the failed specialist assignment looking active.
+        const childStatus = directive === "blocked" ? "blocked" : "failed";
+        this.database.prepare(`
+          UPDATE plan_steps SET status = ?,
+            ended_at = CASE WHEN ? = 'failed' THEN COALESCE(ended_at, ?) ELSE ended_at END,
+            updated_at = ?
+          WHERE id = ? AND run_id = ?
+            AND status IN ('ready', 'running', 'waiting_guided_decision', 'blocked', 'recovering')
+        `).run(childStatus, childStatus, now, now, action.stepId, action.runId);
+        if (actionAssignment?.assignment_id) {
+          this.database.prepare(`
+            UPDATE assignments SET status = ?,
+              ended_at = CASE WHEN ? = 'failed' THEN COALESCE(ended_at, ?) ELSE ended_at END,
+              lease_owner = NULL, lease_acquired_at = NULL,
+              last_heartbeat_at = NULL, lease_expires_at = NULL, updated_at = ?
+            WHERE id = ? AND run_id = ? AND step_id = ?
+              AND status IN ('queued', 'active', 'blocked')
+          `).run(
+            childStatus,
+            childStatus,
+            now,
+            now,
+            actionAssignment.assignment_id,
+            action.runId,
+            action.stepId,
+          );
+        }
       }
       const control: DurableControlState = {
         budget: {
@@ -1103,9 +1502,28 @@ export class DurableRunCoordinator {
           contextPackId: action.contextPackId,
           retryNotBefore: recoveryState?.notBefore ?? null,
           retryAssignmentId,
+          recoveryMemoryReceiptId: recoveryMemoryReceipt?.id ?? null,
+          recoveryMemoryEffects: [...(recoveryMemoryReceipt?.effects ?? [])],
+          recoveryMemoryAppliedNodeIds: [...(recoveryMemoryReceipt?.appliedNodeIds ?? [])],
         },
       });
       const checkpoint = this.checkpoints.create({ run: persisted, eventSequence: event.sequence, now });
+      if (!input.success && category) {
+        this.recordActionFailure?.({
+          action,
+          assignmentId: actionAssignment?.assignment_id ?? null,
+          category,
+          failureCode: input.failure?.code?.trim() || "action_execution_failed",
+          failureMessage: input.failure?.message?.trim() || input.resultSummary,
+          directive,
+          reason,
+          run: persisted,
+          eventId: event.id,
+          checkpointId: checkpoint.id,
+          progressBeforeFailure: input.before,
+          retryable: directive === "retry",
+        });
+      }
       if (!input.success && directive === "retry" && recoveryState?.kind === "retry") {
         this.continuations.enqueue({
           runId: action.runId,
@@ -1148,6 +1566,7 @@ export class DurableRunCoordinator {
         loopKinds: evaluation.loops.map((loop) => loop.kind),
         eventSequence: event.sequence,
         checkpointId: checkpoint.id,
+        ...(recoveryMemoryReceipt ? { recoveryMemoryReceipt } : {}),
       };
     });
   }
@@ -1155,6 +1574,7 @@ export class DurableRunCoordinator {
   beginReplan(input: { lease: RunLeaseToken; reason: string }): DurableTransitionResult {
     const now = this.timestamp();
     return inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(input.lease.runId);
       const current = this.load(input.lease.runId);
       this.runs.assertLease(current, input.lease, now);
       if (current.run.state !== "recovering") {
@@ -1194,12 +1614,26 @@ export class DurableRunCoordinator {
     });
   }
 
-  async recoverOnStartup(workerId: string): Promise<StartupRecoveryResult[]> {
+  async recoverOnStartup(
+    workerId: string,
+    supportedJourneys: readonly Journey[] = ["autonomous", "guided"],
+    controlPlane?: "legacy" | "ti_scale",
+  ): Promise<StartupRecoveryResult[]> {
     const now = this.timestamp();
-    const expired = this.runs.listExpiredNonterminal(now);
+    const allowedJourneys = new Set(supportedJourneys);
+    const expired = this.runs.listExpiredNonterminal(now)
+      .filter((candidate) => {
+        if (!allowedJourneys.has(candidate.run.journey)) return false;
+        if (!controlPlane) return true;
+        return this.hasControlPlaneOwnership(candidate.run.id, controlPlane);
+      });
     const results: StartupRecoveryResult[] = [];
     for (const candidate of expired) {
       const prepared = inImmediateTransaction(this.database, () => {
+        if (controlPlane && !this.hasControlPlaneOwnership(candidate.run.id, controlPlane)) {
+          return undefined;
+        }
+        this.assertMutationAuthority(candidate.run.id);
         const current = this.load(candidate.run.id);
         if (!current.lease || current.lease.expiresAt > now) return undefined;
         const inFlight = this.actions.inFlight(current.run.id);
@@ -1358,6 +1792,7 @@ export class DurableRunCoordinator {
   private async blockRecoveryFailure(lease: RunLeaseToken): Promise<void> {
     const now = this.timestamp();
     inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(lease.runId);
       const current = this.load(lease.runId);
       this.runs.assertLease(current, lease, now);
       const reason = "Recovery dispatch failed; no further automatic repeat is permitted";
@@ -1385,9 +1820,19 @@ export class DurableRunCoordinator {
     lease: RunLeaseToken;
     reason: string;
     commandId?: string;
+    actorId?: string;
+    guidedStop?: GuidedCancellationBoundary;
+    /** Runs inside the authority-fenced terminal SQLite transaction. */
+    onTerminalCommit?: (boundary: {
+      readonly now: string;
+      readonly run: DurableRun;
+      readonly eventSequence: number;
+      readonly checkpointId: string;
+    }) => void;
   }): Promise<DurableTransitionResult> {
     const requestedAt = this.timestamp();
     const reservation = inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(input.lease.runId);
       const current = this.load(input.lease.runId);
       this.runs.assertLease(current, input.lease, requestedAt);
       const nextRun = bumpedRun(current.run, requestedAt, `Cancellation requested: ${input.reason}`);
@@ -1404,10 +1849,21 @@ export class DurableRunCoordinator {
         journey: persisted.run.journey,
         eventType: "run.cancellation_requested",
         actorType: "operator",
+        ...(input.actorId ? { actorId: input.actorId } : {}),
         summary: `Cancellation requested: ${input.reason}`,
         payload: {
           requestId: randomUUID(),
           ...(input.commandId ? { commandId: input.commandId } : {}),
+          ...(input.guidedStop ? {
+            guidedStop: {
+              decisionId: input.guidedStop.decisionId,
+              missionId: input.guidedStop.missionId,
+              runId: input.guidedStop.runId,
+              stepId: input.guidedStop.stepId,
+              actionFingerprint: input.guidedStop.actionFingerprint,
+              parameterHash: input.guidedStop.parameterHash,
+            },
+          } : {}),
         },
       });
       this.checkpoints.create({ run: persisted, eventSequence: event.sequence, now: requestedAt });
@@ -1433,6 +1889,7 @@ export class DurableRunCoordinator {
     } catch {
       const failedAt = this.timestamp();
       inImmediateTransaction(this.database, () => {
+        this.assertMutationAuthority(reservation.lease.runId);
         const current = this.load(reservation.lease.runId);
         this.runs.assertLease(current, reservation.lease, failedAt);
         const target = allowedRunTransitions(current.run.state, current.run.journey).includes("blocked")
@@ -1469,6 +1926,7 @@ export class DurableRunCoordinator {
     this.afterCancellationCleanup?.(input.lease.runId);
     const completedAt = this.timestamp();
     return inImmediateTransaction(this.database, () => {
+      this.assertMutationAuthority(reservation.lease.runId);
       const current = this.load(reservation.lease.runId);
       this.runs.assertLease(current, reservation.lease, completedAt);
       this.closeAggregateChildren(current.run.id, input.reason, completedAt);
@@ -1518,6 +1976,12 @@ export class DurableRunCoordinator {
         now: completedAt,
       });
       const checkpoint = this.checkpoints.create({ run: persisted, eventSequence: event.sequence, now: completedAt });
+      input.onTerminalCommit?.({
+        now: completedAt,
+        run: persisted,
+        eventSequence: event.sequence,
+        checkpointId: checkpoint.id,
+      });
       return { run: persisted, eventSequence: event.sequence, checkpointId: checkpoint.id };
     });
   }

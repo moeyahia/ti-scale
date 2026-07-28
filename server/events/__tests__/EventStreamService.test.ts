@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import express from "express";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createDatabaseConnection, migrateDatabase } from "../../db";
 import type { SqliteDatabase } from "../../db";
 import { EventRepository } from "../EventRepository";
@@ -17,6 +20,7 @@ import {
 
 const databases: SqliteDatabase[] = [];
 const servers: Server[] = [];
+const directories: string[] = [];
 
 afterEach(async () => {
   for (const server of servers.splice(0)) {
@@ -24,6 +28,9 @@ afterEach(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
   for (const database of databases.splice(0)) database.close();
+  for (const directory of directories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 function setup(): { database: SqliteDatabase; repository: EventRepository } {
@@ -266,6 +273,198 @@ describe("EventStreamService", () => {
     expect(row.attempt_count).toBe(1);
     expect(row.last_error).toContain("temporary publisher outage");
     expect(Date.parse(row.available_at)).toBe(now.getTime() + 250);
+  });
+
+  test("defers a busy outbox claim without changing the durable row, then resumes", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ti-scale-event-busy-"));
+    directories.push(directory);
+    const filename = join(directory, "events.sqlite");
+    const database = createDatabaseConnection({
+      filename,
+      busyTimeoutMs: 0,
+      verifyIntegrity: false,
+    });
+    databases.push(database);
+    migrateDatabase(database);
+    seedRun(database, "run-busy");
+    const repository = new EventRepository(database);
+    repository.append({
+      id: "event-busy",
+      runId: "run-busy",
+      eventType: "run.progressed",
+      actorType: "system",
+      summary: "Durable event waiting for the writer lock",
+    });
+
+    const locker = createDatabaseConnection({
+      filename,
+      fileMustExist: true,
+      busyTimeoutMs: 0,
+      verifyIntegrity: false,
+    });
+    databases.push(locker);
+    locker.exec("BEGIN IMMEDIATE");
+
+    const originalClaim = repository.claimOutbox.bind(repository);
+    let claimCalls = 0;
+    Object.defineProperty(repository, "claimOutbox", {
+      configurable: true,
+      value: (...parameters: Parameters<EventRepository["claimOutbox"]>) => {
+        claimCalls += 1;
+        return originalClaim(...parameters);
+      },
+    });
+    const pending = database.prepare(
+      "SELECT available_at FROM event_outbox WHERE event_id = ?",
+    ).get("event-busy") as { available_at: string };
+    const startedAt = Date.parse(pending.available_at) + 1_000;
+    let currentTime = startedAt;
+    const service = new EventStreamService({
+      repository,
+      clock: () => new Date(currentTime),
+      databaseBusyBaseDelayMs: 100,
+      databaseBusyMaxDelayMs: 400,
+      databaseBusyJitterRatio: 0,
+    });
+
+    expect(await service.pumpOnce()).toEqual({
+      claimed: 0,
+      delivered: 0,
+      failed: 0,
+      deferred: {
+        reason: "database_busy",
+        retryAfterMs: 100,
+        consecutiveAttempts: 1,
+      },
+    });
+    expect(await service.pumpOnce()).toEqual({
+      claimed: 0,
+      delivered: 0,
+      failed: 0,
+      deferred: {
+        reason: "database_busy",
+        retryAfterMs: 100,
+        consecutiveAttempts: 1,
+      },
+    });
+    expect(claimCalls).toBe(1);
+    expect(database.prepare(`
+      SELECT status, attempt_count, claimed_by, delivered_at
+      FROM event_outbox WHERE event_id = ?
+    `).get("event-busy")).toEqual({
+      status: "pending",
+      attempt_count: 0,
+      claimed_by: null,
+      delivered_at: null,
+    });
+
+    locker.exec("ROLLBACK");
+    currentTime = startedAt + 99;
+    expect((await service.pumpOnce()).deferred?.retryAfterMs).toBe(1);
+    expect(claimCalls).toBe(1);
+    currentTime = startedAt + 100;
+    expect(await service.pumpOnce()).toEqual({ claimed: 1, delivered: 1, failed: 0 });
+    expect(claimCalls).toBe(2);
+    expect(database.prepare(`
+      SELECT status, attempt_count, claimed_by, delivered_at
+      FROM event_outbox WHERE event_id = ?
+    `).get("event-busy")).toEqual({
+      status: "delivered",
+      attempt_count: 1,
+      claimed_by: null,
+      delivered_at: new Date(currentTime).toISOString(),
+    });
+  });
+
+  test("starts in a deferred state when stale-claim cleanup meets SQLite contention", async () => {
+    const { database, repository } = setup();
+    seedRun(database, "run-a");
+    const startedAt = Date.parse("2026-07-21T10:43:11.000Z");
+    Object.defineProperty(repository, "releaseStaleClaims", {
+      configurable: true,
+      value: () => {
+        throw Object.assign(new Error("database is locked"), {
+          code: "SQLITE_BUSY",
+          errno: 5,
+        });
+      },
+    });
+    const service = new EventStreamService({
+      repository,
+      clock: () => new Date(startedAt),
+      pollIntervalMs: 500,
+      databaseBusyBaseDelayMs: 10,
+      databaseBusyMaxDelayMs: 25,
+      databaseBusyJitterRatio: 0,
+    });
+
+    expect(() => service.start()).not.toThrow();
+    expect(service.isStarted).toBe(true);
+    expect((await service.pumpOnce()).deferred).toEqual({
+      reason: "database_busy",
+      retryAfterMs: 10,
+      consecutiveAttempts: 1,
+    });
+    await service.stop();
+  });
+
+  test("caps repeated busy-claim pressure and does not suppress other database errors", async () => {
+    const { database, repository } = setup();
+    seedRun(database, "run-a");
+    let currentTime = Date.parse("2026-07-21T10:43:11.000Z");
+    let claimCalls = 0;
+    Object.defineProperty(repository, "claimOutbox", {
+      configurable: true,
+      value: () => {
+        claimCalls += 1;
+        throw Object.assign(new Error("database is locked"), {
+          code: "SQLITE_BUSY",
+          errno: 5,
+        });
+      },
+    });
+    const service = new EventStreamService({
+      repository,
+      clock: () => new Date(currentTime),
+      databaseBusyBaseDelayMs: 10,
+      databaseBusyMaxDelayMs: 25,
+      databaseBusyJitterRatio: 0,
+    });
+
+    expect((await service.pumpOnce()).deferred).toEqual({
+      reason: "database_busy",
+      retryAfterMs: 10,
+      consecutiveAttempts: 1,
+    });
+    currentTime += 10;
+    expect((await service.pumpOnce()).deferred).toEqual({
+      reason: "database_busy",
+      retryAfterMs: 20,
+      consecutiveAttempts: 2,
+    });
+    currentTime += 20;
+    expect((await service.pumpOnce()).deferred).toEqual({
+      reason: "database_busy",
+      retryAfterMs: 25,
+      consecutiveAttempts: 3,
+    });
+    expect(claimCalls).toBe(3);
+    for (let iteration = 0; iteration < 20; iteration += 1) {
+      await service.pumpOnce();
+    }
+    expect(claimCalls).toBe(3);
+
+    Object.defineProperty(repository, "claimOutbox", {
+      configurable: true,
+      value: () => {
+        throw Object.assign(new Error("database disk image is malformed"), {
+          code: "SQLITE_CORRUPT",
+          errno: 11,
+        });
+      },
+    });
+    currentTime += 25;
+    expect(service.pumpOnce()).rejects.toThrow("database disk image is malformed");
   });
 
   test("recovers stale outbox claims and supports graceful start/stop", async () => {

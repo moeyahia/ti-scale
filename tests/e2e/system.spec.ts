@@ -1,6 +1,13 @@
+import { readFileSync } from "node:fs";
 import { expect, test, type Locator, type Page, type Response, type TestInfo } from "./support/playwright";
 import { BrowserAudit } from "./support/browserAudit";
 import { canonicalFixtureNamespace } from "./support/fixtureNamespace";
+import type {
+  InteractionActivationInput,
+  InteractionActivationRecorder,
+} from "./support/interactionActivationFixture";
+import { readTitaniumOptions, selectTitaniumOption } from "./support/titaniumSelect";
+import { validateInteractionManifest } from "../interaction-manifest/schema";
 import {
   createSystemFixture,
   readSystemFixtureSnapshot,
@@ -28,6 +35,54 @@ const SYSTEM_TABS = [
   { name: "Settings status", href: "/system/settings" },
 ] as const;
 const MCP_STATUS_OPTIONS = ["All", "unknown", "healthy", "degraded", "offline", "quarantined"];
+const interactionManifest = validateInteractionManifest(
+  JSON.parse(readFileSync(new URL("../interaction-manifest.json", import.meta.url), "utf8")) as unknown,
+);
+
+function settingsReceipt(
+  manifestEntryId: "system.settings.openapi-contract" | "system.settings.event-contract" | "system.settings.metrics",
+  option: string,
+  modality: "pointer" | "keyboard",
+): InteractionActivationInput {
+  const entry = interactionManifest.entries.find((candidate) => candidate.id === manifestEntryId);
+  if (!entry) throw new Error(`System Settings manifest entry ${manifestEntryId} is missing`);
+  if (!entry.options.includes(option)) {
+    throw new Error(`System Settings manifest entry ${manifestEntryId} does not declare ${option}`);
+  }
+  if (!entry.testIds.includes(TEST_IDS.settings)) {
+    throw new Error(`System Settings manifest entry ${manifestEntryId} is not bound to ${TEST_IDS.settings}`);
+  }
+  return {
+    manifestEntryId,
+    controlId: entry.controlId,
+    option,
+    materialState: entry.requiredState,
+    modality,
+    testId: TEST_IDS.settings,
+  };
+}
+
+function systemRetryReceipt(
+  option: string,
+  modality: "pointer" | "keyboard",
+): InteractionActivationInput {
+  const entry = interactionManifest.entries.find((candidate) => candidate.id === "system.query.retry");
+  if (!entry) throw new Error("System query retry manifest entry is missing");
+  if (!entry.options.includes(option)) {
+    throw new Error(`System query retry manifest entry does not declare ${option}`);
+  }
+  if (!entry.testIds.includes(TEST_IDS.retry)) {
+    throw new Error(`System query retry manifest entry is not bound to ${TEST_IDS.retry}`);
+  }
+  return {
+    manifestEntryId: entry.id,
+    controlId: entry.controlId,
+    option,
+    materialState: entry.requiredState,
+    modality,
+    testId: TEST_IDS.retry,
+  };
+}
 
 let fixture: SystemFixture;
 
@@ -47,6 +102,44 @@ function systemResponse(
   });
 }
 
+function capabilitySelfTestResponse(page: Page): Promise<Response> {
+  return page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname === "/api/v2/system/capability-self-tests";
+  });
+}
+
+async function assertCapabilitySnapshot(response: Response): Promise<{
+  readonly total: number;
+  readonly results: readonly Record<string, unknown>[];
+}> {
+  expect(response.status(), await response.text()).toBe(200);
+  const payload = await response.json() as {
+    readonly schemaVersion: string;
+    readonly readOnly: boolean;
+    readonly grantsMissionExecution: boolean;
+    readonly accounting: {
+      readonly complete: boolean;
+      readonly registered: Record<string, number>;
+      readonly reported: Record<string, number>;
+    };
+    readonly summary: { readonly total: number };
+    readonly results: readonly Record<string, unknown>[];
+  };
+  expect(payload.schemaVersion).toBe("2.4");
+  expect(payload.readOnly).toBe(true);
+  expect(payload.grantsMissionExecution).toBe(false);
+  expect(payload.accounting.complete).toBe(true);
+  expect(payload.summary.total).toBe(payload.results.length);
+  expect(payload.results.length).toBeGreaterThan(0);
+  expect(payload.results.every((item) => {
+    const authorization = item.executionAuthorization as Record<string, unknown> | undefined;
+    return authorization?.state === "not_granted" && authorization.grantsMissionExecution === false;
+  })).toBe(true);
+  return { total: payload.summary.total, results: payload.results };
+}
+
 async function strictAudit(audit: BrowserAudit, testInfo: TestInfo): Promise<void> {
   expect(audit.unexpected, "System controls emitted an unexpected browser, console, network, or server failure").toEqual([]);
   expect(audit.degradedApi, "System controls require the mounted V2 API for every canonical read").toEqual([]);
@@ -60,6 +153,10 @@ async function activate(control: Locator, input: "keyboard" | "pointer"): Promis
   } else {
     await control.click();
   }
+}
+
+async function titaniumOptionLabels(control: Locator): Promise<readonly string[]> {
+  return (await readTitaniumOptions(control)).map((option) => option.label);
 }
 
 async function expectSystemHeading(page: Page): Promise<void> {
@@ -103,9 +200,11 @@ async function assertPagePayload(response: Response, minimumItems = 1): Promise<
 test(`${TEST_IDS.routesAndTabs} traverses the alias, canonical tabs, history, and direct refresh`, async ({ page }, testInfo) => {
   test.setTimeout(180_000);
   const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
+  const aliasCapabilities = capabilitySelfTestResponse(page);
   const aliasProviders = systemResponse(page, "/api/v2/system/providers");
   const aliasMcp = systemResponse(page, "/api/v2/system/mcp");
   await page.goto("/system", { waitUntil: "domcontentloaded" });
+  await assertCapabilitySnapshot(await aliasCapabilities);
   await assertPagePayload(await aliasProviders);
   await assertPagePayload(await aliasMcp);
   await expectSystemHeading(page);
@@ -119,9 +218,11 @@ test(`${TEST_IDS.routesAndTabs} traverses the alias, canonical tabs, history, an
   const aliasStatus = aliasMcpSection.getByRole("combobox", { name: "Status", exact: true });
   await expect(aliasStatus).toBeVisible();
   const aliasHealthy = systemResponse(page, "/api/v2/system/mcp", (url) => url.searchParams.get("status") === "healthy");
-  await aliasStatus.selectOption("healthy");
+  await selectTitaniumOption(aliasStatus, "healthy", "keyboard");
   await assertPagePayload(await aliasHealthy);
-  await aliasStatus.selectOption("");
+  await expect(aliasStatus).toBeFocused();
+  await expect.poll(() => new URL(page.url()).searchParams.get("status")).toBe("healthy");
+  await selectTitaniumOption(aliasStatus, "", "pointer");
   await expect.poll(() => new URL(page.url()).searchParams.has("status")).toBe(false);
 
   const aliasProviderSection = section(page, "Providers");
@@ -179,9 +280,11 @@ test(`${TEST_IDS.routesAndTabs} traverses the alias, canonical tabs, history, an
 test(`${TEST_IDS.connections} exercises provider and MCP pagination, every status option, and every visible policy disclosure`, async ({ page }, testInfo) => {
   test.setTimeout(180_000);
   const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
+  const capabilitiesResponse = capabilitySelfTestResponse(page);
   const providersResponse = systemResponse(page, "/api/v2/system/providers");
   const mcpResponse = systemResponse(page, "/api/v2/system/mcp");
   await page.goto("/system/connections", { waitUntil: "domcontentloaded" });
+  const capabilityPayload = await assertCapabilitySnapshot(await capabilitiesResponse);
   const providersPayload = await assertPagePayload(await providersResponse, 25);
   const mcpPayload = await assertPagePayload(await mcpResponse, 25);
   expect(providersPayload.nextCursor).not.toBeNull();
@@ -189,6 +292,19 @@ test(`${TEST_IDS.connections} exercises provider and MCP pagination, every statu
   await expectSystemHeading(page);
   await expect(page.getByText(SYSTEM_PROVIDER_FIRST_PAGE, { exact: true })).toBeVisible();
   await expect(page.getByRole("rowheader", { name: SYSTEM_MCP_FIRST_PAGE })).toBeVisible();
+
+  const capabilitySection = section(page, "Capability readiness");
+  await expect(capabilitySection).toContainText("never contacts a mission target");
+  await expect(capabilitySection).toContainText("Not granted by these checks");
+  await expect(capabilitySection.locator("tbody tr")).toHaveCount(capabilityPayload.total);
+  const authorizationDetails = disclosure(capabilitySection, "Read-only authorization detail");
+  await toggleEveryDisclosure(authorizationDetails, capabilityPayload.total);
+  await expect(capabilitySection.locator("pre").first()).toContainText('"grantsMissionExecution": false');
+
+  const refreshedCapabilities = capabilitySelfTestResponse(page);
+  await activate(capabilitySection.getByRole("button", { name: "Refresh readiness records", exact: true }), "keyboard");
+  const refreshedPayload = await assertCapabilitySnapshot(await refreshedCapabilities);
+  await expect(capabilitySection.locator("tbody tr")).toHaveCount(refreshedPayload.total);
 
   const providersSection = section(page, "Providers");
   const providerNextResponse = systemResponse(page, "/api/v2/system/providers", (url) => url.searchParams.has("cursor"));
@@ -205,20 +321,22 @@ test(`${TEST_IDS.connections} exercises provider and MCP pagination, every statu
   const mcpSection = section(page, "MCP servers");
   const status = mcpSection.getByRole("combobox", { name: "Status", exact: true });
   await expect(status).toBeVisible();
-  expect(await status.locator("option").allTextContents()).toEqual(MCP_STATUS_OPTIONS);
+  expect(await titaniumOptionLabels(status)).toEqual(MCP_STATUS_OPTIONS);
   for (const option of MCP_STATUS_OPTIONS.slice(1, -1)) {
     const filtered = systemResponse(page, "/api/v2/system/mcp", (url) => url.searchParams.get("status") === option);
-    await status.selectOption(option);
+    await selectTitaniumOption(status, option, option === "healthy" ? "keyboard" : "pointer");
     const payload = await assertPagePayload(await filtered);
     expect(payload.items.every((item) => item.status === option)).toBe(true);
     await expect.poll(() => new URL(page.url()).searchParams.get("status")).toBe(option);
     await expect(mcpSection.getByRole("button", { name: "Next page", exact: true })).toBeDisabled();
   }
-  await status.selectOption("");
+  await selectTitaniumOption(status, "", "keyboard");
   await expect.poll(() => new URL(page.url()).searchParams.has("status")).toBe(false);
   await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload({ waitUntil: "domcontentloaded" }));
   await expectSystemHeading(page);
-  await expect(page.getByRole("combobox", { name: "Status", exact: true })).toHaveValue("");
+  expect((await readTitaniumOptions(
+    page.getByRole("combobox", { name: "Status", exact: true }),
+  )).find((option) => option.selected)?.value).toBe("");
 
   const reloadedMcpSection = section(page, "MCP servers");
   const mcpNextResponse = systemResponse(page, "/api/v2/system/mcp", (url) => url.searchParams.has("cursor"));
@@ -235,12 +353,12 @@ test(`${TEST_IDS.connections} exercises provider and MCP pagination, every statu
   await expect.poll(() => new URL(page.url()).searchParams.has("mcpCursor")).toBe(true);
   const resetStaleCursor = systemResponse(page, "/api/v2/system/mcp", (url) =>
     url.searchParams.get("status") === "quarantined" && !url.searchParams.has("cursor"));
-  await page.getByRole("combobox", { name: "Status", exact: true }).selectOption("quarantined");
+  await selectTitaniumOption(page.getByRole("combobox", { name: "Status", exact: true }), "quarantined", "pointer");
   const quarantined = await assertPagePayload(await resetStaleCursor);
   expect(quarantined.items.every((item) => item.status === "quarantined")).toBe(true);
   await expect.poll(() => new URL(page.url()).searchParams.has("mcpCursor")).toBe(false);
   await expect(reloadedMcpSection.getByRole("button", { name: "Next page", exact: true })).toBeDisabled();
-  await page.getByRole("combobox", { name: "Status", exact: true }).selectOption("");
+  await selectTitaniumOption(page.getByRole("combobox", { name: "Status", exact: true }), "", "keyboard");
   await expect.poll(() => new URL(page.url()).searchParams.has("status")).toBe(false);
   await expect(reloadedMcpSection.getByRole("rowheader", { name: SYSTEM_MCP_FIRST_PAGE })).toBeVisible();
 
@@ -259,55 +377,167 @@ test(`${TEST_IDS.connections} exercises provider and MCP pagination, every statu
   await strictAudit(audit, testInfo);
 });
 
-test(`${TEST_IDS.retry} explains one MCP read failure and retries the mounted endpoint`, async ({ page, browserAudit }, testInfo) => {
-  test.setTimeout(60_000);
-  browserAudit.expectHttpResponse(page, {
-    id: "system.mcp.initial-unavailable",
-    transport: "browser",
-    method: "GET",
-    pathname: "/api/v2/system/mcp",
-    query: { limit: "25" },
-    status: 503,
-    occurrences: 1,
-    reason: "Exercise the exact MCP-registry retry state once.",
-  });
-  let failedOnce = false;
-  await page.route("**/api/v2/system/mcp?*", async (route) => {
-    if (!failedOnce) {
-      failedOnce = true;
-      await route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify({
-          error: {
-            code: "system_fixture_mcp_unavailable",
-            message: "System fixture MCP projection unavailable",
-            humanMessage: "The MCP connection registry could not read its isolated canonical state.",
-            retryable: true,
-            category: "dependency",
-            remediation: "Retry after the local MCP registry projection is available.",
-            traceId: "trace-system-mcp-retry",
-            timestamp: "2199-07-16T12:30:00.000Z",
-          },
-        }),
-      });
-      return;
-    }
-    await route.continue();
-  });
-  await page.goto("/system/connections", { waitUntil: "domcontentloaded" });
-  await expect(page.getByText("Live data is unavailable", { exact: true })).toBeVisible();
-  await expect(page.getByText("The MCP connection registry could not read its isolated canonical state.", { exact: true })).toBeVisible();
-  await expect(page.getByText("Retry after the local MCP registry projection is available.", { exact: true })).toBeVisible();
-  await expect(page.getByText("Trace trace-system-mcp-retry", { exact: true })).toBeVisible();
+test(`${TEST_IDS.retry} explains and retries every canonical System read boundary`, async ({
+  page,
+  browserAudit,
+  interactionActivation,
+}) => {
+  test.setTimeout(300_000);
+  const retryCases = [
+    {
+      id: "capability",
+      route: "/system/connections",
+      endpoint: "/api/v2/system/capability-self-tests",
+      query: undefined,
+      sectionName: "Capability readiness",
+      option: "Retry the failed capability readiness query",
+      subject: "capability readiness snapshot",
+      waitForRecovery: () => capabilitySelfTestResponse(page),
+      assertRecovery: async (response: Response) => {
+        const payload = await assertCapabilitySnapshot(response);
+        await expect(section(page, "Capability readiness").locator("tbody tr")).toHaveCount(payload.total);
+      },
+    },
+    {
+      id: "providers",
+      route: "/system/connections",
+      endpoint: "/api/v2/system/providers",
+      query: { limit: "25" },
+      sectionName: "Providers",
+      option: "Retry the failed provider history query",
+      subject: "provider history projection",
+      waitForRecovery: () => systemResponse(page, "/api/v2/system/providers"),
+      assertRecovery: async (response: Response) => {
+        await assertPagePayload(response, 25);
+        await expect(section(page, "Providers").getByText(SYSTEM_PROVIDER_FIRST_PAGE, { exact: true })).toBeVisible();
+      },
+    },
+    {
+      id: "mcp",
+      route: "/system/connections",
+      endpoint: "/api/v2/system/mcp",
+      query: { limit: "25" },
+      sectionName: "MCP servers",
+      option: "Retry the failed MCP registry query",
+      subject: "MCP connection registry",
+      waitForRecovery: () => systemResponse(page, "/api/v2/system/mcp"),
+      assertRecovery: async (response: Response) => {
+        await assertPagePayload(response, 25);
+        await expect(section(page, "MCP servers").getByRole("rowheader", { name: SYSTEM_MCP_FIRST_PAGE })).toBeVisible();
+      },
+    },
+    {
+      id: "policies",
+      route: "/system/policies",
+      endpoint: "/api/v2/system/policies",
+      query: { limit: "25" },
+      sectionName: undefined,
+      option: "Retry the failed policy projection query",
+      subject: "policy projection",
+      waitForRecovery: () => systemResponse(page, "/api/v2/system/policies"),
+      assertRecovery: async (response: Response) => {
+        await assertPagePayload(response, 25);
+        await expect(disclosure(page, "Redacted policy document").first()).toBeVisible();
+      },
+    },
+    {
+      id: "health",
+      route: "/system/settings",
+      endpoint: "/api/v2/system/health",
+      query: { limit: "50" },
+      sectionName: "System health",
+      option: "Retry the failed system health query",
+      subject: "system health projection",
+      waitForRecovery: () => systemResponse(page, "/api/v2/system/health"),
+      assertRecovery: async (response: Response) => {
+        await assertPagePayload(response, fixture.healthSnapshotCount);
+        await expect(section(page, "System health").getByText(SYSTEM_HEALTH_COMPONENT, { exact: true })).toBeVisible();
+      },
+    },
+    {
+      id: "settings-policies",
+      route: "/system/settings",
+      endpoint: "/api/v2/system/policies",
+      query: { limit: "100" },
+      sectionName: "Policy projection inventory",
+      option: "Retry the failed settings policy inventory query",
+      subject: "settings policy inventory",
+      waitForRecovery: () => systemResponse(page, "/api/v2/system/policies", (url) => url.searchParams.get("limit") === "100"),
+      assertRecovery: async (response: Response) => {
+        const payload = await assertPagePayload(response);
+        await expect(section(page, "Policy projection inventory").getByText(
+          `${payload.items.length} policy projections are currently visible to this operator.`,
+          { exact: true },
+        )).toBeVisible();
+      },
+    },
+  ] as const;
 
-  const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
-  const recovered = systemResponse(page, "/api/v2/system/mcp");
-  await activate(page.getByRole("button", { name: "Try again", exact: true }), "keyboard");
-  await assertPagePayload(await recovered, 25);
-  await expect(page.getByRole("rowheader", { name: SYSTEM_MCP_FIRST_PAGE })).toBeVisible();
-  await page.unroute("**/api/v2/system/mcp?*");
-  await strictAudit(audit, testInfo);
+  let navigationCount = 0;
+  for (const retryCase of retryCases) {
+    browserAudit.expectHttpResponse(page, {
+      id: `system.${retryCase.id}.initial-unavailable`,
+      transport: "browser",
+      method: "GET",
+      pathname: retryCase.endpoint,
+      query: { ...(retryCase.query ?? {}) },
+      status: 503,
+      occurrences: 2,
+      reason: `Exercise the exact ${retryCase.subject} retry boundary once with pointer input and once with keyboard input.`,
+    });
+    for (const modality of ["pointer", "keyboard"] as const) {
+      const traceId = `trace-system-${retryCase.id}-${modality}`;
+      const humanMessage = `The ${retryCase.subject} could not read its isolated canonical state.`;
+      const remediation = `Retry after the local ${retryCase.subject} is available.`;
+      let failedOnce = false;
+      const routePattern = `**${retryCase.endpoint}*`;
+      await page.route(routePattern, async (route) => {
+        if (!failedOnce) {
+          failedOnce = true;
+          await route.fulfill({
+            status: 503,
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: {
+                code: `system_fixture_${retryCase.id.replaceAll("-", "_")}_unavailable`,
+                message: `System fixture ${retryCase.subject} unavailable`,
+                humanMessage,
+                retryable: true,
+                category: "dependency",
+                remediation,
+                traceId,
+                timestamp: "2199-07-16T12:30:00.000Z",
+              },
+            }),
+          });
+          return;
+        }
+        await route.continue();
+      });
+      try {
+        const navigate = () => page.goto(retryCase.route, { waitUntil: "domcontentloaded" });
+        if (navigationCount === 0) await navigate();
+        else await browserAudit.withExpectedDocumentNavigationTeardown(page, navigate);
+        navigationCount += 1;
+        const scope = retryCase.sectionName ? section(page, retryCase.sectionName) : page;
+        await expect(scope.getByText("Live data is unavailable", { exact: true })).toBeVisible();
+        await expect(scope.getByText(humanMessage, { exact: true })).toBeVisible();
+        await expect(scope.getByText(remediation, { exact: true })).toBeVisible();
+        await expect(scope.getByText(`Trace ${traceId}`, { exact: true })).toBeVisible();
+
+        const recovered = retryCase.waitForRecovery();
+        const retry = scope.getByRole("button", { name: "Try again", exact: true });
+        await interactionActivation.activate(
+          systemRetryReceipt(retryCase.option, modality),
+          () => activate(retry, modality),
+        );
+        await retryCase.assertRecovery(await recovered);
+        await expect(scope.getByText("Live data is unavailable", { exact: true })).toHaveCount(0);
+      } finally {
+        await page.unroute(routePattern);
+      }
+    }
+  }
 });
 
 test(`${TEST_IDS.policies} exercises every visible policy disclosure and both cursor controls`, async ({ page }, testInfo) => {
@@ -374,6 +604,9 @@ test(`${TEST_IDS.policies} exercises every visible policy disclosure and both cu
 async function openContractDocument(
   page: Page,
   audit: BrowserAudit,
+  interactionActivation: InteractionActivationRecorder,
+  manifestEntryId: "system.settings.openapi-contract" | "system.settings.event-contract",
+  option: string,
   linkName: "Open API contract" | "Open event contract",
   expectedPath: "/api/v2/openapi.json" | "/api/v2/contracts/events",
   input: "keyboard" | "pointer",
@@ -393,7 +626,10 @@ async function openContractDocument(
   try {
     audit.expectPopup(expectedPath);
     const popupPromise = page.waitForEvent("popup");
-    await activate(link, input);
+    await interactionActivation.activate(
+      settingsReceipt(manifestEntryId, option, input),
+      () => activate(link, input),
+    );
     const popup = await popupPromise;
     await popup.waitForLoadState("domcontentloaded");
     expect(new URL(popup.url()).pathname).toBe(expectedPath);
@@ -404,7 +640,10 @@ async function openContractDocument(
   }
 }
 
-test(`${TEST_IDS.settings} opens both live contracts and exercises every visible health-metric disclosure`, async ({ page }, testInfo) => {
+test(`${TEST_IDS.settings} opens both live contracts and exercises every visible health-metric disclosure`, async ({
+  page,
+  interactionActivation,
+}, testInfo) => {
   test.setTimeout(120_000);
   const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
   const healthResponse = systemResponse(page, "/api/v2/system/health");
@@ -414,12 +653,50 @@ test(`${TEST_IDS.settings} opens both live contracts and exercises every visible
   await assertPagePayload(await policiesResponse);
   expect(health.items).toContainEqual(expect.objectContaining({ componentId: SYSTEM_HEALTH_COMPONENT, status: "degraded" }));
   await expectSystemHeading(page);
-  await expect(page.getByText("Configuration is read-only in this API contract", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", {
+    name: "Versioned configuration boundaries",
+    exact: true,
+  })).toBeVisible();
 
-  await openContractDocument(page, audit, "Open API contract", "/api/v2/openapi.json", "keyboard");
-  await openContractDocument(page, audit, "Open event contract", "/api/v2/contracts/events", "pointer");
+  for (const modality of ["pointer", "keyboard"] as const) {
+    await openContractDocument(
+      page,
+      audit,
+      interactionActivation,
+      "system.settings.openapi-contract",
+      "Open /api/v2/openapi.json",
+      "Open API contract",
+      "/api/v2/openapi.json",
+      modality,
+    );
+    await openContractDocument(
+      page,
+      audit,
+      interactionActivation,
+      "system.settings.event-contract",
+      "Open /api/v2/contracts/events",
+      "Open event contract",
+      "/api/v2/contracts/events",
+      modality,
+    );
+  }
 
   const metrics = disclosure(page, "Metrics");
+  const firstMetric = metrics.first();
+  const firstMetricDetails = firstMetric.locator("xpath=..");
+  for (const modality of ["pointer", "keyboard"] as const) {
+    expect(await firstMetricDetails.evaluate((element) => (element as HTMLDetailsElement).open)).toBe(false);
+    await interactionActivation.activate(
+      settingsReceipt("system.settings.metrics", "Open metrics", modality),
+      () => activate(firstMetric, modality),
+    );
+    await expect(firstMetricDetails).toHaveJSProperty("open", true);
+    await interactionActivation.activate(
+      settingsReceipt("system.settings.metrics", "Close metrics", modality),
+      () => activate(firstMetric, modality),
+    );
+    await expect(firstMetricDetails).toHaveJSProperty("open", false);
+  }
   await toggleEveryDisclosure(metrics, fixture.healthSnapshotCount);
   await expect(page.locator("pre").filter({ hasText: "connectedSubscribers" }).first()).toContainText("[REDACTED]");
   await expect(page.locator("body")).not.toContainText(SYSTEM_FIXTURE_SECRET);

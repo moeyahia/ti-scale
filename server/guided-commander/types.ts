@@ -62,7 +62,9 @@ export interface GuidedReviewedObservation {
   readonly fileName: string | null;
   readonly byteSize: number;
   readonly redactionCount: number;
-  readonly interpretationSummary: string;
+  readonly reviewSummary: string;
+  /** Metadata attestation is not semantic interpretation and cannot advance. */
+  readonly reviewKind: "ingestion_attestation" | "semantic_interpretation";
   readonly verificationState: "unverified" | "verified" | "disputed" | "rejected";
   readonly acquiredAt: string;
 }
@@ -149,6 +151,24 @@ export interface GuidedContextDisposition {
   readonly ignoredReason?: string;
 }
 
+/**
+ * Trusted adapter metadata captured outside the model-authored JSON payload.
+ * Exactness is explicit so relaxed provider calls can never be reported as
+ * authoritative billing or token telemetry.
+ */
+export interface GuidedProviderUsage {
+  readonly providerId: string;
+  readonly requestedModel: string;
+  readonly returnedModel: string;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly totalTokens?: number;
+  readonly billedCostUsd?: number;
+  readonly exactTokenUsage: boolean;
+  readonly exactCostUsage: boolean;
+  readonly latencyMs: number;
+}
+
 export interface GuidedCommanderPortResponse {
   readonly body: string;
   readonly summary: string;
@@ -156,6 +176,8 @@ export interface GuidedCommanderPortResponse {
   readonly observations?: readonly string[];
   readonly recommendedNextStep?: string;
   readonly contextUse?: readonly GuidedContextDisposition[];
+  /** Runtime-only adapter metadata. It is never part of the provider response schema. */
+  readonly providerUsage?: GuidedProviderUsage;
 }
 
 /**
@@ -165,13 +187,41 @@ export interface GuidedCommanderPortResponse {
 export interface GuidedCommanderPort {
   readonly kind: "planning_only";
   readonly supportsToolExecution: false;
+  /** Determines whether the Context Pack stays local or crosses a public-provider boundary. */
+  readonly contextBoundary?: "trusted_local" | "public_provider";
   readonly providerId: string;
   readonly model?: string;
+  /** Immutable resolved model/request-policy configuration when provider-backed. */
+  readonly modelConfigurationHash?: string;
   respond(
     input: GuidedCommanderPortInput,
     signal: AbortSignal,
   ): Promise<GuidedCommanderPortResponse>;
 }
+
+export interface GuidedCommanderRuntimeScope {
+  readonly missionId: string;
+  readonly runId: string;
+  readonly stepId: string;
+  readonly assignedAgentId: string | null;
+  readonly actionClassId: string | null;
+}
+
+/**
+ * Runtime-selected provider binding. The IDs are canonical persistence
+ * receipts, not caller-supplied display metadata.
+ */
+export interface GuidedCommanderRuntimeBinding {
+  readonly port: GuidedCommanderPort;
+  readonly productAgentId: string;
+  readonly modelAssignmentId: string;
+  readonly modelConfigurationId: string;
+  readonly usedFallback: boolean;
+}
+
+export type GuidedCommanderRuntimeBindingResolver = (
+  scope: GuidedCommanderRuntimeScope,
+) => GuidedCommanderRuntimeBinding;
 
 export interface GuidedCommanderOptions {
   readonly maximumMemorySensitivity?: MemorySensitivity;
@@ -191,6 +241,15 @@ export interface GuidedCommanderReply {
   readonly contextPackId: string;
   readonly evidenceId?: string;
   readonly actionFingerprint: string;
+  readonly runtimeBinding?: {
+    readonly productAgentId: string;
+    readonly modelAssignmentId: string;
+    readonly modelConfigurationId: string;
+    readonly providerId: string;
+    readonly modelId: string;
+    readonly usedFallback: boolean;
+    readonly providerContacted: boolean;
+  };
 }
 
 export interface MemoryCandidateReply {

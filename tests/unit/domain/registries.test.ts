@@ -62,12 +62,136 @@ describe("runtime-derived registries", () => {
     );
   });
 
+  test("requires every planner-visible composite to name exact non-composite local constituents", () => {
+    const manifests = completeRuntimeManifests();
+    const physical = {
+      ...manifests.tools[0]!,
+      id: "kali:physical-phase",
+      mcpServerId: undefined,
+      requiresModel: false,
+      executionJourneys: ["guided"] as const,
+    };
+    const composite = {
+      ...manifests.tools[0]!,
+      id: "ti-scale:planner-composite",
+      mcpServerId: undefined,
+      requiresModel: false,
+      executionJourneys: ["autonomous"] as const,
+      constituentToolIds: [physical.id],
+    };
+    expect(() => buildRuntimeCapabilityProjection({
+      ...manifests,
+      tools: [...manifests.tools, composite, physical],
+    })).not.toThrow();
+    expect(() => buildRuntimeCapabilityProjection({
+      ...manifests,
+      tools: [...manifests.tools, { ...composite, constituentToolIds: ["kali:missing-phase"] }],
+    })).toThrow("Runtime manifests contain broken references");
+    expect(() => buildRuntimeCapabilityProjection({
+      ...manifests,
+      tools: [...manifests.tools, physical, { ...composite, constituentToolIds: [composite.id] }],
+    })).toThrow("Runtime manifests contain broken references");
+  });
+
   test("marks mapped capabilities unavailable when their MCP is offline", () => {
     const projection = buildRuntimeCapabilityProjection(
       completeRuntimeManifests({ mcpStatus: "offline" }),
     );
-    expect(projection.actionClasses.active_host_discovery.availability).toBe("unavailable");
-    expect(projection.actionClasses.active_host_discovery.enforcementReady).toBe(false);
+    const mapping = projection.actionClasses.active_host_discovery;
+    expect(mapping.availability).toBe("unavailable");
+    expect(mapping.enforcementReady).toBe(false);
+    expect(mapping.readinessReasons).toContain(
+      "policy-gated-tool requires MCP server test-mcp, which is offline; restore that exact server and repeat its inventory attestation.",
+    );
+  });
+
+  test("does not manufacture readiness by cross-joining an unbound agent and installed tool", () => {
+    const manifests = completeRuntimeManifests();
+    const projection = buildRuntimeCapabilityProjection({
+      ...manifests,
+      agents: manifests.agents.map((agent) => ({ ...agent, toolIds: [] })),
+    });
+    const mapping = projection.actionClasses.port_service_enumeration;
+
+    // The installed/healthy tool remains visible for operator diagnosis, but
+    // there is no executable specialist -> tool route for this action class.
+    expect(mapping.toolIds).toEqual(["policy-gated-tool"]);
+    expect(mapping.availableToolIds).toEqual(["policy-gated-tool"]);
+    expect(mapping.agentIds).toEqual(["test-specialist"]);
+    expect(mapping.availableAgentIds).toEqual([]);
+    expect(mapping.providerModelRefs).toEqual([]);
+    expect(mapping.availability).toBe("unavailable");
+    expect(mapping.enforcementReady).toBe(false);
+    expect(mapping.readinessReasons).toContain(
+      "No declared agent is bound to the mapped tool: policy-gated-tool.",
+    );
+  });
+
+  test("names the exact unavailable dependency instead of reporting a generic tool block", () => {
+    const manifests = completeRuntimeManifests();
+    const projection = buildRuntimeCapabilityProjection({
+      ...manifests,
+      tools: manifests.tools.map((tool) => ({
+        ...tool,
+        dependencies: [{ id: "isolated-target-free-readiness", ready: false }],
+      })),
+    });
+    const mapping = projection.actionClasses.active_host_discovery;
+
+    expect(mapping.availability).toBe("unavailable");
+    expect(mapping.availableToolIds).toEqual([]);
+    expect(mapping.enforcementReady).toBe(false);
+    expect(mapping.readinessReasons).toContain(
+      "policy-gated-tool is waiting for dependency: isolated-target-free-readiness.",
+    );
+    expect(mapping.readinessReasons.join(" ")).not.toContain(
+      "All mapped tools or dependencies are unavailable",
+    );
+  });
+
+  test("keeps a receipt-ready Guided binding visible without presenting it as Autonomous", () => {
+    const manifests = completeRuntimeManifests();
+    const projection = buildRuntimeCapabilityProjection({
+      ...manifests,
+      tools: manifests.tools.map((tool) => ({
+        ...tool,
+        mcpServerId: undefined,
+        requiresModel: false,
+        executionJourneys: ["guided"] as const,
+      })),
+      mcpServers: [],
+    });
+    const mapping = projection.actionClasses.port_service_enumeration;
+
+    expect(mapping.availability).toBe("supported");
+    expect(mapping.availableToolIds).toEqual(["policy-gated-tool"]);
+    expect(mapping.locallyEnforcedToolIds).toEqual([]);
+    expect(mapping.enforcementReady).toBe(false);
+    expect(mapping.readinessReasons).toContain(
+      "Ready tool policy-gated-tool is approved for guided execution, not Autonomous execution.",
+    );
+  });
+
+  test("promotes the same joined model-free binding only when Autonomous is explicitly approved", () => {
+    const manifests = completeRuntimeManifests();
+    const projection = buildRuntimeCapabilityProjection({
+      ...manifests,
+      tools: manifests.tools.map((tool) => ({
+        ...tool,
+        mcpServerId: undefined,
+        requiresModel: false,
+        executionJourneys: ["autonomous", "guided"] as const,
+      })),
+      mcpServers: [],
+    });
+    const mapping = projection.actionClasses.port_service_enumeration;
+
+    expect(mapping.availability).toBe("supported");
+    expect(mapping.availableAgentIds).toEqual(["test-specialist"]);
+    expect(mapping.availableToolIds).toEqual(["policy-gated-tool"]);
+    expect(mapping.locallyEnforcedToolIds).toEqual(["policy-gated-tool"]);
+    expect(mapping.enforcementReady).toBe(true);
+    expect(mapping.readinessReasons).toEqual([]);
   });
 
   test("builds evidence and deliverable readiness from the supplied projection", () => {
@@ -107,6 +231,8 @@ describe("runtime-derived registries", () => {
     expect(template.recommendedEvidenceTypeIds).toEqual(supportedEvidenceTypeIds);
     expect(template.unavailableEvidenceTypeIds).toEqual([
       "service_version_fingerprint",
+      "http_exchange",
+      "endpoint_discovery_result",
       "os_platform_fingerprint",
       "dns_certificate_record",
     ]);
@@ -163,8 +289,37 @@ describe("action policy registry", () => {
     expect(registry.autonomousLaunchReady).toBe(false);
     expect(registry.launchBlockingReasons.join(" ")).toContain("no locally enforced executor");
     expect(registry.launchBlockingReasons.join(" ")).toContain("Passive intelligence and OSINT");
+    expect(registry.launchBlockingReasons.join(" ")).toContain("policy-gated-tool");
+    expect(registry.launchBlockingReasons.join(" ")).toContain("enforced-executor model");
     expect(registry.launchBlockingReasons.join(" ")).not.toContain("passive_intelligence_osint");
     expect(() => assertAutonomousRegistryLaunchReady(registry)).toThrow("not executable");
+  });
+
+  test("carries exact dependency remediation into an explicit Autonomous blocker", () => {
+    const manifests = completeRuntimeManifests();
+    const projection = buildRuntimeCapabilityProjection({
+      ...manifests,
+      tools: manifests.tools.map((tool) => ({
+        ...tool,
+        dependencies: [{ id: "workspace-confinement", ready: false }],
+      })),
+    });
+    const registry = buildActionClassRegistry({
+      journey: "autonomous",
+      presetId: "custom",
+      destructivePolicy: "prohibited",
+      projection,
+      authorizedTargetIds: ["target-1"],
+      overrides: { active_host_discovery: "pre_authorized" },
+    });
+
+    expect(registry.autonomousLaunchReady).toBe(false);
+    expect(registry.classes.active_host_discovery.capability.toolIds).toEqual([
+      "policy-gated-tool",
+    ]);
+    expect(registry.launchBlockingReasons.join(" ")).toContain(
+      "policy-gated-tool is waiting for dependency: workspace-confinement",
+    );
   });
 
   test("never enables destructive execution from a preset alone", () => {
@@ -179,6 +334,78 @@ describe("action policy registry", () => {
 
     expect(registry.classes.destructive_modification.policyState).toBe("prohibited");
     expect(registry.classes.denial_of_service_disruption.policyState).toBe("prohibited");
+  });
+
+  test("blocks a Full Authorized Lab Compromise preset instead of silently reducing it to recon", () => {
+    const manifests = completeRuntimeManifests();
+    const safeReconClasses = [
+      "active_host_discovery",
+      "dns_domain_certificate_discovery",
+      "port_service_enumeration",
+    ] as const;
+    const projection = buildRuntimeCapabilityProjection({
+      ...manifests,
+      tools: manifests.tools.map((tool) => ({
+        ...tool,
+        actionClassIds: safeReconClasses,
+      })),
+    });
+    const registry = buildActionClassRegistry({
+      journey: "autonomous",
+      presetId: "full_authorized_lab_compromise",
+      destructivePolicy: "prohibited",
+      projection,
+      authorizedTargetIds: ["lab-1"],
+    });
+
+    expect(registry.autonomousLaunchReady).toBe(false);
+    expect(registry.classes.exploit_validation.policyState).toBe("pre_authorized");
+    expect(registry.classes.privilege_escalation.policyState).toBe("pre_authorized");
+    expect(registry.launchBlockingReasons.join(" ")).toContain(
+      "selected Full Authorized Lab Compromise preset requires this class",
+    );
+    expect(() => assertAutonomousRegistryLaunchReady(registry)).toThrow("not executable");
+  });
+
+  test("keeps the HTB Web Full Path explicit and blocks until every full-path binding is ready", () => {
+    const manifests = completeRuntimeManifests();
+    const assessmentClasses = [
+      "active_host_discovery",
+      "port_service_enumeration",
+      "os_technology_fingerprinting",
+      "web_crawling_page_capture",
+      "web_content_endpoint_discovery_fuzzing",
+      "vulnerability_configuration_assessment",
+      "cve_intelligence_applicability_validation",
+    ] as const;
+    const projection = buildRuntimeCapabilityProjection({
+      ...manifests,
+      tools: manifests.tools.map((tool) => ({
+        ...tool,
+        actionClassIds: assessmentClasses,
+      })),
+    });
+    const registry = buildActionClassRegistry({
+      journey: "autonomous",
+      presetId: "htb_web_full_path",
+      destructivePolicy: "bounded_lab_only",
+      projection,
+      authorizedTargetIds: ["lab-1"],
+      boundedDestructiveTargetIds: ["lab-1"],
+    });
+
+    expect(registry.autonomousLaunchReady).toBe(false);
+    expect(registry.classes.exploit_validation.policyState).toBe("pre_authorized");
+    expect(registry.classes.privilege_escalation.policyState).toBe("pre_authorized");
+    expect(registry.classes.command_session_execution.policyState).toBe("pre_authorized");
+    expect(registry.classes.data_access_impact_validation.policyState).toBe(
+      "pre_authorized",
+    );
+    expect(registry.classes.cleanup_restoration.policyState).toBe("pre_authorized");
+    expect(registry.classes.passive_intelligence_osint.policyState).toBe("prohibited");
+    expect(registry.launchBlockingReasons.join(" ")).toContain(
+      "selected HTB Web Full Path preset requires this class",
+    );
   });
 
   test("requires named authorized lab targets for an explicit destructive override", () => {

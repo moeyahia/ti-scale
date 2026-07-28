@@ -47,6 +47,12 @@ export interface PageOptions {
   readonly cursor?: string;
 }
 
+export interface AgentPageOptions extends PageOptions {
+  readonly status?: string;
+  readonly query?: string;
+  readonly includeInternal?: boolean;
+}
+
 interface DatedRow {
   readonly id: string;
   readonly sort_at: string;
@@ -100,20 +106,29 @@ const WINDOWS_LOCATION = /\b[A-Za-z]:\\(?:[^\\\s'"()]+\\)*[^\\\s'"()]+/gu;
 const TRAVERSAL_LOCATION = /(^|[\s'"(])(?:\.\.[\\/])+(?:[^\s'"()]+[\\/]?)+/gu;
 
 /** Preserve semantic metadata while never projecting producer-supplied filesystem locations. */
-function artifactMetadata(value: unknown, depth = 0): unknown {
+function artifactMetadata(
+  value: unknown,
+  artifactId: string,
+  depth = 0,
+  property?: string,
+): unknown {
   const sanitized = depth === 0 ? json(value) : value;
   if (depth > 8) return "[REDACTED: depth limit]";
   if (typeof sanitized === "string") {
+    const canonicalDownloadUrl = `/api/v2/reports/${encodeURIComponent(artifactId)}/download`;
+    if (property === "downloadUrl" && sanitized === canonicalDownloadUrl) return sanitized;
     return sanitized
       .replace(FILE_LOCATION, "[REDACTED LOCATION]")
       .replace(POSIX_LOCATION, "$1[REDACTED LOCATION]")
       .replace(WINDOWS_LOCATION, "[REDACTED LOCATION]")
       .replace(TRAVERSAL_LOCATION, "$1[REDACTED LOCATION]");
   }
-  if (Array.isArray(sanitized)) return sanitized.map((item) => artifactMetadata(item, depth + 1));
+  if (Array.isArray(sanitized)) {
+    return sanitized.map((item) => artifactMetadata(item, artifactId, depth + 1));
+  }
   if (sanitized && typeof sanitized === "object") {
     return Object.fromEntries(Object.entries(sanitized as Record<string, unknown>)
-      .map(([key, item]) => [key, artifactMetadata(item, depth + 1)]));
+      .map(([key, item]) => [key, artifactMetadata(item, artifactId, depth + 1, key)]));
   }
   return sanitized;
 }
@@ -266,6 +281,95 @@ function collectPages<T>(
   return { items, truncated: false };
 }
 
+function agentConfiguration(row: Row): Record<string, unknown> {
+  return objectValue(row.configuration_json);
+}
+
+function isUserFacingAgent(row: Row): boolean {
+  const value = agentConfiguration(row).userFacing;
+  // Compatibility for records created before the standalone roster marker.
+  // RuntimeProjectionService explicitly marks every current/stale adapter,
+  // so production never relies on this fallback to classify components.
+  return value === undefined || value === true;
+}
+
+function agentRuntimeBindingIds(row: Row): readonly string[] {
+  const configuration = agentConfiguration(row);
+  const configured = Array.isArray(configuration.runtimeBindingAgentIds)
+    ? configuration.runtimeBindingAgentIds.filter(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      )
+    : [];
+  return [...new Set([String(row.id), ...configured])];
+}
+
+function publicProductAgentConfiguration(
+  configuration: Record<string, unknown>,
+): Record<string, unknown> {
+  if (configuration.productAgent !== true) return configuration;
+  const {
+    runtimeBindingAgentIds,
+    runtimeBindingVersions,
+    ...publicConfiguration
+  } = configuration;
+  const bindingIds = Array.isArray(runtimeBindingAgentIds)
+    ? runtimeBindingAgentIds.filter(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      )
+    : [];
+  const versionById = new Map(
+    Array.isArray(runtimeBindingVersions)
+      ? runtimeBindingVersions.flatMap((value) => {
+          const item = objectValue(value);
+          return typeof item.id === "string" && typeof item.version === "string"
+            ? [[item.id, item.version] as const]
+            : [];
+        })
+      : [],
+  );
+  const runtimeBindings = bindingIds.map((id) => ({
+    id,
+    version: versionById.get(id) ?? null,
+  }));
+  return {
+    ...publicConfiguration,
+    runtimeBindings,
+    runtimeBindingCount: runtimeBindings.length,
+    runtimeBindingsVersioned: runtimeBindings.every(({ version }) => version !== null),
+  };
+}
+
+function publicProductAgentPolicy(
+  value: unknown,
+  productAgent: boolean,
+): unknown {
+  const policy = objectValue(json(value));
+  if (!productAgent) return policy;
+  const bindings = Array.isArray(policy.runtimeBindings)
+    ? policy.runtimeBindings
+    : [];
+  return {
+    ...policy,
+    runtimeBindings: bindings.map((binding) => {
+      const item = objectValue(binding);
+      return {
+        ...(typeof item.agentId === "string" ? { agentId: item.agentId } : {}),
+        ...("policy" in item ? { policy: item.policy } : {}),
+      };
+    }),
+    runtimeBindingCount: bindings.length,
+  };
+}
+
+function assertInternalAgentAccess(
+  access: OperationsAccessPolicy,
+  includeInternal: boolean,
+): void {
+  if (includeInternal && !access.allowUnscopedSystemData) {
+    throw forbidden("Internal runtime components are not available in this access scope.");
+  }
+}
+
 /** Read-only, scope-enforcing projections over the canonical V2 schema. */
 export class OperationsRepository {
   constructor(
@@ -275,14 +379,16 @@ export class OperationsRepository {
 
   listAgents(
     access: OperationsAccessPolicy,
-    options: PageOptions & { readonly status?: string; readonly query?: string },
+    options: AgentPageOptions,
   ): OperationsPage<AgentProjection> {
+    assertInternalAgentAccess(access, options.includeInternal === true);
     const cursor = decodeCursor(options.cursor);
     const cursorPart = cursorClause(cursor, "a.updated_at", "a.id");
     const rows = this.database.prepare(`
       SELECT a.*, a.updated_at AS sort_at
       FROM agents a
       WHERE ${cursorPart.sql}
+        ${options.includeInternal ? "" : "AND COALESCE(json_extract(a.configuration_json, '$.userFacing'), 1) = 1"}
         ${options.status ? "AND a.status = ?" : ""}
         ${options.query ? "AND instr(lower(a.id || ' ' || a.display_name || ' ' || a.role || ' ' || a.status), lower(?)) > 0" : ""}
       ORDER BY a.updated_at DESC, a.id DESC
@@ -296,9 +402,14 @@ export class OperationsRepository {
     return page(rows, options.limit, (row) => this.mapAgent(row, access));
   }
 
-  getAgent(agentId: string, access: OperationsAccessPolicy): Record<string, unknown> {
+  getAgent(
+    agentId: string,
+    access: OperationsAccessPolicy,
+    options: Readonly<{ readonly includeInternal?: boolean }> = {},
+  ): Record<string, unknown> {
+    assertInternalAgentAccess(access, options.includeInternal === true);
     const row = this.database.prepare("SELECT *, updated_at AS sort_at FROM agents WHERE id = ?").get(agentId) as Row | undefined;
-    if (!row) throw notFound("Agent");
+    if (!row || (!options.includeInternal && !isUserFacingAgent(row))) throw notFound("Agent");
     const agent = this.mapAgent(row, access);
     const capabilities = this.database.prepare(`
       SELECT capability, source, enabled, metadata_json
@@ -333,9 +444,12 @@ export class OperationsRepository {
   listAgentAssignments(
     agentId: string,
     access: OperationsAccessPolicy,
-    options: PageOptions & { readonly status?: string },
+    options: PageOptions & { readonly status?: string; readonly includeInternal?: boolean },
   ): OperationsPage<AssignmentProjection> {
-    if (!this.database.prepare("SELECT 1 FROM agents WHERE id = ?").get(agentId)) throw notFound("Agent");
+    assertInternalAgentAccess(access, options.includeInternal === true);
+    const agent = this.database.prepare("SELECT * FROM agents WHERE id = ?").get(agentId) as Row | undefined;
+    if (!agent || (!options.includeInternal && !isUserFacingAgent(agent))) throw notFound("Agent");
+    const bindingIds = agentRuntimeBindingIds(agent);
     const scope = missionScopeSql("m", access);
     const cursor = decodeCursor(options.cursor);
     const cursorPart = cursorClause(cursor, "a.updated_at", "a.id");
@@ -350,11 +464,12 @@ export class OperationsRepository {
       JOIN runs r ON r.id = a.run_id
       JOIN missions m ON m.id = r.mission_id
       LEFT JOIN plan_steps ps ON ps.id = a.step_id
-      WHERE a.agent_id = ? AND ${scope.sql} AND ${cursorPart.sql}
+      WHERE a.agent_id IN (${bindingIds.map(() => "?").join(",")})
+        AND ${scope.sql} AND ${cursorPart.sql}
         ${options.status ? "AND a.status = ?" : ""}
       ORDER BY a.updated_at DESC, a.id DESC
       LIMIT ?
-    `).all(agentId, ...scope.params, ...cursorPart.params, ...(options.status ? [options.status] : []), options.limit + 1) as Row[];
+    `).all(...bindingIds, ...scope.params, ...cursorPart.params, ...(options.status ? [options.status] : []), options.limit + 1) as Row[];
     const now = this.clock().getTime();
     return page(rows, options.limit, (row) => ({
       id: row.id,
@@ -376,6 +491,7 @@ export class OperationsRepository {
   }
 
   private mapAgent(row: Row, access: OperationsAccessPolicy): AgentProjection {
+    const bindingIds = agentRuntimeBindingIds(row);
     const scope = missionScopeSql("m", access);
     const metrics = this.database.prepare(`
       SELECT
@@ -390,14 +506,35 @@ export class OperationsRepository {
       FROM assignments a
       JOIN runs r ON r.id = a.run_id
       JOIN missions m ON m.id = r.mission_id
-      WHERE a.agent_id = ? AND ${scope.sql}
-    `).get(row.id, ...scope.params) as Row;
+      WHERE a.agent_id IN (${bindingIds.map(() => "?").join(",")}) AND ${scope.sql}
+    `).get(...bindingIds, ...scope.params) as Row;
     const decided = Number(metrics.completed ?? 0) + Number(metrics.failed ?? 0);
     const health = this.database.prepare(`
       SELECT status, message, metrics_json, captured_at
       FROM health_snapshots WHERE component_type = 'agent' AND component_id = ?
       ORDER BY captured_at DESC, id DESC LIMIT 1
     `).get(row.id) as Row | undefined;
+    const configuration = agentConfiguration(row);
+    const productAgent = configuration.productAgent === true;
+    const productHealth = configuration.productAgent === true
+      ? {
+          status: row.status === "available" || row.status === "busy"
+            ? "healthy"
+            : row.status === "degraded"
+              ? "degraded"
+              : "unhealthy",
+          message: row.status === "available" || row.status === "busy"
+            ? `${row.display_name} has at least one current runtime binding.`
+            : `${row.display_name} has no currently available runtime binding.`,
+          metrics: {
+            runtimeBindingCount: Math.max(0, bindingIds.length - 1),
+            ...(configuration.readiness && typeof configuration.readiness === "object"
+              ? configuration.readiness as Record<string, unknown>
+              : {}),
+          },
+          capturedAt: row.updated_at,
+        }
+      : null;
     return {
       id: row.id,
       role: row.role,
@@ -406,9 +543,9 @@ export class OperationsRepository {
       version: row.version,
       lastHeartbeatAt: row.last_heartbeat_at,
       updatedAt: row.updated_at,
-      providerPolicy: json(row.provider_policy_json),
-      toolPolicy: json(row.tool_policy_json),
-      configuration: json(row.configuration_json),
+      providerPolicy: publicProductAgentPolicy(row.provider_policy_json, productAgent),
+      toolPolicy: publicProductAgentPolicy(row.tool_policy_json, productAgent),
+      configuration: publicProductAgentConfiguration(objectValue(json(row.configuration_json))),
       assignmentHealth: {
         queueDepth: Number(metrics.queue_depth ?? 0),
         active: Number(metrics.active ?? 0),
@@ -423,7 +560,7 @@ export class OperationsRepository {
         message: health.message ? sanitizeJson(health.message) : null,
         metrics: json(health.metrics_json),
         capturedAt: health.captured_at,
-      } : null,
+      } : productHealth,
     };
   }
 
@@ -732,7 +869,7 @@ export class OperationsRepository {
       byteSize: Number(row.byte_size),
       mediaType: row.media_type,
       sensitivity: row.sensitivity,
-      metadata: artifactMetadata(row.metadata_json),
+      metadata: artifactMetadata(row.metadata_json, String(row.id)),
       storage: storageProjection(row.storage_uri),
       evaluation: row.evaluation_id ? { id: row.evaluation_id, evidenceCoverage: rounded(row.evidence_coverage, 4) } : null,
       contextPackIds: row.action_context_pack_id ? [String(row.action_context_pack_id)] : [],

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { SqliteDatabase } from "../db";
 import { MemoryRepository, type MemoryEdgeType, type MemoryLifecycle, type MemoryNodeType } from "../memory";
 import type { LegacyEngagementManifest, LegacyEngagementFileKind } from "./LegacyEngagementDiscovery";
+import type { LegacySourceRetentionMode } from "./types";
 import { parseLegacyReconSemantics, type LegacyReconHostObservation } from "./LegacyReconSemanticParser";
 
 export interface LegacyEngagementProjectionArtifact {
@@ -19,6 +20,7 @@ export interface LegacyEngagementBrainProjectionInput {
   readonly runId: string;
   readonly manifestArtifactId: string;
   readonly artifacts: readonly LegacyEngagementProjectionArtifact[];
+  readonly sourceRetention?: LegacySourceRetentionMode;
 }
 
 export interface LegacyEngagementBrainProjectionResult {
@@ -37,8 +39,9 @@ function basename(path: string): string {
 }
 
 /**
- * Projects only redacted, typed canonical metadata. Raw historical payloads stay
- * in the protected migration backup and are referenced by opaque canonical IDs.
+ * Projects only redacted, typed canonical metadata. Raw-byte custody follows
+ * the explicit source-retention mode; symlinks are never followed and are
+ * represented by metadata only.
  */
 export class LegacyEngagementBrainProjector {
   readonly #memory: MemoryRepository;
@@ -62,6 +65,7 @@ export class LegacyEngagementBrainProjector {
   }
 
   project(input: LegacyEngagementBrainProjectionInput): LegacyEngagementBrainProjectionResult {
+    const sourceRetention = input.sourceRetention ?? "protected-copy";
     const createdAt = this.clock().toISOString();
     const source = {
       sourceType: "legacy_engagement_manifest",
@@ -91,6 +95,14 @@ export class LegacyEngagementBrainProjector {
       }[];
       provenanceExplanation?: string;
     }): string => {
+      const desiredSources = values.sources ?? [{
+        sourceType: values.sourceType ?? source.sourceType,
+        sourceId: values.sourceId ?? source.sourceId,
+        sourceHash: values.sourceHash ?? source.sourceHash,
+        acquiredAt: source.acquiredAt,
+      }];
+      const desiredExplanation = values.provenanceExplanation
+        ?? "Projected from a hash-verified historical engagement manifest; authorization and claim verification remain separate.";
       const existing = this.#memory.getNode(values.id, true);
       if (!existing) {
         this.#memory.createNode({
@@ -106,18 +118,48 @@ export class LegacyEngagementBrainProjector {
           confirmationState: values.lifecycle === "candidate" ? "pending" : "not_required",
           provenance: {
             method: "imported",
-            explanation: values.provenanceExplanation ?? "Projected from a hash-verified historical engagement manifest; authorization and claim verification remain separate.",
-            sources: values.sources ?? [{
-              sourceType: values.sourceType ?? source.sourceType,
-              sourceId: values.sourceId ?? source.sourceId,
-              sourceHash: values.sourceHash ?? source.sourceHash,
-              acquiredAt: source.acquiredAt,
-            }],
+            explanation: desiredExplanation,
+            sources: desiredSources,
           },
           authorType: "import",
           authorId: "import:legacy-engagement",
           retentionPolicy: { allowAutonomous: false, allowGuided: true },
         });
+      } else {
+        const additionalSources = desiredSources.flatMap((candidate) => {
+          const versionedSourceId = candidate.sourceHash
+            ? `${candidate.sourceId}:v2:${candidate.sourceHash.slice(0, 16)}`
+            : candidate.sourceId;
+          const exact = existing.provenance.sources.some((current) =>
+            current.sourceType === candidate.sourceType
+            && (current.sourceId === candidate.sourceId || current.sourceId === versionedSourceId)
+            && (current.sourceHash ?? "") === (candidate.sourceHash ?? ""));
+          if (exact) return [];
+          const reusedIdentity = existing.provenance.sources.some((current) =>
+            current.sourceType === candidate.sourceType && current.sourceId === candidate.sourceId);
+          return [{
+            ...candidate,
+            ...(reusedIdentity && candidate.sourceHash ? {
+              sourceId: versionedSourceId,
+            } : {}),
+          }];
+        });
+        const contentChanged = existing.title !== values.title
+          || existing.summary !== values.summary
+          || existing.body !== values.body;
+        const explanationChanged = existing.provenance.explanation !== desiredExplanation;
+        if (contentChanged || explanationChanged || additionalSources.length > 0) {
+          this.#memory.correctNode(values.id, {
+            title: values.title,
+            summary: values.summary,
+            body: values.body,
+            additionalProvenanceSources: additionalSources,
+            provenanceExplanation: desiredExplanation,
+            authorType: "import",
+            authorId: "import:legacy-engagement",
+            changeReason: "Reconciled imported Brain metadata with protected engagement manifest v2",
+          });
+        }
       }
       this.database.prepare(`
         INSERT OR IGNORE INTO legacy_engagement_brain_nodes (
@@ -189,8 +231,10 @@ export class LegacyEngagementBrainProjector {
       id: stableId("mem_legacy_source", input.manifest.id),
       nodeType: "source",
       title: `${input.manifest.engagementName} source manifest`,
-      summary: `${input.manifest.files.length} hash-verified, classified historical files were inventoried.`,
-      body: "The protected source backup remains authoritative for raw bytes; this note retains metadata only.",
+      summary: `${input.manifest.files.length} classified files and ${input.manifest.quarantined.length} policy-quarantined source objects were inventoried with content-free provenance.`,
+      body: sourceRetention === "protected-copy"
+        ? "The protected source backup retains hash-verified bytes for accepted files and stable quarantined regular files. Symlinks were not followed. No quarantined content was projected into this Brain note."
+        : "Source bytes remain only in the operator-owned historical tree. The importer verified containment, inode, size, timestamp, and SHA-256 before and after parsing without following symlinks. Availability is reference-based, not immutable copied storage. No private source path or quarantined content was projected into this Brain note.",
     });
     ensureEdge({ sourceNodeId: runNode, targetNodeId: missionNode, edgeType: "belongs_to", title: "Run belongs to mission", summary: "The imported historical run belongs to this canonical mission." });
     ensureEdge({ sourceNodeId: missionNode, targetNodeId: sourceNode, edgeType: "derived_from", title: "Mission derived from source", summary: "The canonical mission was reconstructed from this hash-verified engagement manifest." });
@@ -198,7 +242,7 @@ export class LegacyEngagementBrainProjector {
     const allArtifacts: LegacyEngagementProjectionArtifact[] = [
       {
         artifactId: input.manifestArtifactId,
-        relativePath: "engagement-manifest.json",
+        relativePath: "engagement-manifest.v2.json",
         kind: "manifest",
         contentHash: input.manifest.sha256,
       },
@@ -210,7 +254,9 @@ export class LegacyEngagementBrainProjector {
         id: stableId("mem_legacy_artifact", artifact.artifactId),
         nodeType: "artifact",
         title: basename(artifact.relativePath),
-        summary: `Imported ${artifact.kind} artifact metadata; raw content remains in protected storage.`,
+        summary: sourceRetention === "protected-copy"
+          ? `Imported ${artifact.kind} artifact metadata; raw content remains in protected storage.`
+          : `Imported ${artifact.kind} reference metadata; source bytes remain in the operator-owned historical tree.`,
         body: `Canonical artifact: ${artifact.artifactId}. Content hash: ${artifact.contentHash}.`,
         sourceType: "artifact",
         sourceId: artifact.artifactId,
@@ -231,7 +277,7 @@ export class LegacyEngagementBrainProjector {
           sourceId: artifact.evidenceCandidateId,
           sourceHash: artifact.contentHash,
         });
-        ensureEdge({ sourceNodeId: evidenceNode, targetNodeId: artifactNode, edgeType: "derived_from", title: "Candidate derived from artifact", summary: "The reviewable evidence candidate was derived from this immutable artifact metadata.", lifecycle: "candidate", confidence: 0.4 });
+        ensureEdge({ sourceNodeId: evidenceNode, targetNodeId: artifactNode, edgeType: "derived_from", title: "Candidate derived from artifact", summary: "The reviewable evidence candidate was derived from hash-addressed artifact metadata.", lifecycle: "candidate", confidence: 0.4 });
       }
     }
 
@@ -333,7 +379,7 @@ export class LegacyEngagementBrainProjector {
           targetNodeId: linked.nodeId,
           edgeType: "derived_from",
           title: "Asset observation derived from recon artifact",
-          summary: "This historical asset observation was extracted from the linked immutable recon artifact.",
+          summary: "This historical asset observation was extracted from the linked hash-verified recon record.",
           sources: observationSources,
           provenanceExplanation: historicalProvenance,
         });
@@ -374,7 +420,7 @@ export class LegacyEngagementBrainProjector {
             targetNodeId: linked.nodeId,
             edgeType: "derived_from",
             title: "Service observation derived from recon artifact",
-            summary: "This historical service observation was extracted from the linked immutable recon artifact.",
+            summary: "This historical service observation was extracted from the linked hash-verified recon record.",
             sources: observationSources,
             provenanceExplanation: historicalProvenance,
           });

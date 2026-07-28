@@ -68,9 +68,6 @@ function provenance(value: IntelligenceProvenance): IntelligenceProvenance {
 function uniqueEvidence(
   links: readonly { readonly evidenceId: string; readonly relationship: TopologyEvidenceRelationship }[],
 ): void {
-  if (links.length === 0) {
-    throw new RunIntelligenceError("topology_evidence_required", "Every topology node and edge requires canonical evidence");
-  }
   const seen = new Set<string>();
   for (const link of links) {
     const evidenceId = text(link.evidenceId, "Evidence ID");
@@ -148,6 +145,90 @@ export class ReconDigitalTwinService {
     }
   }
 
+  #validateObservationSources(input: {
+    readonly missionId: string;
+    readonly runId?: string;
+    readonly verificationState: TopologyVerificationState;
+    readonly observationIds: readonly string[];
+  }): void {
+    const uniqueIds = new Set(input.observationIds);
+    if (uniqueIds.size !== input.observationIds.length) {
+      throw new RunIntelligenceError(
+        "duplicate_topology_observation",
+        "Topology observation provenance contains a duplicate observation ID",
+      );
+    }
+    for (const observationId of input.observationIds) {
+      const observation = this.database.prepare(`
+        SELECT mission_id, run_id, verification_state
+        FROM observations WHERE id = ?
+      `).get(observationId) as {
+        readonly mission_id: string;
+        readonly run_id: string | null;
+        readonly verification_state: "unverified" | "corroborated" | "conflicting" | "stale" | "rejected";
+      } | undefined;
+      if (!observation) {
+        throw new RunIntelligenceError(
+          "topology_observation_not_found",
+          `Topology source observation not found: ${observationId}`,
+        );
+      }
+      if (
+        observation.mission_id !== input.missionId
+        || observation.run_id !== (input.runId ?? null)
+      ) {
+        throw new RunIntelligenceError(
+          "topology_observation_scope_mismatch",
+          "Topology source observation is outside the exact mission and run scope",
+        );
+      }
+      if (observation.verification_state === "rejected") {
+        throw new RunIntelligenceError(
+          "topology_observation_rejected",
+          "Rejected observations cannot source topology intelligence",
+        );
+      }
+      if (observation.verification_state === "stale" && input.verificationState !== "stale") {
+        throw new RunIntelligenceError(
+          "topology_observation_stale",
+          "A stale observation may source only explicitly stale topology intelligence",
+        );
+      }
+    }
+  }
+
+  #validateSources(input: {
+    readonly missionId: string;
+    readonly runId?: string;
+    readonly verificationState: TopologyVerificationState;
+    readonly provenance: IntelligenceProvenance;
+    readonly links: readonly { readonly evidenceId: string; readonly relationship: TopologyEvidenceRelationship }[];
+  }): void {
+    const observationIds = input.provenance.observationIds ?? [];
+    if (input.links.length === 0 && observationIds.length === 0) {
+      throw new RunIntelligenceError(
+        "topology_evidence_required",
+        "Every topology node and edge requires canonical evidence or attributable observations",
+      );
+    }
+    if (input.links.length > 0) {
+      this.#validateEvidence(input);
+    } else if (input.verificationState !== "unverified" && input.verificationState !== "stale") {
+      throw new RunIntelligenceError(
+        "topology_evidence_required",
+        "Verified, corroborated, or conflicting topology requires canonical evidence",
+      );
+    }
+    if (observationIds.length > 0) {
+      this.#validateObservationSources({
+        missionId: input.missionId,
+        ...(input.runId ? { runId: input.runId } : {}),
+        verificationState: input.verificationState,
+        observationIds,
+      });
+    }
+  }
+
   createNode(input: CreateTopologyNodeInput): ReturnType<ReconDigitalTwinRepository["getNode"]> {
     const normalizedProvenance = this.#validateOrigin(input.provenance);
     const firstSeenAt = timestamp(input.firstSeenAt, "First-seen time");
@@ -158,10 +239,11 @@ export class ReconDigitalTwinService {
     const now = this.clock().toISOString();
     return inImmediateTransaction(this.database, () => {
       this.#validateMissionRun(input.missionId, input.runId);
-      this.#validateEvidence({
+      this.#validateSources({
         missionId: input.missionId,
         ...(input.runId ? { runId: input.runId } : {}),
         verificationState: input.verificationState,
+        provenance: normalizedProvenance,
         links: input.evidence,
       });
       const id = `topology_node_${randomUUID()}`;
@@ -218,10 +300,11 @@ export class ReconDigitalTwinService {
         throw new RunIntelligenceError("topology_edge_run_mismatch", "Topology edge endpoints cannot cross run boundaries");
       }
       const edgeRunId = source.run_id ?? target.run_id ?? undefined;
-      this.#validateEvidence({
+      this.#validateSources({
         missionId: input.missionId,
         ...(edgeRunId ? { runId: edgeRunId } : {}),
         verificationState: input.verificationState,
+        provenance: normalizedProvenance,
         links: input.evidence,
       });
       const id = `topology_edge_${randomUUID()}`;

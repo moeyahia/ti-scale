@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page, type TestInfo } from "./support/playwright";
 import { BrowserAudit } from "./support/browserAudit";
+import { waitForInteractiveApplication } from "./support/applicationReadiness";
 import { canonicalFixtureNamespace } from "./support/fixtureNamespace";
 import { createPlanChangeFixture } from "./support/planChangeFixture";
 
@@ -122,6 +123,7 @@ test.describe("e2e.zoom-accessibility 200% rendering-geometry and reflow gate", 
     const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("heading", { level: 1, name: "Command Center", exact: true })).toBeVisible();
+    await waitForInteractiveApplication(page);
     await assertZoomRenderingContract(page, testInfo);
     await assertNoPageOverflow(page, testInfo, "overview");
 
@@ -166,6 +168,7 @@ test.describe("e2e.zoom-accessibility 200% rendering-geometry and reflow gate", 
     const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
     await page.goto("/missions/new/autonomous", { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("group", { name: "Authorization and exact scope", exact: true })).toBeVisible();
+    await waitForInteractiveApplication(page);
     await assertNoPageOverflow(page, testInfo, "intake-scope");
 
     const target = page.getByLabel("Authorized targets or environment references", { exact: false });
@@ -198,6 +201,7 @@ test.describe("e2e.zoom-accessibility 200% rendering-geometry and reflow gate", 
     const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
     await page.goto(`/missions/${encodeURIComponent(fixture.missionId)}/runs/${encodeURIComponent(fixture.runId)}?tab=plan`, { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("heading", { level: 1, name: fixture.missionName, exact: true })).toBeVisible();
+    await waitForInteractiveApplication(page);
     await expect(page.getByRole("region", { name: "Selected run status", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { level: 2, name: "Plan change requests", exact: true })).toBeVisible();
     await assertNoPageOverflow(page, testInfo, "run-plan");

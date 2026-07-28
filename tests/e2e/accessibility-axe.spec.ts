@@ -25,6 +25,12 @@ import {
   type RunInterventionRecoveryFixture,
 } from "./support/runInterventionRecoveryFixture";
 import { createSystemFixture } from "./support/systemFixture";
+import { waitForInteractiveApplication } from "./support/applicationReadiness";
+import {
+  advanceAutonomousIntake,
+  autonomousIntakeGroup,
+  chooseAutonomousTitaniumOption,
+} from "./support/autonomousIntake";
 
 interface AccessibilityInventory {
   readonly schemaVersion: number;
@@ -145,6 +151,7 @@ async function waitForLoadedSurface(page: Page): Promise<void> {
 
 async function assertWcagAa(page: Page, testInfo: TestInfo, state: string): Promise<void> {
   const inventory = inventoryState(state);
+  await waitForInteractiveApplication(page);
   if (AXE_RUNTIME_EVALUATION_SOURCE_BYTES > MAX_RUNTIME_EVALUATION_SOURCE_BYTES) {
     throw new Error(
       `The axe runtime evaluation source is ${AXE_RUNTIME_EVALUATION_SOURCE_BYTES} bytes; ` +
@@ -197,7 +204,10 @@ const PRIMARY_ROUTES: readonly PrimaryRouteCase[] = [
     state: "live-operations-primary",
     path: "/live",
     heading: "Live Operations",
-    ready: async (page) => expect(page.locator(".os-operation-list").first()).toBeVisible(),
+    ready: async (page) => expect(page.getByRole("link", {
+      name: `Open Autonomous run ${operationalFixture.autonomousMissionTitle} (${operationalFixture.autonomousRunId})`,
+      exact: true,
+    })).toBeVisible(),
   },
   {
     state: "guided-workspace-primary",
@@ -309,7 +319,15 @@ test.describe("automated WCAG 2.2 AA primary-route and material-state gate", () 
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("heading", { level: 2, name: "Active operations", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Search or run a command", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "Command palette", exact: true })).toBeVisible();
+    const palette = page.getByRole("dialog", { name: "Command palette", exact: true });
+    await expect(palette).toBeVisible();
+    // The palette is deliberately lazy and names its operational-record load.
+    // Audit the settled interactive state so page teardown does not abort its
+    // four real domain reads and misreport those intentional cancellations as
+    // application network failures.
+    await expect(palette.locator("p.os-visually-hidden[role='status']")).toHaveText(
+      /^\d+ commands? available$/u,
+    );
     await assertWcagAa(page, testInfo, "overview-command-palette-open");
   });
 
@@ -323,6 +341,68 @@ test.describe("automated WCAG 2.2 AA primary-route and material-state gate", () 
     await expect(page.getByRole("group", { name: "Authorization and exact scope", exact: true })).toBeVisible();
     await waitForLoadedSurface(page);
     await assertWcagAa(page, testInfo, "autonomous-intake-scope");
+  });
+
+  test("every material Autonomous intake step has no axe A/AA violations", async ({ page }, testInfo) => {
+    test.setTimeout(120_000);
+    await page.goto("/missions/new/autonomous", { waitUntil: "domcontentloaded" });
+    await chooseAutonomousTitaniumOption(
+      page.getByRole("combobox", { name: /Environment classification/u }),
+      "local_disposable_lab",
+      "pointer",
+    );
+    await page
+      .getByLabel("Authorized targets or environment references", { exact: false })
+      .fill("lab:accessibility-autonomous-blocked");
+    await page
+      .getByRole("checkbox", {
+        name: /I confirm these targets and the selected action policy are authorized/u,
+      })
+      .check();
+
+    await advanceAutonomousIntake(page, "Outcome and collaboration");
+    await assertWcagAa(page, testInfo, "autonomous-intake-outcome");
+
+    await advanceAutonomousIntake(page, "Autonomous operating contract");
+    const actionPolicy = page.locator("details.os-advanced-section").filter({
+      has: page.locator("summary").filter({ hasText: "Action-class policy matrix" }),
+    });
+    await actionPolicy.locator(":scope > summary").click();
+    await expect(actionPolicy).toHaveAttribute("open", "");
+    await expect(actionPolicy.locator("article.os-policy-row")).toHaveCount(26);
+    await assertWcagAa(page, testInfo, "autonomous-intake-contract-expanded");
+
+    await advanceAutonomousIntake(
+      page,
+      "Specialist team and execution readiness",
+      { expectPreflight: true },
+    );
+    await expect(
+      autonomousIntakeGroup(page, "Specialist team and execution readiness"),
+    ).toBeVisible();
+    await assertWcagAa(page, testInfo, "autonomous-intake-team");
+
+    await advanceAutonomousIntake(
+      page,
+      "Second Brain context",
+      { expectPreflight: true },
+    );
+    await expect(autonomousIntakeGroup(page, "Second Brain context")).toBeVisible();
+    await assertWcagAa(page, testInfo, "autonomous-intake-context");
+
+    await advanceAutonomousIntake(
+      page,
+      "Review the resolved mission",
+      { expectPreflight: true },
+    );
+    const review = autonomousIntakeGroup(page, "Review the resolved mission");
+    await expect(review).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: /^Launch (?:Complete )?Autonomous (?:Assessment|Engagement)$/u,
+      }),
+    ).toBeDisabled();
+    await assertWcagAa(page, testInfo, "autonomous-intake-review-blocked");
   });
 
   test("minimal Guided intake has no axe A/AA violations", async ({ page }, testInfo) => {
@@ -495,7 +575,10 @@ test.describe("automated WCAG 2.2 AA primary-route and material-state gate", () 
       name: operationalFixture.reportTypes[0]!,
       exact: true,
     })).toBeVisible();
-    await expect(page.getByText(/Direct download requires a separate authorized artifact-delivery contract\.$/u)).toBeVisible();
+    await expect(page.getByText(
+      "This historical report has metadata only and no canonical report-download adapter.",
+      { exact: true },
+    )).toBeVisible();
     await waitForLoadedSurface(page);
     await assertWcagAa(page, testInfo, "report-review");
   });
@@ -513,11 +596,22 @@ test.describe("automated WCAG 2.2 AA primary-route and material-state gate", () 
     await expect(page.getByRole("heading", { level: 1, name: "System", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", {
       level: 2,
-      name: "Configuration is read-only in this API contract",
+      name: "Default model configuration",
       exact: true,
     })).toBeVisible();
     await waitForLoadedSurface(page);
     await assertWcagAa(page, testInfo, "system-settings");
+  });
+
+  test("review-only particle-to-module transition has no axe A/AA violations", async ({ page }, testInfo) => {
+    await page.goto("/motion-lab/particle-module-transition", { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("heading", {
+      level: 1,
+      name: "Particle field to operational modules",
+      exact: true,
+    })).toBeVisible();
+    await expect(page.locator("main.particle-module-transition")).toHaveAttribute("data-review-boundary", "review-only");
+    await assertWcagAa(page, testInfo, "particle-module-transition-review");
   });
 
   test.afterAll(() => {

@@ -34,6 +34,26 @@ const JSON_VALUE = z.unknown().transform((value, context) => {
     return z.NEVER;
   }
 });
+const PRIMITIVE = z.union([z.string().trim().min(1).max(512), z.number().finite(), z.boolean()]);
+const REVIEWED_KNOWLEDGE_BINDING = z.object({
+  procedureNodeId: ID,
+  procedureVersionNodeId: ID.optional(),
+  productNodeIds: z.array(ID).max(128),
+  versionNodeIds: z.array(ID).max(128),
+  stackNodeIds: z.array(ID).max(128),
+  prerequisiteNodeIds: z.array(ID).max(128),
+  observedStateNodeIds: z.array(ID).max(128).optional(),
+  normalizedParameters: z.record(z.string().regex(/^[A-Za-z][A-Za-z0-9._-]{0,127}$/u), PRIMITIVE),
+  load: z.number().finite().min(0).optional(),
+  concurrency: z.number().int().positive().optional(),
+  timingWindowMs: z.number().int().nonnegative().optional(),
+}).strict();
+const REPRESENTED_ACTION_BINDING = z.object({
+  actionType: SHORT_TEXT,
+  actionClass: SHORT_TEXT,
+  normalizedArguments: JSON_OBJECT,
+  scopedTarget: z.string().trim().min(1).max(1_000),
+}).strict();
 const EMPTY_BODY = z.object({}).strict();
 
 const provenance = z.object({
@@ -62,6 +82,8 @@ const attackAttemptBody = z.object({
   stepId: ID.optional(),
   targetAssetId: ID.optional(),
   targetServiceId: ID.optional(),
+  recoverySourceAttackAttemptId: ID.optional(),
+  representedActionBinding: REPRESENTED_ACTION_BINDING.optional(),
   objective: TEXT,
   techniqueId: ID.optional(),
   techniqueName: SHORT_TEXT,
@@ -70,6 +92,7 @@ const attackAttemptBody = z.object({
   normalizedParameters: JSON_OBJECT.optional(),
   assignedAgentId: ID.optional(),
   modelAssignmentId: ID.optional(),
+  reviewedKnowledgeBinding: REVIEWED_KNOWLEDGE_BINDING.optional(),
 }).strict();
 
 const stateTransitionBody = z.object({

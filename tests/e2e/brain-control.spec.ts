@@ -19,6 +19,7 @@ import {
   type BrainControlFixture,
 } from "./support/brainControlFixture";
 import { canonicalFixtureNamespace } from "./support/fixtureNamespace";
+import { readTitaniumOptions, selectTitaniumOption } from "./support/titaniumSelect";
 
 const TEST_IDS = {
   controls: "e2e.brain-control.all-controls-save-reload",
@@ -138,7 +139,12 @@ function brainTabReads(page: Page, href: string): Promise<Response>[] {
   return paths.map((path) => page.waitForResponse((response) => (
     response.request().method() === "GET"
     && new URL(response.url()).pathname === path
-  )));
+  ), {
+    // Route navigation owns a short, observable canonical-read boundary.
+    // If the managed UI process or lazy route chunk disappears, fail on the
+    // missing read instead of consuming this interaction test's 180s budget.
+    timeout: 15_000,
+  }));
 }
 
 async function settleBrainTab(page: Page, href: string): Promise<void> {
@@ -155,7 +161,11 @@ async function settleBrainTab(page: Page, href: string): Promise<void> {
   // This state boundary works for populated and clustered graphs without
   // assuming a development-only worker URL.
   await expect(canvas).toHaveAttribute("aria-busy", "false");
-  await expect(page.getByText("Memory graph layout ready", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("status").filter({
+      hasText: "Attack-knowledge brain layout ready",
+    }),
+  ).toBeVisible();
 }
 
 function editablePolicy(policy: ControlPolicy): EditableControlPolicy {
@@ -208,6 +218,12 @@ async function strictAudit(audit: BrowserAudit, testInfo: TestInfo): Promise<voi
   expect(audit.unexpected, "Brain Control emitted an unexpected browser, console, network, or server failure").toEqual([]);
   expect(audit.degradedApi, "Brain Control requires the mounted V2 API for all canonical reads and writes").toEqual([]);
   await audit.assertClean(testInfo);
+}
+
+async function expectSelectedTitaniumValue(control: Locator, value: string): Promise<void> {
+  const selected = (await readTitaniumOptions(control)).filter((option) => option.selected);
+  expect(selected).toHaveLength(1);
+  expect(selected[0]?.value).toBe(value);
 }
 
 function captureRuntimeErrors(page: Page): string[] {
@@ -341,27 +357,23 @@ test(`${TEST_IDS.controls} reads, navigates, exercises every option, saves, and 
   await expect(guided).toBeChecked();
 
   const preference = page.getByRole("combobox", { name: "Personal preference learning", exact: true });
-  expect(await preference.locator("option").allTextContents()).toEqual(PREFERENCE_OPTIONS);
-  await preference.selectOption("disabled");
-  await expect(preference).toHaveValue("disabled");
-  await preference.selectOption("candidate_only");
-  await expect(preference).toHaveValue("candidate_only");
+  expect((await readTitaniumOptions(preference)).map((option) => option.label)).toEqual(PREFERENCE_OPTIONS);
+  await selectTitaniumOption(preference, "disabled", "pointer");
+  await selectTitaniumOption(preference, "candidate_only", "keyboard");
 
   const retention = page.getByRole("combobox", { name: "Default retention", exact: true });
-  expect(await retention.locator("option").allTextContents()).toEqual(RETENTION_OPTIONS);
-  for (const value of ["30", "90", "365", "1095", "never"] as const) {
-    await retention.selectOption(value);
-    await expect(retention).toHaveValue(value);
+  expect((await readTitaniumOptions(retention)).map((option) => option.label)).toEqual(RETENTION_OPTIONS);
+  for (const [index, value] of ["30", "90", "365", "1095", "never"].entries()) {
+    await selectTitaniumOption(retention, value, index % 2 === 0 ? "pointer" : "keyboard");
   }
-  await retention.selectOption("90");
+  await selectTitaniumOption(retention, "90", "keyboard");
 
   const sync = page.getByRole("combobox", { name: "Synchronization scope", exact: true });
-  expect(await sync.locator("option").allTextContents()).toEqual(SYNC_OPTIONS);
-  for (const value of ["disabled", "confirmed", "confirmed_and_verified"] as const) {
-    await sync.selectOption(value);
-    await expect(sync).toHaveValue(value);
+  expect((await readTitaniumOptions(sync)).map((option) => option.label)).toEqual(SYNC_OPTIONS);
+  for (const [index, value] of ["disabled", "confirmed", "confirmed_and_verified"].entries()) {
+    await selectTitaniumOption(sync, value, index % 2 === 0 ? "keyboard" : "pointer");
   }
-  await sync.selectOption("confirmed");
+  await selectTitaniumOption(sync, "confirmed", "pointer");
 
   const strictIsolation = page.getByRole("checkbox", { name: "Strict engagement isolation", exact: true });
   const secretExclusion = page.getByRole("checkbox", {
@@ -421,8 +433,8 @@ test(`${TEST_IDS.controls} reads, navigates, exercises every option, saves, and 
   await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload({ waitUntil: "domcontentloaded" }));
   const reloaded = await payload(await reloadResponse);
   expect(reloaded.policy).toEqual(saved.policy);
-  await expect(retention).toHaveValue("90");
-  await expect(sync).toHaveValue("confirmed");
+  await expectSelectedTitaniumValue(retention, "90");
+  await expectSelectedTitaniumValue(sync, "confirmed");
   await expect(strictIsolation).toBeChecked();
   await expect(secretExclusion).toBeChecked();
   await expectNoFixtureSecretLeakage(page);
@@ -448,7 +460,11 @@ test(`${TEST_IDS.conflict} explains a real version conflict and retries against 
   await page.goto("/brain/control", { waitUntil: "domcontentloaded" });
   const initial = await payload(await initialResponse);
   await expectHeading(page, "Memory Control Center");
-  await page.getByRole("combobox", { name: "Default retention", exact: true }).selectOption("30");
+  await selectTitaniumOption(
+    page.getByRole("combobox", { name: "Default retention", exact: true }),
+    "30",
+    "pointer",
+  );
 
   const concurrent = await browserPutControl(
     page,

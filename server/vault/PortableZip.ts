@@ -7,6 +7,8 @@ export interface PortableZipEntry {
   readonly name: string;
   readonly data?: string | Uint8Array;
   readonly filePath?: string;
+  /** Narrow exception for the reviewed Brain Atlas handoff profile. */
+  readonly approvedObsidianProfile?: typeof APPROVED_OBSIDIAN_PROFILE;
 }
 
 export interface PortableZipResult {
@@ -27,6 +29,18 @@ interface PreparedEntry {
 
 const MAX_ZIP_32 = 0xffff_ffff;
 const MAX_ENTRIES = 60_000;
+const APPROVED_OBSIDIAN_PROFILE = "ti-scale-brain-atlas-v1" as const;
+export const PORTABLE_ZIP_DISABLED_ERROR =
+  "Portable Vault ZIP creation is disabled by operator no-backup policy";
+const APPROVED_OBSIDIAN_PROFILE_PATHS = new Set([
+  ".obsidian/community-plugins.json",
+  ".obsidian/plugins/brain-atlas/main.js",
+  ".obsidian/plugins/brain-atlas/manifest.json",
+  ".obsidian/plugins/brain-atlas/styles.css",
+  ".obsidian/plugins/brain-atlas/data.json",
+  ".obsidian/plugins/brain-atlas/release.json",
+  ".obsidian/plugins/brain-atlas/LICENSE",
+]);
 
 const CRC_TABLE = (() => {
   const values = new Uint32Array(256);
@@ -46,7 +60,7 @@ function updateCrc32(crc: number, bytes: Uint8Array): number {
   return value >>> 0;
 }
 
-function safeArchiveName(value: string): string {
+function safeArchiveName(value: string, approvedProfile?: PortableZipEntry["approvedObsidianProfile"]): string {
   if (!value.trim() || value.includes("\0") || value.startsWith("/") || value.includes("\\")) {
     throw new TypeError("ZIP entry name must be a safe relative path");
   }
@@ -54,8 +68,15 @@ function safeArchiveName(value: string): string {
   if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
     throw new Error("ZIP entry path traversal is not permitted");
   }
-  if (segments.some((segment) => [".obsidian", ".ti-scale"].includes(segment.toLowerCase()))) {
+  if (segments.some((segment) => segment.toLowerCase() === ".ti-scale")) {
     throw new Error("Internal vault and Obsidian settings paths are excluded from portable exports");
+  }
+  if (segments.some((segment) => segment.toLowerCase() === ".obsidian")) {
+    if (approvedProfile !== APPROVED_OBSIDIAN_PROFILE || !APPROVED_OBSIDIAN_PROFILE_PATHS.has(value)) {
+      throw new Error("Only the pinned Brain Atlas profile may be included from Obsidian settings");
+    }
+  } else if (approvedProfile !== undefined) {
+    throw new Error("The approved Obsidian profile marker is valid only for its exact allowlisted paths");
   }
   return value;
 }
@@ -76,7 +97,7 @@ async function crcAndSize(filePath: string): Promise<{ crc32: number; size: numb
 }
 
 async function prepareEntry(entry: PortableZipEntry): Promise<PreparedEntry> {
-  const name = safeArchiveName(entry.name);
+  const name = safeArchiveName(entry.name, entry.approvedObsidianProfile);
   if ((entry.data === undefined) === (entry.filePath === undefined)) {
     throw new TypeError("ZIP entry requires exactly one data or filePath source");
   }
@@ -164,6 +185,11 @@ export async function writePortableZip(
   destination: string,
   now = new Date(),
 ): Promise<PortableZipResult> {
+  void entries;
+  void destination;
+  void now;
+  throw new Error(PORTABLE_ZIP_DISABLED_ERROR);
+  /* c8 ignore start -- unreachable retired portable-archive implementation */
   if (entries.length < 1 || entries.length > MAX_ENTRIES) {
     throw new Error(`Portable ZIP requires between 1 and ${MAX_ENTRIES} entries`);
   }
@@ -200,7 +226,7 @@ export async function writePortableZip(
     for (const entry of prepared) {
       const entryOffset = offset;
       await write(localHeader(entry, timestamp));
-      if (entry.data) await write(entry.data);
+      if (entry.data) await write(entry.data!);
       else {
         for await (const chunk of createReadStream(entry.filePath!, { highWaterMark: 64 * 1024 })) {
           await write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -227,4 +253,5 @@ export async function writePortableZip(
     await rm(temporary, { force: true });
     throw error;
   }
+  /* c8 ignore stop */
 }

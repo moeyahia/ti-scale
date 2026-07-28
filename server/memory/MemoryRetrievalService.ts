@@ -1,12 +1,52 @@
+import { createHash } from "node:crypto";
 import type { MemoryRepository } from "./MemoryRepository";
 import type {
   MemoryNode,
+  MemorySensitivity,
   RetrievalPolicy,
   RetrievedMemory,
 } from "./types";
 import { validateJourney, validateSensitivity } from "./validation";
 import { getMemoryControlPolicy, memoryUseAllowed } from "./MemoryControlPolicy";
-import { memoryNodeMatchesPolicy } from "./MemoryScopePolicy";
+import {
+  memoryNodeMatchesPolicy,
+  memoryScopeMatchesPolicy,
+} from "./MemoryScopePolicy";
+import { autonomousMemoryConfirmationEligible } from "./AutonomousMemoryInfluence";
+
+const SENSITIVITY_RANK: Record<MemorySensitivity, number> = {
+  public: 0,
+  internal: 1,
+  private: 2,
+  restricted: 3,
+};
+const MAX_PERSISTED_REJECTIONS = 100;
+
+export type MemoryRetrievalRejectionReason =
+  | "missing_or_forgotten"
+  | "memory_control_denied"
+  | "lifecycle_status_denied"
+  | "confirmation_state_denied"
+  | "expired"
+  | "sensitivity_denied"
+  | "node_type_denied"
+  | "scope_denied"
+  | "journey_retention_denied"
+  | "context_budget_exceeded"
+  | "result_limit_exceeded";
+
+export interface MemoryRetrievalRejection {
+  /** One-way identity prevents rejected cross-engagement IDs leaking. */
+  readonly candidateHash: string;
+  readonly reason: MemoryRetrievalRejectionReason;
+}
+
+export interface MemoryRetrievalTrace {
+  readonly items: readonly RetrievedMemory[];
+  readonly rejected: readonly MemoryRetrievalRejection[];
+  readonly rejectedCount: number;
+  readonly rejectedTruncated: boolean;
+}
 
 function ftsQuery(source: string): string | undefined {
   const tokens = source.normalize("NFKC").match(/[\p{L}\p{N}_-]+/gu)?.slice(0, 24) ?? [];
@@ -38,6 +78,10 @@ export class MemoryRetrievalService {
   }
 
   retrieve(query: string, policy: RetrievalPolicy): readonly RetrievedMemory[] {
+    return this.retrieveWithTrace(query, policy).items;
+  }
+
+  retrieveWithTrace(query: string, policy: RetrievalPolicy): MemoryRetrievalTrace {
     validateJourney(policy.journey);
     validateSensitivity(policy.maximumSensitivity);
     if (!Number.isSafeInteger(policy.contextBudget) || policy.contextBudget < 0) {
@@ -51,16 +95,30 @@ export class MemoryRetrievalService {
 
     const database = this.#repository.database();
     const control = getMemoryControlPolicy(database);
-    if (!memoryUseAllowed(control, policy.journey)) return [];
+    if (!memoryUseAllowed(control, policy.journey)) {
+      return { items: [], rejected: [], rejectedCount: 0, rejectedTruncated: false };
+    }
     const ranked = new Map<string, RankedCandidate>();
+    const rejected = new Map<string, MemoryRetrievalRejection>();
+    const reject = (candidateId: string, reason: MemoryRetrievalRejectionReason): void => {
+      const candidateHash = createHash("sha256").update(candidateId, "utf8").digest("hex");
+      if (!rejected.has(candidateHash)) rejected.set(candidateHash, { candidateHash, reason });
+    };
     const add = (
       node: MemoryNode,
       signal: RetrievedMemory["signals"][number],
       score: number,
       reason: string,
     ): void => {
-      if (!control.operationalMemoryEnabled && node.nodeType !== "preference") return;
-      if (!this.#eligible(node, policy, statuses)) return;
+      if (!control.operationalMemoryEnabled && node.nodeType !== "preference") {
+        reject(node.id, "memory_control_denied");
+        return;
+      }
+      const rejectionReason = this.#rejectionReason(node, policy, statuses);
+      if (rejectionReason) {
+        reject(node.id, rejectionReason);
+        return;
+      }
       const existing = ranked.get(node.id);
       if (existing) {
         existing.score += score;
@@ -79,6 +137,7 @@ export class MemoryRetrievalService {
     for (const id of policy.exactNodeIds ?? []) {
       const node = this.#repository.getNode(id);
       if (node) add(node, "exact", 10, "Explicitly selected by stable memory ID");
+      else reject(id, "missing_or_forgotten");
     }
 
     const match = policy.exactNodeIdsOnly ? undefined : ftsQuery(query);
@@ -120,7 +179,7 @@ export class MemoryRetrievalService {
           const placeholders = batch.map(() => "?").join(",");
           const edges = database.prepare(`
             SELECT source_node_id, target_node_id, edge_type, explanation
-            FROM memory_edges
+            FROM memory_edges_safe
             WHERE lifecycle_status IN ('confirmed', 'verified')
               AND (expires_at IS NULL OR expires_at > ?)
               AND (source_node_id IN (${placeholders}) OR target_node_id IN (${placeholders}))
@@ -161,9 +220,15 @@ export class MemoryRetrievalService {
       return rightScore - leftScore || right.node.updatedAt.localeCompare(left.node.updatedAt);
     });
     for (const item of sorted) {
-      if (selected.length >= limit) break;
+      if (selected.length >= limit) {
+        reject(item.node.id, "result_limit_exceeded");
+        continue;
+      }
       const tokens = approximateTokens(item.node);
-      if (budgetUsed + tokens > policy.contextBudget) continue;
+      if (budgetUsed + tokens > policy.contextBudget) {
+        reject(item.node.id, "context_budget_exceeded");
+        continue;
+      }
       budgetUsed += tokens;
       selected.push({
         node: item.node,
@@ -172,7 +237,50 @@ export class MemoryRetrievalService {
         signals: [...item.signals],
       });
     }
-    return selected;
+    const allRejected = [...rejected.values()];
+    return {
+      items: selected,
+      rejected: allRejected.slice(0, MAX_PERSISTED_REJECTIONS),
+      rejectedCount: allRejected.length,
+      rejectedTruncated: allRejected.length > MAX_PERSISTED_REJECTIONS,
+    };
+  }
+
+  #rejectionReason(
+    node: MemoryNode,
+    policy: RetrievalPolicy,
+    statuses: readonly ("confirmed" | "verified")[],
+  ): MemoryRetrievalRejectionReason | undefined {
+    if (!statuses.includes(node.lifecycleStatus as "confirmed" | "verified")) {
+      return "lifecycle_status_denied";
+    }
+    if (
+      policy.journey === "autonomous"
+      && !autonomousMemoryConfirmationEligible(node)
+    ) {
+      return "confirmation_state_denied";
+    }
+    if (node.expiresAt && Date.parse(node.expiresAt) <= Date.parse(this.#repository.now())) {
+      return "expired";
+    }
+    if (SENSITIVITY_RANK[node.sensitivity] > SENSITIVITY_RANK[policy.maximumSensitivity]) {
+      return "sensitivity_denied";
+    }
+    if (policy.allowedNodeTypes && !policy.allowedNodeTypes.includes(node.nodeType)) {
+      return "node_type_denied";
+    }
+    if (!memoryScopeMatchesPolicy(this.#repository.database(), node, policy)) {
+      return "scope_denied";
+    }
+    const retention = node.retentionPolicy;
+    if (
+      (retention.journeys && !retention.journeys.includes(policy.journey)) ||
+      (policy.journey === "autonomous" && retention.allowAutonomous === false) ||
+      (policy.journey === "guided" && retention.allowGuided === false)
+    ) {
+      return "journey_retention_denied";
+    }
+    return undefined;
   }
 
   #eligible(

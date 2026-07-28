@@ -8,6 +8,7 @@ export type ControlPlane = (typeof CONTROL_PLANES)[number];
 export type ControlPlaneLeaseErrorCode =
   | "run_not_found"
   | "control_plane_mismatch"
+  | "journey_unsupported"
   | "lease_conflict"
   | "lease_missing"
   | "lease_expired"
@@ -51,6 +52,7 @@ interface LeaseRow {
 interface RunRow {
   id: string;
   control_plane: ControlPlane;
+  mission_control_plane: ControlPlane;
 }
 
 export interface AcquireControlPlaneLeaseInput {
@@ -137,13 +139,17 @@ export class ControlPlaneLeaseService {
 
     const lease = inImmediateTransaction(this.database, () => {
       const run = this.database.prepare(
-        "SELECT id, control_plane FROM runs WHERE id = ?",
+        `SELECT r.id, r.control_plane, m.control_plane AS mission_control_plane
+         FROM runs r JOIN missions m ON m.id = r.mission_id WHERE r.id = ?`,
       ).get(runId) as RunRow | undefined;
       if (!run) throw new ControlPlaneLeaseError("run_not_found", `Run ${runId} does not exist`);
-      if (run.control_plane !== input.controlPlane) {
+      if (
+        run.control_plane !== input.controlPlane ||
+        run.mission_control_plane !== input.controlPlane
+      ) {
         throw new ControlPlaneLeaseError(
           "control_plane_mismatch",
-          `Run ${runId} belongs to ${run.control_plane}, not ${input.controlPlane}`,
+          `Run ${runId} and its mission are not exclusively owned by ${input.controlPlane}`,
         );
       }
 
@@ -219,13 +225,17 @@ export class ControlPlaneLeaseService {
     const owner = stableIdentifier(input.leaseOwner, "lease owner");
     const now = input.now ?? new Date();
     const run = this.database.prepare(
-      "SELECT id, control_plane FROM runs WHERE id = ?",
+      `SELECT r.id, r.control_plane, m.control_plane AS mission_control_plane
+       FROM runs r JOIN missions m ON m.id = r.mission_id WHERE r.id = ?`,
     ).get(runId) as RunRow | undefined;
     if (!run) throw new ControlPlaneLeaseError("run_not_found", `Run ${runId} does not exist`);
-    if (run.control_plane !== input.controlPlane) {
+    if (
+      run.control_plane !== input.controlPlane ||
+      run.mission_control_plane !== input.controlPlane
+    ) {
       throw new ControlPlaneLeaseError(
         "control_plane_mismatch",
-        `Run ${runId} belongs to ${run.control_plane}, not ${input.controlPlane}`,
+        `Run ${runId} and its mission are not exclusively owned by ${input.controlPlane}`,
       );
     }
     const row = this.database.prepare(
@@ -291,7 +301,21 @@ export class ControlPlaneLeaseService {
     readonly leaseToken: string;
     readonly now?: Date;
   }): void {
-    const authority = this.assertMutationAuthority(input);
+    // Release is cleanup, not mission control. It remains allowed after an
+    // explicit ownership transfer so an old Ti-Scale process can retire only
+    // its own token without touching the legacy-owned mission or run rows.
+    const runId = stableIdentifier(input.runId, "run ID");
+    const owner = stableIdentifier(input.leaseOwner, "lease owner");
+    const row = this.database.prepare(
+      "SELECT * FROM control_plane_leases WHERE run_id = ? AND released_at IS NULL",
+    ).get(runId) as LeaseRow | undefined;
+    if (
+      !row || row.control_plane !== input.controlPlane ||
+      row.lease_owner !== owner || !tokenMatches(input.leaseToken, row.lease_token_hash)
+    ) {
+      throw new ControlPlaneLeaseError("lease_token_invalid", `Run ${runId} release authority is invalid`);
+    }
+    const authority = leaseFromRow(row);
     const releasedAt = (input.now ?? new Date()).toISOString();
     const result = this.database.prepare(`
       UPDATE control_plane_leases

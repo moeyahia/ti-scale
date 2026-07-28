@@ -1,4 +1,3 @@
-import type { CSSProperties } from "react";
 import type { TraceRecord, TraceSummaryRecord } from "../../domain/types/operations";
 import { StatusPill } from "../../design-system/components/Primitives";
 import { formatTime, JsonDetails } from "../runs/OperationalSurface";
@@ -9,25 +8,29 @@ function compactDuration(milliseconds: number): string {
   return `${Math.floor(milliseconds / 60_000)}m ${Math.round((milliseconds % 60_000) / 1_000)}s`;
 }
 
-function barStyle(record: TraceRecord, trace: TraceSummaryRecord): CSSProperties {
+function barGeometry(record: TraceRecord, trace: TraceSummaryRecord): { offset: number; width: number } {
   const traceStart = Date.parse(trace.startedAt);
   const traceDuration = Math.max(1, trace.durationMs);
   const recordStart = Date.parse(record.startedAt);
   const offset = Number.isFinite(recordStart) ? Math.max(0, Math.min(98, ((recordStart - traceStart) / traceDuration) * 100)) : 0;
   const width = Math.max(1.5, Math.min(100 - offset, (Math.max(record.durationMs, traceDuration * .015) / traceDuration) * 100));
-  return { "--trace-offset": `${offset}%`, "--trace-width": `${width}%` } as CSSProperties;
+  return { offset, width };
 }
 
 export function TraceWaterfall({ trace, records }: { trace: TraceSummaryRecord; records: TraceRecord[] }) {
   const chronological = [...records].reverse();
   return <ol className="os-trace-waterfall" aria-label={`Correlated records for trace ${trace.traceId}`}>
-    {chronological.map((record) => <li key={record.id}>
+    {chronological.map((record) => {
+      const geometry = barGeometry(record, trace);
+      return <li key={record.id}>
       <div className="os-trace-record-heading">
         <div><span className="os-trace-kind">{record.kind.replace("_", " ")}</span><strong>{record.title}</strong></div>
         <StatusPill status={record.status} />
       </div>
       <div className="os-trace-track" aria-hidden="true">
-        <span className={`os-trace-bar os-trace-bar--${record.kind}`} style={barStyle(record, trace)} />
+        <svg viewBox="0 0 100 4" preserveAspectRatio="none" focusable="false">
+          <rect className={`os-trace-bar os-trace-bar--${record.kind}`} x={geometry.offset} y="0" width={geometry.width} height="4" />
+        </svg>
       </div>
       <div className="os-trace-record-body">
         <p>{record.summary}</p>
@@ -47,6 +50,6 @@ export function TraceWaterfall({ trace, records }: { trace: TraceSummaryRecord; 
           raw: record.raw,
         }} />
       </div>
-    </li>)}
+    </li>})}
   </ol>;
 }

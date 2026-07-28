@@ -11,6 +11,7 @@ export function completeRuntimeManifests(
     readonly providerHealthy?: boolean;
     readonly toolAvailable?: boolean;
     readonly mcpStatus?: "healthy" | "degraded" | "offline" | "unconfigured";
+    readonly catalogObservedAt?: string;
   } = {},
 ): RuntimeSourceManifests {
   return {
@@ -74,7 +75,7 @@ export function completeRuntimeManifests(
         id: "test-provider",
         authenticated: true,
         healthy: options.providerHealthy ?? true,
-        catalogObservedAt: "2026-07-16T00:00:00.000Z",
+        catalogObservedAt: options.catalogObservedAt ?? "2026-07-16T12:00:00.000Z",
         models: [
           {
             id: "test-model",

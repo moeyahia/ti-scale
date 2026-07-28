@@ -7,6 +7,7 @@ import {
 } from "../supervisor";
 import { DurableOrchestrationError, type DurableAction, type DurableActionIntent } from "./types";
 import { canonicalJson, parseObject } from "./serialization";
+import type { RuntimeModelBindingReceipt } from "../command-runtime/types";
 
 interface ActionRow {
   readonly id: string;
@@ -41,6 +42,7 @@ function metadata(row: ActionRow): {
   kind: DurableAction["kind"];
   idempotent: boolean;
   destructive: boolean;
+  runtimeModelBinding: RuntimeModelBindingReceipt | null;
 } {
   const stored = parseObject(row.normalized_arguments_json);
   const orchestration = stored.orchestration && typeof stored.orchestration === "object"
@@ -50,6 +52,12 @@ function metadata(row: ActionRow): {
     ? (stored.input as Record<string, unknown>)
     : {};
   const kind = orchestration.kind;
+  const candidateBinding = orchestration.runtimeModelBinding;
+  const runtimeModelBinding = candidateBinding
+    && typeof candidateBinding === "object"
+    && !Array.isArray(candidateBinding)
+    ? candidateBinding as RuntimeModelBindingReceipt
+    : null;
   return {
     arguments: input,
     kind:
@@ -58,6 +66,7 @@ function metadata(row: ActionRow): {
         : "tool",
     idempotent: orchestration.idempotent === true,
     destructive: orchestration.destructive === true,
+    runtimeModelBinding,
   };
 }
 
@@ -94,6 +103,7 @@ function mapAction(row: ActionRow): DurableAction {
     createdAt: row.created_at,
     startedAt: row.started_at,
     endedAt: row.ended_at,
+    runtimeModelBinding: details.runtimeModelBinding,
   };
 }
 
@@ -135,6 +145,7 @@ export class ActionRepository {
             idempotent: input.intent.idempotent,
             destructive: input.intent.destructive,
             planVersion: input.intent.planVersion,
+            runtimeModelBinding: input.intent.runtimeModelBinding ?? null,
           },
         }),
         input.intent.target,

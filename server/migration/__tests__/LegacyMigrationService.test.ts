@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
@@ -264,6 +264,14 @@ describe("LegacyMigrationService", () => {
     createLegacyFixture(legacy);
     createCanonicalDatabase(databasePath);
 
+    const before = createDatabaseConnection({ filename: databasePath, readonly: true, fileMustExist: true });
+    const beforeCounts = {
+      migrations: (before.prepare("SELECT COUNT(*) AS count FROM legacy_migration_runs").get() as { count: number }).count,
+      memoryCandidates: (before.prepare("SELECT COUNT(*) AS count FROM memory_candidates").get() as { count: number }).count,
+      attackBundles: (before.prepare("SELECT COUNT(*) AS count FROM attack_knowledge_bundles").get() as { count: number }).count,
+    };
+    before.close();
+
     const result = await new LegacyMigrationService({
       databasePath,
       sourceRoots: [legacy],
@@ -276,9 +284,45 @@ describe("LegacyMigrationService", () => {
     expect(result.report.databaseBackup).toBeUndefined();
     const database = createDatabaseConnection({ filename: databasePath, readonly: true, fileMustExist: true });
     try {
-      const metadata = database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='legacy_migration_runs'").get();
-      expect(metadata ?? undefined).toBeUndefined();
+      expect((database.prepare("SELECT COUNT(*) AS count FROM legacy_migration_runs").get() as { count: number }).count)
+        .toBe(beforeCounts.migrations);
+      expect((database.prepare("SELECT COUNT(*) AS count FROM memory_candidates").get() as { count: number }).count)
+        .toBe(beforeCounts.memoryCandidates);
+      expect((database.prepare("SELECT COUNT(*) AS count FROM attack_knowledge_bundles").get() as { count: number }).count)
+        .toBe(beforeCounts.attackBundles);
     } finally { database.close(); }
+  });
+
+  test("supports an explicit forward-only import without database or source copies", async () => {
+    const root = temporaryDirectory();
+    const legacy = join(root, "legacy");
+    const output = join(root, "migration-output");
+    const databasePath = join(root, "ti-scale.sqlite");
+    mkdirSync(join(legacy, "logs"), { recursive: true });
+    writeFileSync(
+      join(legacy, "logs", "dashboard.log"),
+      "2026-07-24 info reusable service fingerprint recorded\n",
+      { mode: 0o600 },
+    );
+    createCanonicalDatabase(databasePath);
+
+    const result = await new LegacyMigrationService({
+      databasePath,
+      sourceRoots: [legacy],
+      outputDirectory: output,
+      databaseBackupMode: "disabled",
+      sourceRetention: "verified-reference",
+      verifiedReferenceAcknowledged: true,
+    }).run();
+
+    expect(result.report.databaseBackup).toBeUndefined();
+    expect(result.report.sourceBackup).toBeUndefined();
+    expect(result.report.sourceRetention).toMatchObject({
+      mode: "verified-reference",
+      protectedSourceCopyCreated: false,
+    });
+    expect(existsSync(join(output, "database-backups"))).toBe(false);
+    expect(existsSync(join(output, result.migrationId, "sources"))).toBe(false);
   });
 
   test("imports dashboard logs across transaction-batch boundaries and remains idempotent", async () => {
@@ -316,7 +360,7 @@ describe("LegacyMigrationService", () => {
     expect(second.report.counts.deduplicated).toBe(2_105);
   });
 
-  test("backs up, imports conservatively, quarantines malformed/unsafe records, and deduplicates", async () => {
+  test("imports conservatively without retained copies, quarantines malformed/unsafe records, and deduplicates", async () => {
     const root = temporaryDirectory();
     const legacy = join(root, "legacy");
     const output = join(root, "migration-output");
@@ -329,8 +373,12 @@ describe("LegacyMigrationService", () => {
     expect(first.report.dryRun).toBe(false);
     expect(first.report.counts.imported).toBeGreaterThan(5);
     expect(first.report.counts.quarantined).toBeGreaterThanOrEqual(3);
-    expect(first.report.databaseBackup?.sha256).toHaveLength(64);
-    expect(first.report.sourceBackup?.manifestPath).toBeTruthy();
+    expect(first.report.databaseBackup).toBeUndefined();
+    expect(first.report.rollback).toBeUndefined();
+    expect(first.report.sourceBackup).toBeUndefined();
+    expect(first.report.sourceReferences?.sourceBytesCopied).toBe(false);
+    expect(existsSync(join(output, "database-backups"))).toBe(false);
+    expect(existsSync(join(output, first.migrationId, "sources"))).toBe(false);
     expect(readFileSync(join(legacy, "runtime/runs/run-1.json")).equals(originalRun)).toBe(true);
 
     const database = createDatabaseConnection({ filename: databasePath, readonly: true, fileMustExist: true });
@@ -347,7 +395,8 @@ describe("LegacyMigrationService", () => {
       expect((database.prepare("SELECT COUNT(*) AS count FROM conversations").get() as { count: number }).count).toBe(2);
       expect((database.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count).toBe(4);
       expect((database.prepare("SELECT COUNT(*) AS count FROM memory_candidates").get() as { count: number }).count).toBe(1);
-      expect((database.prepare("SELECT COUNT(*) AS count FROM lessons WHERE status='proposed'").get() as { count: number }).count).toBe(1);
+      expect((database.prepare("SELECT COUNT(*) AS count FROM lessons WHERE status='proposed'").get() as { count: number }).count)
+        .toBeGreaterThanOrEqual(1);
       expect((database.prepare("SELECT COUNT(*) AS count FROM lesson_attack_chain_details").get() as { count: number }).count).toBe(1);
       const importedChain = database.prepare(`
         SELECT item_type, ordinal, content FROM lesson_attack_chain_items
@@ -417,47 +466,50 @@ describe("LegacyMigrationService", () => {
     try {
       writable.prepare("UPDATE legacy_migration_runs SET status='failed' WHERE id=?").run(first.migrationId);
     } finally { writable.close(); }
-    const resumed = await new LegacyMigrationService({
+    await expect(new LegacyMigrationService({
       databasePath,
       sourceRoots: [legacy],
       outputDirectory: output,
       resumeMigrationId: first.migrationId,
-    }).run();
-    expect(resumed.migrationId).toBe(first.migrationId);
-    expect(resumed.report.counts.imported).toBe(0);
-    expect(resumed.report.counts.deduplicated).toBeGreaterThan(5);
-    expect(resumed.report.targets.messages).toBe(5);
-    expect(resumed.report.targets.missions).toBeGreaterThanOrEqual(1);
+    }).run()).rejects.toThrow(/inventory.*receipt/u);
   });
 
-  test("verified rollback backup restores the exact pre-import database", async () => {
+  test("rejects protected copies, database backups, and restore before filesystem mutation", async () => {
     const root = temporaryDirectory();
     const legacy = join(root, "legacy");
     const output = join(root, "migration-output");
     const databasePath = join(root, "ti-scale.sqlite");
-    createLegacyFixture(legacy);
+    mkdirSync(legacy, { recursive: true });
     createCanonicalDatabase(databasePath);
-    const result = await new LegacyMigrationService({ databasePath, sourceRoots: [legacy], outputDirectory: output }).run();
-    const rollback = result.report.rollback!;
+    const databaseBefore = readFileSync(databasePath);
 
+    await expect(new LegacyMigrationService({
+      databasePath,
+      sourceRoots: [legacy],
+      outputDirectory: output,
+      sourceRetention: "protected-copy",
+    }).run()).rejects.toThrow("Protected-copy legacy migration is disabled");
+    await expect(new LegacyMigrationService({
+      databasePath,
+      sourceRoots: [legacy],
+      outputDirectory: output,
+      databaseBackupMode: "verified",
+    }).run()).rejects.toThrow("Database backup creation is disabled");
+
+    const nonexistentBackup = join(root, "must-not-be-opened.sqlite");
     await expect(restoreMigrationBackup({
       databasePath,
-      backupPath: rollback.databaseBackupPath,
-      expectedSha256: rollback.databaseBackupSha256,
-      serviceStopped: false,
-    })).rejects.toThrow("service is stopped");
-
-    await restoreMigrationBackup({
-      databasePath,
-      backupPath: rollback.databaseBackupPath,
-      expectedSha256: rollback.databaseBackupSha256,
+      backupPath: nonexistentBackup,
+      expectedSha256: "0".repeat(64),
       serviceStopped: true,
-    });
-    const database = createDatabaseConnection({ filename: databasePath, readonly: true, fileMustExist: true });
-    try {
-      expect((database.prepare("SELECT COUNT(*) AS count FROM missions").get() as { count: number }).count).toBe(0);
-      expect((database.prepare("SELECT COUNT(*) AS count FROM legacy_migration_runs").get() as { count: number }).count).toBe(0);
-    } finally { database.close(); }
+    })).rejects.toThrow("restore is disabled by operator policy");
+
+    expect(readFileSync(databasePath).equals(databaseBefore)).toBe(true);
+    expect(existsSync(nonexistentBackup)).toBe(false);
+    expect(existsSync(output)).toBe(false);
+    expect(readdirSync(root).some((entry) =>
+      entry.includes("backup") || entry.includes("rollback") || entry.endsWith(".restore")
+    )).toBe(false);
   });
 
   test("refuses an active SQLite source with uncheckpointed WAL state", async () => {

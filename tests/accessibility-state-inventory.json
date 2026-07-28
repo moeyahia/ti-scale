@@ -107,6 +107,41 @@
       "fixture": "live registries and recommended defaults"
     },
     {
+      "id": "autonomous-intake-outcome",
+      "route": "/missions/new/autonomous",
+      "surface": "Autonomous mission intake outcome",
+      "kind": "material",
+      "fixture": "normalized loopback scope and recommended defaults"
+    },
+    {
+      "id": "autonomous-intake-contract-expanded",
+      "route": "/missions/new/autonomous",
+      "surface": "Autonomous mission intake contract with the registry policy matrix expanded",
+      "kind": "material",
+      "fixture": "normalized loopback scope and live action-class registry"
+    },
+    {
+      "id": "autonomous-intake-team",
+      "route": "/missions/new/autonomous",
+      "surface": "Autonomous mission intake specialist team",
+      "kind": "material",
+      "fixture": "normalized loopback scope and current runtime readiness"
+    },
+    {
+      "id": "autonomous-intake-context",
+      "route": "/missions/new/autonomous",
+      "surface": "Autonomous mission intake Second Brain context",
+      "kind": "material",
+      "fixture": "normalized loopback scope and current scoped memory candidates"
+    },
+    {
+      "id": "autonomous-intake-review-blocked",
+      "route": "/missions/new/autonomous",
+      "surface": "Autonomous mission intake fail-closed review",
+      "kind": "material",
+      "fixture": "normalized loopback scope and current blocked preflight"
+    },
+    {
       "id": "guided-intake-scope",
       "route": "/missions/new/guided",
       "surface": "Guided mission intake",
@@ -203,6 +238,13 @@
       "surface": "System settings status",
       "kind": "material",
       "fixture": "system registries"
+    },
+    {
+      "id": "particle-module-transition-review",
+      "route": "/motion-lab/particle-module-transition",
+      "surface": "Review-only particle-to-module transition",
+      "kind": "material",
+      "fixture": "deterministic local particle geometry"
     }
   ]
 }

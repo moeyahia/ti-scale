@@ -5,6 +5,7 @@ import type { GuidedDecision } from "../../../src/domain/types/runtimeV2";
 import {
   DecisionCard,
   guidedDecisionActionKind,
+  guidedDecisionReadableSummary,
 } from "../../../src/features/decisions/DecisionsPage";
 
 const BASE_DECISION: Omit<GuidedDecision, "requestedParameters"> = {
@@ -49,7 +50,7 @@ describe("Guided decision action-kind safety", () => {
 
     expect(guidedDecisionActionKind(requestedParameters)).toBe("manual");
     const markup = renderDecision(requestedParameters);
-    expect(markup).toContain("This operator-run step cannot be dispatched through MCP.");
+    expect(markup).toContain("This operator-run step cannot be dispatched by Ti-Scale.");
     expect(markup).not.toContain("Run this exact step");
   });
 
@@ -88,6 +89,64 @@ describe("Guided decision action-kind safety", () => {
     expect(guidedDecisionActionKind(requestedParameters)).toBe("tool");
     const markup = renderDecision(requestedParameters);
     expect(markup).toContain("Run this exact step");
-    expect(markup).not.toContain("This operator-run step cannot be dispatched through MCP.");
+    expect(markup).not.toContain("This operator-run step cannot be dispatched by Ti-Scale.");
+  });
+
+  test("explains a reviewed local process without mislabeling it as MCP", () => {
+    const requestedParameters = {
+      actionType: "kali:ncat-tcp-connect",
+      actionClass: "active_host_discovery",
+      target: "tcp://127.0.0.1:443",
+      arguments: {
+        schemaVersion: "ti-scale.reviewed-local-tool-action.v1",
+        executionBinding: "reviewed_local_process",
+        toolId: "kali:ncat-tcp-connect",
+        parameters: { workspace: "/engagements", target: "127.0.0.1", port: 443 },
+      },
+      kind: "tool",
+      idempotent: true,
+      destructive: false,
+    };
+    expect(guidedDecisionReadableSummary(requestedParameters)).toEqual({
+      action: "kali:ncat-tcp-connect",
+      target: "tcp://127.0.0.1:443",
+      execution: "Reviewed local specialist process; no MCP or public model",
+      exactInputs: [
+        { label: "target", value: "127.0.0.1" },
+        { label: "port", value: "443" },
+      ],
+    });
+    const markup = renderDecision(requestedParameters);
+    expect(markup).toContain("What Ti-Scale will do");
+    expect(markup).toContain("Reviewed local specialist process; no MCP or public model");
+  });
+
+  test("keeps manual-only decision mutations visible while tool dispatch stays disabled", () => {
+    const markup = renderToStaticMarkup(
+      <NavigationProvider>
+        <DecisionCard
+          decision={{
+            ...BASE_DECISION,
+            requestedParameters: {
+              action: {
+                kind: "tool",
+                actionType: "bounded_header_probe",
+                target: "fixture.local",
+              },
+            },
+          }}
+          runtimeAvailable
+          toolExecutionAvailable={false}
+          onChanged={() => undefined}
+        />
+      </NavigationProvider>,
+    );
+
+    expect(markup).toContain("Agent tool execution is unavailable in this Guided runtime mode.");
+    expect(markup).toContain("Run this exact step");
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>[\s\S]*?Run this exact step[\s\S]*?<\/button>/);
+    expect(markup).toContain("Reject and replan");
+    expect(markup).toContain("Skip exact step");
+    expect(markup).toContain("Stop mission");
   });
 });

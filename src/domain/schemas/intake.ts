@@ -1,5 +1,6 @@
 import { array, boolean, nonEmpty, number, object, schema, string, stringList, type JsonRecord } from "./common";
-import type { AutonomousMissionRequest, GuidedMissionRequest, MissionCreateRequest } from "../types/commandOs";
+import type { AutonomousMissionRequest, GuidedMissionRequest, GuidedReconnaissanceSelection, GuidedTcpPortPresetId, MissionCreateRequest } from "../types/commandOs";
+import { parseAutonomousPlanningSelection } from "./commandOs";
 import type {
   ActionPolicyState,
   BudgetPresetId,
@@ -75,7 +76,7 @@ function parseActionRegistry(value: unknown): IntakeActionClassRegistry {
   const item = object(value, "action-class registry");
   return {
     journey: literal(item.journey, ["autonomous", "guided"], "registry journey"),
-    presetId: literal(item.presetId, ["safe_recon", "external_web_assessment", "internal_network_assessment", "active_directory_lab", "cloud_read_only", "full_authorized_lab_compromise", "custom"], "policy preset"),
+    presetId: literal(item.presetId, ["safe_recon", "external_web_assessment", "internal_network_assessment", "active_directory_lab", "cloud_read_only", "htb_web_full_path", "full_authorized_lab_compromise", "custom"], "policy preset"),
     destructivePolicy: literal(item.destructivePolicy, ["prohibited", "validate_without_executing", "bounded_lab_only"], "destructive policy"),
     classes: recordOf(item.classes, "action classes", parseActionClass),
     autonomousLaunchReady: boolean(item.autonomousLaunchReady, "Autonomous launch readiness"),
@@ -117,7 +118,7 @@ function parseDeliverable(value: unknown): IntakeDeliverable {
   };
 }
 
-const TEMPLATE_IDS = ["safe_recon", "external_web_assessment", "internal_network_assessment", "active_directory_lab", "cloud_read_only", "full_authorized_lab_compromise", "custom"] as const;
+const TEMPLATE_IDS = ["safe_recon", "external_web_assessment", "internal_network_assessment", "active_directory_lab", "cloud_read_only", "htb_web_full_path", "full_authorized_lab_compromise", "custom"] as const;
 const BUDGET_IDS = ["quick", "standard", "deep", "custom"] as const;
 
 function parseTemplate(value: unknown): IntakeMissionTemplate {
@@ -160,6 +161,77 @@ function parseField(value: unknown): IntakeFieldDefinition {
   return { id: nonEmpty(item.id, "field id"), label: nonEmpty(item.label, "field label"), purpose: nonEmpty(item.purpose, "field purpose"), example: nonEmpty(item.example, "field example"), optional: boolean(item.optional, "field optional"), structuredWhenPossible: boolean(item.structuredWhenPossible, "field structure marker") };
 }
 
+const GUIDED_TCP_PRESET_IDS = ["focused_services", "web_services", "remote_management"] as const;
+
+function parseTcpPorts(value: unknown, label: string): number[] {
+  return array(value, label).map((candidate, index) => {
+    const port = number(candidate, `${label}[${index}]`);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+      throw new Error(`${label}[${index}] must be an individual TCP port from 1 through 65535`);
+    }
+    return port;
+  });
+}
+
+function parseGuidedReconnaissance(value: unknown): GuidedReconnaissanceSelection {
+  const item = object(value, "Guided reconnaissance selection");
+  const mode = literal(item.mode, ["host_liveness", "tcp_service_scan"], "Guided reconnaissance mode");
+  if (mode === "host_liveness") return { mode };
+  const portSelection = object(item.portSelection, "Guided TCP port selection");
+  const source = literal(portSelection.source, ["preset", "custom"], "Guided TCP port source");
+  const ports = parseTcpPorts(portSelection.ports, "Guided TCP ports");
+  return source === "preset"
+    ? {
+        mode,
+        portSelection: {
+          source,
+          presetId: literal(portSelection.presetId, GUIDED_TCP_PRESET_IDS, "Guided TCP preset") as GuidedTcpPortPresetId,
+          presetVersion: number(portSelection.presetVersion, "Guided TCP preset version"),
+          ports,
+        },
+      }
+    : { mode, portSelection: { source, ports } };
+}
+
+function parseGuidedReconnaissanceRegistry(value: unknown): IntakeRegistrySnapshot["guidedReconnaissance"] {
+  const root = object(value, "Guided reconnaissance registry");
+  const custom = object(root.customPorts, "Guided custom-port rules");
+  const registryVersion = number(root.registryVersion, "Guided reconnaissance registry version");
+  if (registryVersion !== 1) throw new Error("Guided reconnaissance registry version is unsupported");
+  return {
+    registryVersion: 1,
+    modes: array(root.modes, "Guided reconnaissance modes").map((value) => {
+      const mode = object(value, "Guided reconnaissance mode");
+      if (mode.manualFallbackAvailable !== true) throw new Error("Guided reconnaissance mode must preserve manual fallback");
+      return {
+        id: literal(mode.id, ["host_liveness", "tcp_service_scan"], "Guided reconnaissance mode ID"),
+        label: nonEmpty(mode.label, "Guided reconnaissance label"),
+        description: nonEmpty(mode.description, "Guided reconnaissance description"),
+        toolId: nonEmpty(mode.toolId, "Guided reconnaissance tool"),
+        readiness: literal(mode.readiness, ["ready", "unavailable"], "Guided reconnaissance readiness"),
+        readinessExplanation: nonEmpty(mode.readinessExplanation, "Guided reconnaissance readiness explanation"),
+        remediation: nonEmpty(mode.remediation, "Guided reconnaissance remediation"),
+        manualFallbackAvailable: true,
+      };
+    }),
+    tcpPortPresets: array(root.tcpPortPresets, "Guided TCP presets").map((value) => {
+      const preset = object(value, "Guided TCP preset");
+      return {
+        id: literal(preset.id, GUIDED_TCP_PRESET_IDS, "Guided TCP preset ID") as GuidedTcpPortPresetId,
+        version: number(preset.version, "Guided TCP preset version"),
+        label: nonEmpty(preset.label, "Guided TCP preset label"),
+        description: nonEmpty(preset.description, "Guided TCP preset description"),
+        ports: parseTcpPorts(preset.ports, "Guided TCP preset ports"),
+      };
+    }),
+    customPorts: {
+      maximumIndividualPorts: number(custom.maximumIndividualPorts, "Guided custom-port limit"),
+      example: nonEmpty(custom.example, "Guided custom-port example"),
+      explanation: nonEmpty(custom.explanation, "Guided custom-port explanation"),
+    },
+  };
+}
+
 export function parseIntakeRegistrySnapshot(payload: unknown): IntakeRegistrySnapshot {
   const root = object(payload, "intake registry"); schema(root);
   const source = object(root.source, "intake registry source");
@@ -177,6 +249,7 @@ export function parseIntakeRegistrySnapshot(payload: unknown): IntakeRegistrySna
     templates: { templates: recordOf(templates.templates, "mission templates", (value) => parseTemplate(value)) },
     safeStops: { mandatory: array(safeStops.mandatory, "mandatory safe stops").map(parseSafeStop), optional: array(safeStops.optional, "optional safe stops").map(parseSafeStop) },
     budgets: recordOf(root.budgets, "budget presets", (value) => parseBudget(value)) as IntakeRegistrySnapshot["budgets"],
+    guidedReconnaissance: parseGuidedReconnaissanceRegistry(root.guidedReconnaissance),
   };
 }
 
@@ -189,6 +262,9 @@ function parseGuidedRequest(root: JsonRecord): GuidedMissionRequest {
     explanationDepth: literal(root.explanationDepth, ["concise", "balanced", "deep"], "Guided explanation depth"),
     executionPreference: literal(root.executionPreference, ["manual", "single_step_agent"], "Guided execution preference"),
     evidenceExpectations: stringList(root.evidenceExpectations, "Guided evidence expectations"),
+    ...(root.guidedReconnaissance === undefined ? {} : {
+      guidedReconnaissance: parseGuidedReconnaissance(root.guidedReconnaissance),
+    }),
   };
 }
 
@@ -197,18 +273,55 @@ function parseAutonomousRequest(root: JsonRecord): AutonomousMissionRequest {
   const contract = object(root.contract, "Autonomous contract");
   const tokenBudget = contract.tokenBudget === undefined ? undefined : number(contract.tokenBudget, "token budget");
   const costBudget = contract.costBudget === undefined ? undefined : number(contract.costBudget, "cost budget");
+  const agentModelAssignments = array(
+    contract.agentModelAssignments ?? [],
+    "agent model assignments",
+  ).map((value, index) => {
+    const assignment = object(value, `agent model assignment ${index + 1}`);
+    return {
+      agentId: nonEmpty(assignment.agentId, "agent model assignment agent ID"),
+      primaryConfigurationId: nonEmpty(
+        assignment.primaryConfigurationId,
+        "agent model assignment primary configuration ID",
+      ),
+      fallbackConfigurationId: assignment.fallbackConfigurationId === null
+        ? null
+        : nonEmpty(
+            assignment.fallbackConfigurationId,
+            "agent model assignment fallback configuration ID",
+          ),
+    };
+  });
   return {
     journey: "autonomous", launch: true, title: nonEmpty(root.title, "Autonomous title"), objective: nonEmpty(root.objective, "Autonomous objective"), successCriteria: stringList(root.successCriteria, "Autonomous success criteria"),
     authorization: {
       ...(optionalString(authorization.engagementId, "engagement ID") ? { engagementId: optionalString(authorization.engagementId, "engagement ID") } : {}),
+      ...(authorization.environmentClassification === undefined ? {} : {
+        environmentClassification: literal(
+          authorization.environmentClassification,
+          ["client_or_public", "internal", "htb", "ctf", "local_disposable_lab"],
+          "environment classification",
+        ),
+      }),
       allowedTargets: stringList(authorization.allowedTargets, "allowed targets"), prohibitedTargets: stringList(authorization.prohibitedTargets, "prohibited targets"), authorizationConfirmed: boolean(authorization.authorizationConfirmed, "authorization acknowledgement"),
       ...(optionalString(authorization.timeWindow, "time window") ? { timeWindow: optionalString(authorization.timeWindow, "time window") } : {}),
       ...(optionalString(authorization.dataHandling, "data handling") ? { dataHandling: optionalString(authorization.dataHandling, "data handling") } : {}),
     },
     contract: {
+      ...(contract.outcomeProfile === undefined ? {} : {
+        outcomeProfile: literal(
+          contract.outcomeProfile,
+          ["assessment", "complete_engagement"],
+          "Autonomous outcome profile",
+        ),
+      }),
       allowedActionClasses: stringList(contract.allowedActionClasses, "allowed action classes"), prohibitedActionClasses: stringList(contract.prohibitedActionClasses, "prohibited action classes"), destructivePolicy: literal(contract.destructivePolicy, ["prohibited", "validate_without_executing", "bounded_lab_only"], "destructive policy"), boundedDestructiveTargets: contract.boundedDestructiveTargets === undefined ? [] : stringList(contract.boundedDestructiveTargets, "bounded destructive targets"), evidenceRequirements: stringList(contract.evidenceRequirements, "evidence requirements"),
       timeBudgetMinutes: number(contract.timeBudgetMinutes, "time budget"), ...(tokenBudget === undefined ? {} : { tokenBudget }), ...(costBudget === undefined ? {} : { costBudget }), retryBudget: number(contract.retryBudget, "retry budget"), replanBudget: number(contract.replanBudget, "replan budget"), concurrencyLimit: number(contract.concurrencyLimit, "concurrency"), evidenceStorageBudgetBytes: number(contract.evidenceStorageBudgetBytes, "evidence storage"), artifactStorageBudgetBytes: number(contract.artifactStorageBudgetBytes, "artifact storage"),
-      notificationPolicy: literal(contract.notificationPolicy, ["in_app_only"], "notification policy"), reportingFormat: literal(contract.reportingFormat, ["ti_scale_json"], "reporting format"), dataHandlingPolicy: literal(contract.dataHandlingPolicy, ["local_private"], "data handling policy"), retentionPolicy: literal(contract.retentionPolicy, ["operator_managed"], "retention policy"), providerPolicy: literal(contract.providerPolicy, ["automatic_enforcing_only"], "provider policy"), toolPolicy: literal(contract.toolPolicy, ["contract_allowlist"], "tool policy"), specialistAgentIds: stringList(contract.specialistAgentIds, "specialist agents"), memoryScopes: stringList(contract.memoryScopes, "memory scopes"), contextNodeIds: stringList(contract.contextNodeIds, "context nodes"), safeStopConditions: stringList(contract.safeStopConditions, "safe stops"), deliverables: stringList(contract.deliverables, "deliverables"),
+      notificationPolicy: literal(contract.notificationPolicy, ["in_app_only"], "notification policy"), reportingFormat: literal(contract.reportingFormat, ["ti_scale_json"], "reporting format"), dataHandlingPolicy: literal(contract.dataHandlingPolicy, ["local_private"], "data handling policy"), retentionPolicy: literal(contract.retentionPolicy, ["operator_managed"], "retention policy"), providerPolicy: literal(contract.providerPolicy, ["automatic_enforcing_only"], "provider policy"), toolPolicy: literal(contract.toolPolicy, ["contract_allowlist"], "tool policy"), specialistAgentIds: stringList(contract.specialistAgentIds, "specialist agents"), agentModelAssignments, memoryScopes: stringList(contract.memoryScopes, "memory scopes"), contextNodeIds: stringList(contract.contextNodeIds, "context nodes"), safeStopConditions: stringList(contract.safeStopConditions, "safe stops"), deliverables: stringList(contract.deliverables, "deliverables"),
+      planningSelection: parseAutonomousPlanningSelection(
+        contract.planningSelection,
+        "Autonomous planning selection",
+      ),
     },
   };
 }
@@ -223,8 +336,37 @@ function parseMissionRequest(value: unknown): MissionCreateRequest {
 export function parseResolvedMissionIntake(payload: unknown): ResolvedMissionIntake {
   const root = object(payload, "resolved mission intake"); schema(root);
   const template = object(root.template, "resolved template");
+  const autonomousOutcome = root.autonomousOutcome === undefined
+    ? undefined
+    : object(root.autonomousOutcome, "Autonomous outcome");
   return {
     schemaVersion: "2.4", request: parseMissionRequest(root.request),
+    ...(autonomousOutcome ? {
+      autonomousOutcome: {
+        id: literal(
+          autonomousOutcome.id,
+          ["assessment", "complete_engagement"],
+          "Autonomous outcome ID",
+        ),
+        label: nonEmpty(autonomousOutcome.label, "Autonomous outcome label"),
+        concisePromise: nonEmpty(
+          autonomousOutcome.concisePromise,
+          "Autonomous outcome promise",
+        ),
+        completionMeaning: nonEmpty(
+          autonomousOutcome.completionMeaning,
+          "Autonomous outcome completion meaning",
+        ),
+        requiredTerminalSuccessCriteria: stringList(
+          autonomousOutcome.requiredTerminalSuccessCriteria,
+          "Autonomous terminal success criteria",
+        ),
+        requiredActionClassIds: stringList(
+          autonomousOutcome.requiredActionClassIds,
+          "Autonomous terminal action classes",
+        ),
+      },
+    } : {}),
     normalizedTargets: array(root.normalizedTargets, "normalized targets").map((value) => {
       const item = object(value, "normalized target");
       return { id: nonEmpty(item.id, "target id"), value: nonEmpty(item.value, "target value"), type: literal(item.type, ["host", "cidr", "url", "domain", "cloud_account", "scope_file", "engagement", "lab_environment"], "target type"), ...(item.excluded === true ? { excluded: true } : {}) };

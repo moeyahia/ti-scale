@@ -96,11 +96,28 @@ function validateReleaseContract(
   validateExactReleaseValue(environment, "TI_SCALE_E2E_ENFORCE_MANIFEST", "1", violations);
   validateExactReleaseValue(
     environment,
+    "TI_SCALE_E2E_ENFORCE_ACTIVATION_RECEIPTS",
+    "1",
+    violations,
+  );
+  validateExactReleaseValue(
+    environment,
+    "TI_SCALE_E2E_ENFORCE_RELEASE_RESULT_POLICY",
+    "1",
+    violations,
+  );
+  validateExactReleaseValue(
+    environment,
     "TI_SCALE_E2E_SERVER_MODE",
     PLAYWRIGHT_MANAGED_STATIC_SERVER_MODE,
     violations,
   );
   validateExactReleaseValue(environment, "TI_SCALE_E2E_EXTERNAL_SERVERS", "false", violations);
+  if (!/^[a-f0-9]{40}$/u.test(environment.TI_SCALE_E2E_CANDIDATE_SHA ?? "")) {
+    violations.push(
+      "TI_SCALE_E2E_CANDIDATE_SHA must be the exact lowercase 40-character checked-out Git commit",
+    );
+  }
 
   if (!configuredValue(environment, "TI_SCALE_E2E_BASE_URL")) {
     violations.push("TI_SCALE_E2E_BASE_URL must be explicitly set for the release profile");

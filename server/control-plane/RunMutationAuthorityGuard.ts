@@ -63,6 +63,15 @@ export function describeRunMutationAuthorityError(
       remediation: "Open this run through its owning control plane; imported legacy runs remain read-only in Ti-Scale.",
     };
   }
+  if (error.code === "journey_unsupported") {
+    return {
+      status: 409,
+      code: "runtime_journey_unsupported",
+      category: "policy_denied",
+      retryable: false,
+      remediation: "Use a runtime controller that explicitly supports this run journey; the local manual controller supports Guided only.",
+    };
+  }
   if (error.code === "lease_missing") {
     return {
       status: 409,

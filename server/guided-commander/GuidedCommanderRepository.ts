@@ -6,6 +6,7 @@ import { canonicalJson, hashCanonical, sha256 } from "../missions/canonical";
 import type {
   GuidedMessage,
   GuidedMissionContext,
+  GuidedProviderUsage,
   GuidedRepresentedStep,
   GuidedReviewedObservation,
   GuidedRunContext,
@@ -487,18 +488,21 @@ export class GuidedCommanderRepository {
   ): GuidedReviewedObservation | null {
     const row = this.database.prepare(`
       SELECT e.id, e.content_hash, e.provenance_json, e.verification_state,
-        e.acquired_at, interpreted.details_json AS interpretation_json
+        e.acquired_at, reviewed.event_type AS review_event_type,
+        reviewed.details_json AS interpretation_json
       FROM evidence e
-      JOIN evidence_chain_events interpreted
-        ON interpreted.evidence_id = e.id AND interpreted.event_type = 'interpreted'
+      JOIN evidence_chain_events reviewed
+        ON reviewed.evidence_id = e.id
+        AND reviewed.event_type IN ('interpreted', 'ingestion_attested')
       WHERE e.mission_id = ? AND e.run_id = ? AND e.step_id = ?
         AND e.evidence_type = 'guided_text_result'
-      ORDER BY interpreted.occurred_at DESC, interpreted.id DESC LIMIT 1
+      ORDER BY reviewed.occurred_at DESC, reviewed.id DESC LIMIT 1
     `).get(missionId, runId, stepId) as {
       id: string;
       content_hash: string;
       provenance_json: string;
       verification_state: GuidedReviewedObservation["verificationState"];
+      review_event_type: "interpreted" | "ingestion_attested";
       interpretation_json: string;
       acquired_at: string;
     } | undefined;
@@ -516,9 +520,14 @@ export class GuidedCommanderRepository {
       fileName: typeof provenance.fileName === "string" ? provenance.fileName : null,
       byteSize: Number(provenance.byteSize ?? 0),
       redactionCount: Number(provenance.redactionCount ?? 0),
-      interpretationSummary: typeof interpretation.summary === "string"
+      reviewSummary: typeof interpretation.summary === "string"
         ? interpretation.summary
-        : "The Guided observation was interpreted.",
+        : row.review_event_type === "interpreted"
+          ? "The Guided observation received semantic interpretation."
+          : "The Guided observation passed bounded ingestion and redaction checks only.",
+      reviewKind: row.review_event_type === "interpreted"
+        ? "semantic_interpretation"
+        : "ingestion_attestation",
       verificationState: row.verification_state,
       acquiredAt: row.acquired_at,
     };
@@ -722,8 +731,17 @@ export class GuidedCommanderRepository {
         SELECT id, provenance_json FROM evidence
         WHERE mission_id = ? AND run_id = ? AND step_id = ?
           AND evidence_type = 'guided_text_result' AND content_hash = ?
+          AND json_extract(provenance_json, '$.guidedDecisionId') = ?
+          AND json_extract(provenance_json, '$.representedActionFingerprint') = ?
         ORDER BY created_at, id LIMIT 1
-      `).get(scope.mission.id, scope.run.id, scope.step.id, result.contentHash) as {
+      `).get(
+        scope.mission.id,
+        scope.run.id,
+        scope.step.id,
+        result.contentHash,
+        scope.step.guidedDecisionId,
+        scope.step.actionFingerprint,
+      ) as {
         id: string;
         provenance_json: string;
       } | undefined;
@@ -751,6 +769,7 @@ export class GuidedCommanderRepository {
         redactionCount: result.redactionCount,
         rawContentRetained: false,
         contentAddressedBy: "sha256",
+        guidedDecisionId: scope.step.guidedDecisionId,
         representedActionFingerprint: scope.step.actionFingerprint,
       };
       this.database.prepare(`
@@ -846,7 +865,10 @@ export class GuidedCommanderRepository {
       });
     }
     const provenance = parseObject(row.provenance_json, "Guided evidence provenance");
-    if (provenance.representedActionFingerprint !== input.scope.step.actionFingerprint) {
+    if (
+      provenance.guidedDecisionId !== input.scope.step.guidedDecisionId ||
+      provenance.representedActionFingerprint !== input.scope.step.actionFingerprint
+    ) {
       throw new GuidedCommanderError(409, "guided_evidence_fingerprint_conflict", "Evidence action fingerprint changed", {
         humanMessage: "The observed result was captured for a different exact action.",
         category: "conflict",
@@ -888,14 +910,126 @@ export class GuidedCommanderRepository {
     });
   }
 
-  startProviderTurn(scope: GuidedScope, provider: string, model?: string): { id: string; startedAt: number } {
+  /**
+   * Record only the deterministic properties of bounded ingestion.
+   *
+   * This custody event is intentionally distinct from `interpreted`. It
+   * attests hash/size/redaction handling, not the truth or meaning of the
+   * operator-supplied text, and therefore cannot satisfy the runtime's
+   * semantic-interpretation gate.
+   */
+  recordTextEvidenceIngestionAttestation(input: {
+    scope: GuidedScope;
+    evidenceId: string;
+    assistantMessageId: string;
+    contextPackId: string;
+    summary: string;
+    confidence: number;
+  }): void {
+    const row = this.database.prepare(`
+      SELECT provenance_json FROM evidence
+      WHERE id = ? AND mission_id = ? AND run_id = ? AND step_id = ?
+        AND evidence_type = 'guided_text_result' AND action_id IS NULL
+        AND verification_state = 'unverified'
+    `).get(
+      input.evidenceId,
+      input.scope.mission.id,
+      input.scope.run.id,
+      input.scope.step.id,
+    ) as { provenance_json: string } | undefined;
+    if (!row) {
+      throw new GuidedCommanderError(409, "guided_evidence_scope_conflict", "Evidence is not available for this exact Guided step", {
+        humanMessage: "The ingested result no longer belongs to the current represented step.",
+        category: "scope_conflict",
+      });
+    }
+    const provenance = parseObject(row.provenance_json, "Guided evidence provenance");
+    if (
+      provenance.guidedDecisionId !== input.scope.step.guidedDecisionId
+      || provenance.representedActionFingerprint !== input.scope.step.actionFingerprint
+    ) {
+      throw new GuidedCommanderError(409, "guided_evidence_fingerprint_conflict", "Evidence action fingerprint changed", {
+        humanMessage: "The ingested result was captured for a different exact action.",
+        category: "conflict",
+      });
+    }
+    const now = this.now();
+    this.database.prepare(`
+      INSERT INTO evidence_chain_events (
+        id, evidence_id, event_type, actor, details_json, occurred_at
+      ) VALUES (?, ?, 'ingestion_attested', 'local-guided-ingestion', ?, ?)
+    `).run(
+      this.createId("evidence-chain"),
+      input.evidenceId,
+      canonicalJson({
+        assistantMessageId: input.assistantMessageId,
+        contextPackId: input.contextPackId,
+        actionFingerprint: input.scope.step.actionFingerprint,
+        confidence: input.confidence,
+        summary: input.summary,
+        metadataOnly: true,
+        semanticInterpretationPerformed: false,
+        outcomeValidated: false,
+      }),
+      now,
+    );
+    this.events.append({
+      missionId: input.scope.mission.id,
+      runId: input.scope.run.id,
+      journey: "guided",
+      eventType: "evidence.guided_text_ingestion_attested",
+      actorType: "system",
+      actorId: "local-guided-ingestion",
+      summary: "Bounded Guided text ingestion was attested without semantic interpretation",
+      payload: {
+        evidenceId: input.evidenceId,
+        stepId: input.scope.step.id,
+        assistantMessageId: input.assistantMessageId,
+        actionFingerprint: input.scope.step.actionFingerprint,
+        metadataOnly: true,
+        semanticInterpretationPerformed: false,
+        outcomeValidated: false,
+      },
+      contextPackId: input.contextPackId,
+      sensitivity: "private",
+    });
+  }
+
+  startProviderTurn(
+    scope: GuidedScope,
+    provider: string,
+    model?: string,
+    modelConfigurationHash?: string,
+    binding: Readonly<{
+      agentId?: string;
+      modelAssignmentId?: string;
+      modelConfigurationId?: string;
+      promptTemplateHash?: string;
+      contextPackId?: string;
+    }> = {},
+  ): { id: string; startedAt: number } {
     const id = this.createId("provider-turn");
     const now = this.now();
     this.database.prepare(`
       INSERT INTO provider_turns (
-        id, run_id, provider, model, status, started_at
-      ) VALUES (?, ?, ?, ?, 'started', ?)
-    `).run(id, scope.run.id, provider, model ?? null, now);
+        id, run_id, provider, model, model_configuration_hash,
+        agent_id, model_assignment_id, model_configuration_id,
+        prompt_template_hash, context_pack_id,
+        status, started_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?)
+    `).run(
+      id,
+      scope.run.id,
+      provider,
+      model ?? null,
+      modelConfigurationHash ?? null,
+      binding.agentId ?? null,
+      binding.modelAssignmentId ?? null,
+      binding.modelConfigurationId ?? null,
+      binding.promptTemplateHash ?? null,
+      binding.contextPackId ?? null,
+      now,
+    );
     return { id, startedAt: performance.now() };
   }
 
@@ -904,13 +1038,32 @@ export class GuidedCommanderRepository {
     status: "completed" | "failed" | "cancelled",
     startedAt: number,
     errorCategory?: string,
+    providerUsage?: GuidedProviderUsage,
   ): void {
     this.database.prepare(`
-      UPDATE provider_turns SET status = ?, latency_ms = ?, error_category = ?, ended_at = ?
+      UPDATE provider_turns SET
+        status = ?,
+        input_tokens = ?,
+        output_tokens = ?,
+        total_tokens = ?,
+        billed_cost_usd = ?,
+        returned_model = ?,
+        exact_token_usage = ?,
+        exact_cost_usage = ?,
+        latency_ms = ?,
+        error_category = ?,
+        ended_at = ?
       WHERE id = ? AND status = 'started'
     `).run(
       status,
-      Math.max(0, Math.round(performance.now() - startedAt)),
+      providerUsage?.inputTokens ?? null,
+      providerUsage?.outputTokens ?? null,
+      providerUsage?.totalTokens ?? null,
+      providerUsage?.billedCostUsd ?? null,
+      providerUsage?.returnedModel ?? null,
+      providerUsage ? Number(providerUsage.exactTokenUsage) : null,
+      providerUsage ? Number(providerUsage.exactCostUsage) : null,
+      providerUsage?.latencyMs ?? Math.max(0, Math.round(performance.now() - startedAt)),
       errorCategory ?? null,
       this.now(),
       id,
@@ -1009,8 +1162,13 @@ export class GuidedCommanderRepository {
     requestHash: string;
     ownerToken: string;
     leaseMs: number;
+    assertMutationAuthority: () => void;
   }): boolean {
     return this.transaction(() => {
+      // Extending an in-flight provider reservation is a mutation, not
+      // best-effort cleanup. A stale controller must not keep its reservation
+      // alive after lease takeover and starve the current controller.
+      input.assertMutationAuthority();
       const settingKey = idempotencySettingKey(input.scope, input.key);
       const row = this.database.prepare("SELECT value_json FROM settings WHERE key = ?")
         .get(settingKey) as { value_json: string } | undefined;

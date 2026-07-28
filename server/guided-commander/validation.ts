@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
   GuidedCommanderPortResponse,
   GuidedContextDisposition,
+  GuidedProviderUsage,
   GuidedTextResult,
 } from "./types";
 import { redactReusableMemorySecrets } from "../memory/ReusableMemorySafety";
@@ -382,6 +383,128 @@ export function validatePortResponse(value: unknown): GuidedCommanderPortRespons
       ? {}
       : { contextUse: body.contextUse.map(validateDisposition) }),
   };
+}
+
+function runtimeUsageText(value: unknown, label: string, maximum: number): string {
+  if (typeof value !== "string") {
+    throw new GuidedCommanderError(502, "invalid_guided_provider_usage", `${label} is invalid`, {
+      category: "provider_protocol",
+      retryable: true,
+    });
+  }
+  const normalized = value.trim().normalize("NFKC");
+  if (!normalized || normalized.length > maximum || /[\u0000-\u001f\u007f]/u.test(normalized)) {
+    throw new GuidedCommanderError(502, "invalid_guided_provider_usage", `${label} is invalid`, {
+      category: "provider_protocol",
+      retryable: true,
+    });
+  }
+  return normalized;
+}
+
+function runtimeUsageInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new GuidedCommanderError(502, "invalid_guided_provider_usage", `${label} is invalid`, {
+      category: "provider_protocol",
+      retryable: true,
+    });
+  }
+  return value as number;
+}
+
+function validateProviderUsage(value: unknown): GuidedProviderUsage {
+  const usage = providerObject(value, "providerUsage");
+  const allowed = new Set([
+    "providerId",
+    "requestedModel",
+    "returnedModel",
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    "billedCostUsd",
+    "exactTokenUsage",
+    "exactCostUsage",
+    "latencyMs",
+  ]);
+  if (Object.keys(usage).some((key) => !allowed.has(key))) {
+    throw new GuidedCommanderError(502, "invalid_guided_provider_usage", "Provider usage included unsupported fields", {
+      category: "policy_denied",
+    });
+  }
+  const providerId = runtimeUsageText(usage.providerId, "providerUsage.providerId", 128);
+  if (!IDENTIFIER.test(providerId)) {
+    throw new GuidedCommanderError(502, "invalid_guided_provider_usage", "providerUsage.providerId is invalid", {
+      category: "provider_protocol",
+      retryable: true,
+    });
+  }
+  const requestedModel = runtimeUsageText(usage.requestedModel, "providerUsage.requestedModel", 256);
+  const returnedModel = runtimeUsageText(usage.returnedModel, "providerUsage.returnedModel", 256);
+  if (typeof usage.exactTokenUsage !== "boolean" || typeof usage.exactCostUsage !== "boolean") {
+    throw new GuidedCommanderError(502, "invalid_guided_provider_usage", "Provider usage exactness is invalid", {
+      category: "provider_protocol",
+      retryable: true,
+    });
+  }
+  const inputTokens = usage.inputTokens === undefined
+    ? undefined
+    : runtimeUsageInteger(usage.inputTokens, "providerUsage.inputTokens");
+  const outputTokens = usage.outputTokens === undefined
+    ? undefined
+    : runtimeUsageInteger(usage.outputTokens, "providerUsage.outputTokens");
+  const totalTokens = usage.totalTokens === undefined
+    ? undefined
+    : runtimeUsageInteger(usage.totalTokens, "providerUsage.totalTokens");
+  const latencyMs = runtimeUsageInteger(usage.latencyMs, "providerUsage.latencyMs");
+  const billedCostUsd = usage.billedCostUsd;
+  if (billedCostUsd !== undefined && (
+    typeof billedCostUsd !== "number" || !Number.isFinite(billedCostUsd) || billedCostUsd < 0
+  )) {
+    throw new GuidedCommanderError(502, "invalid_guided_provider_usage", "providerUsage.billedCostUsd is invalid", {
+      category: "provider_protocol",
+      retryable: true,
+    });
+  }
+  if (usage.exactTokenUsage && (
+    inputTokens === undefined || outputTokens === undefined || totalTokens === undefined ||
+    totalTokens < inputTokens + outputTokens
+  )) {
+    throw new GuidedCommanderError(502, "invalid_guided_provider_usage", "Exact token usage is incomplete", {
+      category: "provider_protocol",
+      retryable: true,
+    });
+  }
+  if (usage.exactCostUsage && billedCostUsd === undefined) {
+    throw new GuidedCommanderError(502, "invalid_guided_provider_usage", "Exact billed cost is incomplete", {
+      category: "provider_protocol",
+      retryable: true,
+    });
+  }
+  return {
+    providerId,
+    requestedModel,
+    returnedModel,
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(totalTokens === undefined ? {} : { totalTokens }),
+    ...(billedCostUsd === undefined ? {} : { billedCostUsd }),
+    exactTokenUsage: usage.exactTokenUsage,
+    exactCostUsage: usage.exactCostUsage,
+    latencyMs,
+  };
+}
+
+/**
+ * Validates the trusted adapter result. `providerUsage` is deliberately split
+ * from `validatePortResponse`, which is used on model-authored JSON.
+ */
+export function validatePortResult(value: unknown): GuidedCommanderPortResponse {
+  const result = providerObject(value, "Guided Commander port result");
+  const { providerUsage, ...providerResponse } = result;
+  const response = validatePortResponse(providerResponse);
+  return providerUsage === undefined
+    ? response
+    : { ...response, providerUsage: validateProviderUsage(providerUsage) };
 }
 
 export function resultRequestIdentity(request: InterpretResultRequest): Readonly<Record<string, unknown>> {

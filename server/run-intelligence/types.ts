@@ -1,4 +1,5 @@
 import type { JsonObject, JsonValue } from "./serialization";
+import type { OperationalHazardContext } from "../memory";
 
 export class RunIntelligenceError extends Error {
   readonly code: string;
@@ -33,6 +34,15 @@ export interface AttackAttemptEvidenceLink {
   readonly createdAt: string;
 }
 
+export interface AttackAttemptActionBinding {
+  readonly actionType: string;
+  readonly actionClass: string;
+  readonly normalizedArguments: JsonObject;
+  readonly scopedTarget: string;
+  readonly bindingHash: string;
+  readonly createdAt: string;
+}
+
 export interface AttackAttempt {
   readonly id: string;
   readonly missionId: string;
@@ -41,6 +51,8 @@ export interface AttackAttempt {
   readonly stepId: string | null;
   readonly targetAssetId: string | null;
   readonly targetServiceId: string | null;
+  readonly recoverySourceAttackAttemptId: string | null;
+  readonly representedActionBinding: AttackAttemptActionBinding | null;
   readonly objective: string;
   readonly techniqueId: string | null;
   readonly techniqueName: string;
@@ -68,6 +80,18 @@ export interface CreateAttackAttemptInput {
   readonly stepId?: string;
   readonly targetAssetId?: string;
   readonly targetServiceId?: string;
+  /**
+   * Immutable, explicit recovery lineage. This is never inferred from a
+   * target, technique name, objective, or provider response.
+   */
+  readonly recoverySourceAttackAttemptId?: string;
+  /** Exact private runtime action shape reserved by this represented attempt. */
+  readonly representedActionBinding?: {
+    readonly actionType: string;
+    readonly actionClass: string;
+    readonly normalizedArguments: JsonObject;
+    readonly scopedTarget: string;
+  };
   readonly objective: string;
   readonly techniqueId?: string;
   readonly techniqueName: string;
@@ -76,6 +100,13 @@ export interface CreateAttackAttemptInput {
   readonly normalizedParameters?: JsonObject;
   readonly assignedAgentId?: string;
   readonly modelAssignmentId?: string;
+  /**
+   * Explicit reviewed reusable-knowledge binding. IDs and normalized values
+   * are validated against canonical memory nodes after the attempt is
+   * inserted in the same transaction. Nothing is inferred from target, name,
+   * objective prose, or provider output.
+   */
+  readonly reviewedKnowledgeBinding?: OperationalHazardContext;
 }
 
 export interface ToolFailureSignal {

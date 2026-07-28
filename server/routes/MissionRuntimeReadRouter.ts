@@ -6,23 +6,17 @@ import {
 import { CommandRuntimeError } from "../command-runtime/types";
 import { attachV2RequestId, sendV2Error } from "../contracts/ApiErrorContract";
 import type { CheckpointRepository } from "../orchestration";
-import type { RunState } from "../supervisor";
+import {
+  AutonomousActivationReceiptIntegrityError,
+  type AutonomousActivationReceiptRepository,
+  type AutonomousActivationReceiptVerifier,
+  projectAutonomousActivationReceipt,
+} from "../autonomous-runtime";
+import { encodeRuntimeRunCursor, parseRuntimeRunQuery } from "./RuntimeRunQuery";
 
 const SCHEMA_VERSION = "2.4" as const;
 const RESOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$/u;
 const ACTOR_ID = /^[^\u0000-\u001F\u007F]{1,256}$/u;
-const RUN_STATES = new Set<RunState>([
-  "queued",
-  "planning",
-  "awaiting_contract_confirmation",
-  "running",
-  "waiting_guided_decision",
-  "blocked",
-  "recovering",
-  "completed",
-  "failed",
-  "cancelled",
-]);
 const DECISION_STATES = new Set([
   "pending",
   "approved",
@@ -41,6 +35,15 @@ export interface RuntimeReadRunScope {
 export interface MissionRuntimeReadRouterDependencies {
   readonly repository: RuntimeRepository;
   readonly checkpoints: Pick<CheckpointRepository, "latest">;
+  readonly autonomousActivationReceipts: Pick<
+    AutonomousActivationReceiptRepository,
+    "findById" | "findCurrentForRun" | "listForRun"
+  >;
+  readonly autonomousActivationReceiptVerifier: Pick<
+    AutonomousActivationReceiptVerifier,
+    "verify"
+  >;
+  readonly clock?: () => Date;
   readonly resolveActor: (request: Request) => string | undefined;
   readonly authorizeMission: (
     request: Request,
@@ -107,6 +110,16 @@ function authorizationWindowExhausted(): RuntimeReadHttpError {
   );
 }
 
+function activationReceiptNotFound(): RuntimeReadHttpError {
+  return new RuntimeReadHttpError(
+    404,
+    "autonomous_activation_receipt_not_found",
+    "No Autonomous activation proof matching this run was found.",
+    "not_found",
+    "Refresh the run. If readiness has not issued a proof yet, resolve the reported launch blockers and run readiness again.",
+  );
+}
+
 function actorId(dependencies: MissionRuntimeReadRouterDependencies, request: Request): string {
   const resolved = dependencies.resolveActor(request);
   const normalized = typeof resolved === "string" ? resolved.trim().normalize("NFKC") : "";
@@ -148,24 +161,6 @@ function boundedLimit(value: unknown, fallback: number): number {
   return Number(value);
 }
 
-function journeyFilter(value: unknown): "autonomous" | "guided" | undefined {
-  const normalized = optionalQueryText(value, "journey", 10);
-  if (normalized === undefined) return undefined;
-  if (normalized !== "autonomous" && normalized !== "guided") {
-    throw invalidInput("invalid_journey_filter", "journey must be autonomous or guided.");
-  }
-  return normalized;
-}
-
-function runStateFilter(value: unknown): RunState | undefined {
-  const normalized = optionalQueryText(value, "run_status", 40);
-  if (normalized === undefined) return undefined;
-  if (!RUN_STATES.has(normalized as RunState)) {
-    throw invalidInput("invalid_run_status", "status is not a canonical run state.");
-  }
-  return normalized as RunState;
-}
-
 function decisionStateFilter(value: unknown): string | undefined {
   const normalized = optionalQueryText(value, "decision_status", 40);
   if (normalized === undefined) return undefined;
@@ -198,6 +193,28 @@ function sendError(response: Response, traceId: string, error: unknown): void {
       category: error.options.category ?? (error.status === 404 ? "not_found" : "runtime"),
       ...(error.options.details === undefined ? {} : { details: error.options.details }),
       ...(error.options.remediation ? { remediation: error.options.remediation } : {}),
+    });
+    return;
+  }
+  if (error instanceof AutonomousActivationReceiptIntegrityError) {
+    const invalidInput = error.code === "activation_receipt_invalid_input";
+    const notFound = error.code === "activation_receipt_not_found";
+    sendV2Error(response, traceId, {
+      status: invalidInput ? 400 : notFound ? 404 : 409,
+      code: error.code,
+      message: error.message,
+      humanMessage: invalidInput
+        ? "The Autonomous activation-proof request is malformed."
+        : notFound
+          ? "No Autonomous activation proof matching this run was found."
+          : `The Autonomous activation proof cannot be trusted: ${error.message}`,
+      retryable: false,
+      category: invalidInput ? "invalid_input" : notFound ? "not_found" : "integrity",
+      remediation: invalidInput
+        ? "Use the canonical run and receipt identifiers and a history limit from 1 through 100."
+        : notFound
+          ? "Refresh the run or complete Autonomous readiness so a proof can be issued."
+          : "Keep Autonomous execution stopped, inspect the integrity code, and re-run readiness against canonical records.",
     });
     return;
   }
@@ -254,12 +271,33 @@ function runScope(run: RuntimeRunProjection): RuntimeReadRunScope {
   return { missionId: run.missionId, runId: run.id };
 }
 
+function publicMissionProjection(
+  mission: ReturnType<RuntimeRepository["getMission"]>,
+): Omit<ReturnType<RuntimeRepository["getMission"]>, "createdBy"> {
+  const { createdBy: _internalCreator, ...publicMission } = mission;
+  return publicMission;
+}
+
 function storedRunScope(
   dependencies: MissionRuntimeReadRouterDependencies,
   runId: string,
 ): RuntimeReadRunScope {
   const run = dependencies.repository.getPlanningRun(runId);
   return { missionId: run.missionId, runId: run.id };
+}
+
+function currentActivationReceipt(
+  dependencies: MissionRuntimeReadRouterDependencies,
+  runId: string,
+) {
+  const receipt = dependencies.autonomousActivationReceipts.findCurrentForRun(runId);
+  return receipt
+    ? projectAutonomousActivationReceipt(
+        receipt,
+        dependencies.autonomousActivationReceiptVerifier,
+        dependencies.clock,
+      )
+    : null;
 }
 
 /**
@@ -298,7 +336,7 @@ export function createMissionRuntimeReadRouter(
     const snapshot = dependencies.repository.getMissionRuntime(missionId);
     response.json({
       schemaVersion: SCHEMA_VERSION,
-      mission: snapshot.mission,
+      mission: publicMissionProjection(snapshot.mission),
       runs: snapshot.runs.filter((run) => canReadRun(
         dependencies,
         request,
@@ -310,29 +348,37 @@ export function createMissionRuntimeReadRouter(
   }));
 
   router.get("/api/v2/runs", read((request, response, actor) => {
-    onlyQueryKeys(request, new Set(["query", "journey", "status", "limit"]));
-    const journey = journeyFilter(request.query.journey);
-    const status = runStateFilter(request.query.status);
-    const query = optionalQueryText(request.query.query, "run_search");
-    const limit = boundedLimit(request.query.limit, 50);
-    const candidates = dependencies.repository.listRunProjections({
-      ...(journey ? { journey } : {}),
-      ...(status ? { status } : {}),
-      ...(query ? { query } : {}),
+    const filters = parseRuntimeRunQuery(request.query as Record<string, unknown>);
+    const candidatePage = dependencies.repository.listRunProjectionPage({
+      ...(filters.journey ? { journey: filters.journey } : {}),
+      ...(filters.status ? { status: filters.status } : {}),
+      ...(filters.statuses ? { statuses: filters.statuses } : {}),
+      ...(filters.query ? { query: filters.query } : {}),
+      ...(filters.cursor ? { cursor: filters.cursor } : {}),
       limit: 100,
     });
-    const permitted = candidates
+    const permitted = candidatePage.items
       .filter((run) => canReadRun(dependencies, request, actor, runScope(run)));
     // RuntimeRepository deliberately bounds reads at 100. If an identity has
     // mixed scope and the requested page is not filled, never imply that this
     // truncated authorization window is complete. Single-operator preview
     // reads (the current deployment model) are unaffected.
-    if (candidates.length === 100 && permitted.length < limit && permitted.length < candidates.length) {
+    if (
+      candidatePage.nextCursor
+      && permitted.length < filters.limit
+      && permitted.length < candidatePage.items.length
+    ) {
       throw authorizationWindowExhausted();
     }
+    const items = permitted.slice(0, filters.limit);
+    const last = items.at(-1);
+    const hasMore = permitted.length > filters.limit || candidatePage.nextCursor !== null;
     response.json({
       schemaVersion: SCHEMA_VERSION,
-      items: permitted.slice(0, limit),
+      items,
+      nextCursor: hasMore && last
+        ? encodeRuntimeRunCursor({ updatedAt: last.updatedAt, id: last.id }, filters.filterHash)
+        : null,
     });
   }));
 
@@ -345,8 +391,64 @@ export function createMissionRuntimeReadRouter(
       schemaVersion: SCHEMA_VERSION,
       run,
       latestCheckpoint: dependencies.checkpoints.latest(runId) ?? null,
+      currentAutonomousActivationReceipt: currentActivationReceipt(
+        dependencies,
+        runId,
+      ),
     });
   }));
+
+  router.get(
+    "/api/v2/runs/:runId/autonomous-activation-receipts",
+    read((request, response, actor) => {
+      onlyQueryKeys(request, new Set(["limit"]));
+      const runId = pathId(request.params.runId, "runId");
+      assertRunAuthorized(
+        dependencies,
+        request,
+        actor,
+        storedRunScope(dependencies, runId),
+      );
+      const limit = boundedLimit(request.query.limit, 100);
+      response.json({
+        schemaVersion: SCHEMA_VERSION,
+        items: dependencies.autonomousActivationReceipts
+          .listForRun(runId, limit)
+          .map((receipt) => projectAutonomousActivationReceipt(
+            receipt,
+            dependencies.autonomousActivationReceiptVerifier,
+            dependencies.clock,
+          )),
+      });
+    }),
+  );
+
+  router.get(
+    "/api/v2/runs/:runId/autonomous-activation-receipts/:receiptId",
+    read((request, response, actor) => {
+      onlyQueryKeys(request, new Set());
+      const runId = pathId(request.params.runId, "runId");
+      const receiptId = pathId(request.params.receiptId, "receiptId");
+      assertRunAuthorized(
+        dependencies,
+        request,
+        actor,
+        storedRunScope(dependencies, runId),
+      );
+      const receipt = dependencies.autonomousActivationReceipts.findById(receiptId);
+      if (!receipt || receipt.runId !== runId) throw activationReceiptNotFound();
+      const summary = projectAutonomousActivationReceipt(
+        receipt,
+        dependencies.autonomousActivationReceiptVerifier,
+        dependencies.clock,
+      );
+      response.json({
+        schemaVersion: SCHEMA_VERSION,
+        summary,
+        receipt,
+      });
+    }),
+  );
 
   router.get("/api/v2/runs/:runId/plans", read((request, response, actor) => {
     onlyQueryKeys(request, new Set());
@@ -422,6 +524,14 @@ export function createMissionRuntimeReadRouter(
   router.all("/api/v2/missions/:missionId/runtime", rejectWrite);
   router.all("/api/v2/runs", rejectWrite);
   router.all("/api/v2/runs/:runId", rejectWrite);
+  router.all(
+    "/api/v2/runs/:runId/autonomous-activation-receipts",
+    rejectWrite,
+  );
+  router.all(
+    "/api/v2/runs/:runId/autonomous-activation-receipts/:receiptId",
+    rejectWrite,
+  );
   router.all("/api/v2/runs/:runId/plans", rejectWrite);
   router.all("/api/v2/decisions", rejectWrite);
 

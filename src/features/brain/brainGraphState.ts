@@ -12,13 +12,21 @@ import {
   type MemorySensitivity,
 } from "../../domain/types/brain";
 import { GRAPH_CLUSTERS, type GraphCluster } from "./graphUtils";
+import {
+  MEMORY_OUTCOME_FILTERS,
+  type MemoryOutcomeFilter,
+} from "./MemoryOutcomeTags";
+import {
+  HISTORICAL_REPORTED_OUTCOME_FILTERS,
+  type HistoricalReportedOutcomeFilter,
+} from "./HistoricalReportedOutcomeBadge";
 
 export const BRAIN_GRAPH_PRESETS = ["attack_path", "lessons_failures"] as const;
 export const BRAIN_GRAPH_LABEL_DENSITIES = ["minimal", "balanced", "all"] as const;
 export const BRAIN_GRAPH_URL_KEYS = [
   "view", "root", "mission", "selected", "pathFrom", "search", "nodeType", "edgeType", "scope",
   "engagement", "lifecycle", "sensitivity", "confidence", "from", "to", "preset",
-  "labels", "layout", "physics", "collapsed", "table", "limit",
+  "outcome", "reported", "labels", "layout", "physics", "collapsed", "table", "limit", "provenance",
 ] as const;
 
 export type BrainGraphPreset = (typeof BRAIN_GRAPH_PRESETS)[number] | "";
@@ -37,6 +45,8 @@ export interface BrainGraphState {
   engagementId: string;
   lifecycle: MemoryLifecycle | "";
   sensitivity: MemorySensitivity | "";
+  outcomeFilter: MemoryOutcomeFilter;
+  reportedOutcomeFilter: HistoricalReportedOutcomeFilter;
   minConfidence: number;
   updatedAfter: string;
   updatedBefore: string;
@@ -47,6 +57,7 @@ export interface BrainGraphState {
   collapsedClusters: GraphCluster[];
   table: boolean;
   limit: number;
+  includeSourceProvenance: boolean;
 }
 
 export interface SavedBrainGraphView {
@@ -132,6 +143,12 @@ export function parseBrainGraphState(values: Readonly<Record<string, unknown>>, 
     engagementId: identifier(values.engagement),
     lifecycle: member(values.lifecycle, MEMORY_LIFECYCLE_STATES, "" as MemoryLifecycle | ""),
     sensitivity: member(values.sensitivity, MEMORY_SENSITIVITIES, "" as MemorySensitivity | ""),
+    outcomeFilter: member(values.outcome, MEMORY_OUTCOME_FILTERS, "" as MemoryOutcomeFilter),
+    reportedOutcomeFilter: member(
+      values.reported,
+      HISTORICAL_REPORTED_OUTCOME_FILTERS,
+      "" as HistoricalReportedOutcomeFilter,
+    ),
     minConfidence: confidence(values.confidence),
     updatedAfter: date(values.from),
     updatedBefore: date(values.to),
@@ -142,6 +159,7 @@ export function parseBrainGraphState(values: Readonly<Record<string, unknown>>, 
     collapsedClusters: collapsedClusters(values.collapsed),
     table: values.table === "1" || values.table === true,
     limit: limit(values.limit),
+    includeSourceProvenance: values.provenance === "1" || values.provenance === true,
   };
 }
 
@@ -159,6 +177,8 @@ export function brainGraphStateToUrl(state: BrainGraphState): Record<string, str
     engagement: state.engagementId || undefined,
     lifecycle: state.lifecycle || undefined,
     sensitivity: state.sensitivity || undefined,
+    outcome: state.outcomeFilter || undefined,
+    reported: state.reportedOutcomeFilter || undefined,
     confidence: state.minConfidence > 0 ? String(state.minConfidence) : undefined,
     from: state.updatedAfter || undefined,
     to: state.updatedBefore || undefined,
@@ -169,11 +189,17 @@ export function brainGraphStateToUrl(state: BrainGraphState): Record<string, str
     collapsed: state.collapsedClusters.length > 0 ? state.collapsedClusters.join(",") : undefined,
     table: state.table ? "1" : undefined,
     limit: state.limit > 250 ? String(state.limit) : undefined,
+    provenance: state.includeSourceProvenance ? "1" : undefined,
   };
 }
 
 export function brainGraphStateToQuery(state: BrainGraphState): MemoryGraphQuery {
   const requestView = state.view === "mission" && !state.missionId ? "global" : state.view;
+  const reusableGlobalDefault = requestView === "global"
+    && !state.includeSourceProvenance
+    && !state.engagementId
+    && !state.preset
+    && (!state.scope || state.scope === "global");
   return {
     view: requestView,
     ...(requestView === "local" && state.rootNodeId ? { nodeId: state.rootNodeId } : {}),
@@ -182,14 +208,22 @@ export function brainGraphStateToQuery(state: BrainGraphState): MemoryGraphQuery
     limit: state.limit,
     ...(state.nodeType ? { nodeType: state.nodeType } : {}),
     ...(state.edgeType ? { edgeType: state.edgeType } : {}),
-    ...(state.scope ? { scope: state.scope } : {}),
+    ...(state.scope ? { scope: state.scope } : reusableGlobalDefault ? { scope: "global" } : {}),
     ...(state.engagementId ? { engagementId: state.engagementId } : {}),
+    // Leaving lifecycle unset is intentional for the default reusable graph.
+    // The server's reusable global boundary includes both operator-confirmed
+    // memories and evidence-verified knowledge while excluding candidates,
+    // disputed/stale history, and forgotten records. Forcing `verified` here
+    // hid confirmed historical imports and the operator-preference cluster
+    // from the primary canvas.
     ...(state.lifecycle ? { status: state.lifecycle } : {}),
     ...(state.sensitivity ? { sensitivity: state.sensitivity } : {}),
     ...(state.minConfidence > 0 ? { minConfidence: state.minConfidence } : {}),
     ...(state.updatedAfter ? { updatedAfter: `${state.updatedAfter}T00:00:00.000Z` } : {}),
     ...(state.updatedBefore ? { updatedBefore: `${state.updatedBefore}T23:59:59.999Z` } : {}),
     ...(state.preset ? { preset: state.preset } : {}),
+    ...(state.outcomeFilter ? { outcome: state.outcomeFilter } : {}),
+    ...(state.reportedOutcomeFilter ? { reportedOutcome: state.reportedOutcomeFilter } : {}),
   };
 }
 
@@ -220,6 +254,8 @@ export function parseSavedBrainGraphViews(raw: string | null): SavedBrainGraphVi
         engagement: stored.engagementId,
         lifecycle: stored.lifecycle,
         sensitivity: stored.sensitivity,
+        outcome: stored.outcomeFilter,
+        reported: stored.reportedOutcomeFilter,
         confidence: stored.minConfidence,
         from: stored.updatedAfter,
         to: stored.updatedBefore,
@@ -230,6 +266,7 @@ export function parseSavedBrainGraphViews(raw: string | null): SavedBrainGraphVi
         collapsed: Array.isArray(stored.collapsedClusters) ? stored.collapsedClusters.join(",") : undefined,
         table: stored.table,
         limit: stored.limit,
+        provenance: stored.includeSourceProvenance,
       });
       return [{ id, name, state, createdAt, updatedAt }];
     });

@@ -2,9 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import express from "express";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { ControlPlaneLeaseService } from "../../control-plane";
 import { createDatabaseConnection, migrateDatabase } from "../../db";
 import { AttackChainLearningService } from "../../learning";
 import { hashJson } from "../../orchestration/serialization";
+import { recoveryProviderRouteSettingKey } from "../recoveryProviderRoute";
 import { createOperationsRouter } from "../../routes/operationsRoutes";
 import type { OperationsAccessPolicy } from "../types";
 
@@ -19,6 +21,8 @@ const B = "2026-07-15T10:01:00.000Z";
 const C = "2026-07-15T10:02:00.000Z";
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
+const RECOVERY_MODEL_ID = "xai/grok-recovery-20260715";
+const RECOVERY_MODEL_CONFIGURATION_HASH = "9".repeat(64);
 
 function seed(database: Db): void {
   const mission = database.prepare(`
@@ -107,7 +111,21 @@ function seed(database: Db): void {
       byte_size, media_type, sensitivity, metadata_json, created_at
     ) VALUES (?, ?, ?, 'guided', ?, ?, ?, 128, 'application/json', 'private', ?, ?)
   `);
-  artifact.run("artifact-report-a", "mission-a", "run-a", "mission_report", "https://user:password@storage.invalid/report", HASH_A, JSON.stringify({ title: "Report", access_token: "artifact-secret-123" }), C);
+  artifact.run(
+    "artifact-report-a",
+    "mission-a",
+    "run-a",
+    "mission_report",
+    "https://user:password@storage.invalid/report",
+    HASH_A,
+    JSON.stringify({
+      title: "Report",
+      access_token: "artifact-secret-123",
+      downloadUrl: "/api/v2/reports/artifact-report-a/download",
+      producerPath: "/restricted/report.md",
+    }),
+    C,
+  );
   artifact.run("artifact-data-a", "mission-a", "run-a", "capture", "file:///restricted/capture", HASH_B, "{}", B);
   artifact.run("artifact-report-b", "mission-b", "run-b", "mission_report", "file:///hidden/report", HASH_B, "{}", C);
 
@@ -278,15 +296,50 @@ function retainAttackChainDetails(
   );
 }
 
-async function application() {
+async function application(options: {
+  readonly providerRouteIds?: readonly string[];
+  readonly includeRecoveryLeaseResolver?: boolean;
+} = {}) {
   const database = createDatabaseConnection({ filename: ":memory:" });
   migrateDatabase(database);
   seed(database);
+  const mutationLeases = new ControlPlaneLeaseService(database);
+  const leaseOwners = new Map<string, { readonly owner: string; readonly fence: string }>();
+  let recoveryLeaseChecks = 0;
   const app = express();
   app.use(express.json({ limit: "256kb" }));
   app.use(createOperationsRouter({
     database,
     clock: () => new Date("2026-07-15T10:30:00.000Z"),
+    ...(options.providerRouteIds === undefined ? {} : { providerRouteIds: options.providerRouteIds }),
+    ...(options.includeRecoveryLeaseResolver === false ? {} : {
+      assertRunMutationLease: ({ runId }: { readonly runId: string }) => {
+        recoveryLeaseChecks += 1;
+        let authority = leaseOwners.get(runId);
+        if (!authority) {
+          authority = {
+            owner: `operations-router-runtime-${runId}`,
+            fence: `operations-router-fence-${runId}-00000000`,
+          };
+          mutationLeases.acquire({
+            runId,
+            controlPlane: "ti_scale",
+            leaseOwner: authority.owner,
+            leaseToken: authority.fence,
+            ttlMs: 300_000,
+            now: new Date("2026-07-15T10:30:00.000Z"),
+          });
+          leaseOwners.set(runId, authority);
+        }
+        return mutationLeases.assertMutationAuthority({
+          runId,
+          controlPlane: "ti_scale",
+          leaseOwner: authority.owner,
+          leaseToken: authority.fence,
+          now: new Date("2026-07-15T10:30:00.000Z"),
+        });
+      },
+    }),
     resolveActor: (request) => {
       const id = request.get("X-Test-Actor") ?? "reviewer-one";
       return {
@@ -313,7 +366,11 @@ async function application() {
   const server = app.listen(0, "127.0.0.1");
   servers.push(server);
   await new Promise<void>((resolve) => server.once("listening", resolve));
-  return { database, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
+  return {
+    database,
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    recoveryLeaseCheckCount: () => recoveryLeaseChecks,
+  };
 }
 
 async function body(response: Response): Promise<any> {
@@ -579,7 +636,7 @@ describe("canonical operations HTTP API", () => {
   });
 
   test("fails recovery closed across control planes before idempotent replay and permits the same exact V2-owned boundary", async () => {
-    const { database, url } = await application();
+    const { database, url, recoveryLeaseCheckCount } = await application();
     try {
       database.prepare(`
         INSERT INTO agents (
@@ -710,8 +767,8 @@ describe("canonical operations HTTP API", () => {
       expect(await body(rejected)).toMatchObject({
         error: {
           code: "control_plane_mismatch",
-          humanMessage: "This run belongs to the legacy control plane and Ti-Scale refused to mutate it.",
-          remediation: "Open the run through its owning control plane; do not attempt concurrent control.",
+          humanMessage: "Run run-control-plane-recovery is not exclusively owned by Ti-Scale",
+          remediation: "Open this run through its owning control plane; imported legacy runs remain read-only in Ti-Scale.",
         },
       });
       expect((database.prepare(`SELECT count(*) AS count FROM events WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count).toBe(0);
@@ -746,11 +803,13 @@ describe("canonical operations HTTP API", () => {
       expect((database.prepare(`SELECT count(*) AS count FROM events WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count).toBe(0);
       expect((database.prepare(`SELECT count(*) AS count FROM audit_records WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count).toBe(0);
       expect((database.prepare(`SELECT count(*) AS count FROM settings WHERE key LIKE 'ti_scale.recovery.idempotency.%'`).get() as { count: number }).count).toBe(0);
+      const checksBeforeAccepted = recoveryLeaseCheckCount();
       const accepted = await fetch(`${url}/api/v2/operations/runs/run-control-plane-recovery/recovery/replan`, {
         method: "POST", headers, body: requestBody,
       });
       expect(accepted.status).toBe(200);
-      expect(await body(accepted)).toMatchObject({
+      const acceptedReceipt = await body(accepted);
+      expect(acceptedReceipt).toMatchObject({
         mutation: { kind: "replan" },
         run: {
           id: "run-control-plane-recovery",
@@ -761,24 +820,43 @@ describe("canonical operations HTTP API", () => {
           assignmentId: "assignment-control-plane-recovery",
         },
       });
+      expect(recoveryLeaseCheckCount() - checksBeforeAccepted).toBe(2);
       const acceptedCounts = {
         events: (database.prepare(`SELECT count(*) AS count FROM events WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count,
         audits: (database.prepare(`SELECT count(*) AS count FROM audit_records WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count,
         checkpoints: (database.prepare(`SELECT count(*) AS count FROM checkpoints WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count,
+        outbox: (database.prepare(`
+          SELECT count(*) AS count FROM event_outbox
+          WHERE event_id IN (SELECT id FROM events WHERE run_id = 'run-control-plane-recovery')
+        `).get() as { count: number }).count,
+        receipts: (database.prepare(`
+          SELECT count(*) AS count FROM settings
+          WHERE key LIKE 'ti_scale.recovery.idempotency.%'
+        `).get() as { count: number }).count,
       };
       expect(acceptedCounts.events).toBeGreaterThanOrEqual(2);
       expect(acceptedCounts.audits).toBe(1);
       expect(acceptedCounts.checkpoints).toBe(2);
 
+      const checksBeforeReplay = recoveryLeaseCheckCount();
       const immediateReplay = await fetch(`${url}/api/v2/operations/runs/run-control-plane-recovery/recovery/replan`, {
         method: "POST", headers, body: requestBody,
       });
       expect(immediateReplay.status).toBe(200);
-      expect(await body(immediateReplay)).toMatchObject({ mutation: { kind: "replan" } });
+      expect(await body(immediateReplay)).toEqual(acceptedReceipt);
+      expect(recoveryLeaseCheckCount() - checksBeforeReplay).toBe(2);
       expect({
         events: (database.prepare(`SELECT count(*) AS count FROM events WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count,
         audits: (database.prepare(`SELECT count(*) AS count FROM audit_records WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count,
         checkpoints: (database.prepare(`SELECT count(*) AS count FROM checkpoints WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count,
+        outbox: (database.prepare(`
+          SELECT count(*) AS count FROM event_outbox
+          WHERE event_id IN (SELECT id FROM events WHERE run_id = 'run-control-plane-recovery')
+        `).get() as { count: number }).count,
+        receipts: (database.prepare(`
+          SELECT count(*) AS count FROM settings
+          WHERE key LIKE 'ti_scale.recovery.idempotency.%'
+        `).get() as { count: number }).count,
       }).toEqual(acceptedCounts);
 
       database.prepare(`UPDATE runs SET version = version + 1 WHERE id = 'run-control-plane-recovery'`).run();
@@ -798,7 +876,87 @@ describe("canonical operations HTTP API", () => {
         events: (database.prepare(`SELECT count(*) AS count FROM events WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count,
         audits: (database.prepare(`SELECT count(*) AS count FROM audit_records WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count,
         checkpoints: (database.prepare(`SELECT count(*) AS count FROM checkpoints WHERE run_id = 'run-control-plane-recovery'`).get() as { count: number }).count,
+        outbox: (database.prepare(`
+          SELECT count(*) AS count FROM event_outbox
+          WHERE event_id IN (SELECT id FROM events WHERE run_id = 'run-control-plane-recovery')
+        `).get() as { count: number }).count,
+        receipts: (database.prepare(`
+          SELECT count(*) AS count FROM settings
+          WHERE key LIKE 'ti_scale.recovery.idempotency.%'
+        `).get() as { count: number }).count,
       }).toEqual(acceptedCounts);
+    } finally { database.close(); }
+  });
+
+  test("fails a recovery mutation closed without trusted lease authority before event, audit, checkpoint, outbox, or receipt writes", async () => {
+    const { database, url } = await application({ includeRecoveryLeaseResolver: false });
+    try {
+      const boundary = seedGuidedRecoveryMutationBoundary(
+        database,
+        "missing-authority",
+        "manual",
+        "2026-07-15T11:30:00.000Z",
+      );
+      const before = {
+        events: (database.prepare("SELECT count(*) AS count FROM events WHERE run_id = ?")
+          .get(boundary.runId) as { count: number }).count,
+        audits: (database.prepare("SELECT count(*) AS count FROM audit_records WHERE run_id = ?")
+          .get(boundary.runId) as { count: number }).count,
+        checkpoints: (database.prepare("SELECT count(*) AS count FROM checkpoints WHERE run_id = ?")
+          .get(boundary.runId) as { count: number }).count,
+        outbox: (database.prepare(`
+          SELECT count(*) AS count FROM event_outbox
+          WHERE event_id IN (SELECT id FROM events WHERE run_id = ?)
+        `).get(boundary.runId) as { count: number }).count,
+        receipts: (database.prepare(`
+          SELECT count(*) AS count FROM settings
+          WHERE key LIKE 'ti_scale.recovery.idempotency.%'
+        `).get() as { count: number }).count,
+      };
+      const rejected = await fetch(
+        `${url}/api/v2/operations/runs/${boundary.runId}/recovery/reassign`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": "recovery-missing-authority-key",
+            "X-Test-Actor": "operator-one",
+            "X-Test-Access": "recovery",
+          },
+          body: JSON.stringify({
+            ...boundary.exact,
+            targetAgentId: boundary.candidateId,
+            capability: "network.recon",
+            reason: "Move the exact stopped assignment only after trusted authority is proven.",
+            guidedDecisionId: boundary.decisionId,
+            expectedDecisionFingerprint: boundary.fingerprint,
+          }),
+        },
+      );
+      expect(rejected.status).toBe(409);
+      expect(await body(rejected)).toMatchObject({
+        error: {
+          code: "control_plane_lease_missing",
+          retryable: false,
+          remediation: "Use the active V2 runtime controller for this mutation; the HTTP boundary cannot mint or infer lease authority.",
+        },
+      });
+      expect({
+        events: (database.prepare("SELECT count(*) AS count FROM events WHERE run_id = ?")
+          .get(boundary.runId) as { count: number }).count,
+        audits: (database.prepare("SELECT count(*) AS count FROM audit_records WHERE run_id = ?")
+          .get(boundary.runId) as { count: number }).count,
+        checkpoints: (database.prepare("SELECT count(*) AS count FROM checkpoints WHERE run_id = ?")
+          .get(boundary.runId) as { count: number }).count,
+        outbox: (database.prepare(`
+          SELECT count(*) AS count FROM event_outbox
+          WHERE event_id IN (SELECT id FROM events WHERE run_id = ?)
+        `).get(boundary.runId) as { count: number }).count,
+        receipts: (database.prepare(`
+          SELECT count(*) AS count FROM settings
+          WHERE key LIKE 'ti_scale.recovery.idempotency.%'
+        `).get() as { count: number }).count,
+      }).toEqual(before);
     } finally { database.close(); }
   });
 
@@ -1013,6 +1171,126 @@ describe("canonical operations HTTP API", () => {
     } finally { database.close(); }
   });
 
+  test("projects every model-aware provider choice with truthful eligibility and keeps an empty route registry fail-closed", async () => {
+    const providerIds = [
+      "provider-compatible",
+      "provider-unavailable",
+      "provider-stale",
+      "provider-budget",
+      "provider-enforcement",
+      "provider-model-absent",
+    ] as const;
+    const { database, url } = await application({ providerRouteIds: providerIds });
+    try {
+      const boundary = seedGuidedRecoveryMutationBoundary(
+        database, "provider-candidates", "provider_turn", "2026-07-15T11:00:00.000Z",
+      );
+      database.prepare(`UPDATE runs SET budget_json = ? WHERE id = ?`)
+        .run(JSON.stringify({ retries: 2, replans: 2, providerTokens: 100 }), boundary.runId);
+      const insertHealth = database.prepare(`
+        INSERT INTO health_snapshots (
+          id, component_type, component_id, status, metrics_json, message, captured_at
+        ) VALUES (?, 'provider', ?, ?, ?, 'Recovery provider fixture', ?)
+      `);
+      const ready = (overrides: Record<string, unknown> = {}) => ({
+        configured: true,
+        authenticated: true,
+        callable: true,
+        supportsGuided: true,
+        enforcesAutonomousBoundary: false,
+        reportsExactTokenUsage: true,
+        reportsExactCostUsage: true,
+        requestedModel: RECOVERY_MODEL_ID,
+        returnedModel: RECOVERY_MODEL_ID,
+        modelConfigurationHash: RECOVERY_MODEL_CONFIGURATION_HASH,
+        attestedAt: "2026-07-15T10:30:00.000Z",
+        ...overrides,
+      });
+      insertHealth.run("health-provider-compatible", providerIds[0], "healthy", JSON.stringify(ready()), C);
+      insertHealth.run("health-provider-unavailable", providerIds[1], "unhealthy", JSON.stringify(ready()), C);
+      insertHealth.run("health-provider-stale", providerIds[2], "healthy", JSON.stringify(ready({
+        attestedAt: "2026-07-15T10:20:00.000Z",
+      })), C);
+      insertHealth.run("health-provider-budget", providerIds[3], "healthy", JSON.stringify(ready({
+        reportsExactTokenUsage: false,
+      })), C);
+      insertHealth.run("health-provider-enforcement", providerIds[4], "healthy", JSON.stringify(ready({
+        supportsGuided: false,
+      })), C);
+      insertHealth.run("health-provider-model-absent", providerIds[5], "healthy", JSON.stringify(ready({
+        requestedModel: undefined,
+        returnedModel: undefined,
+        modelConfigurationHash: undefined,
+      })), C);
+
+      const response = await fetch(`${url}/api/v2/operations/runs/${boundary.runId}/recovery`, {
+        headers: { "X-Test-Actor": "operator-one", "X-Test-Access": "recovery" },
+      });
+      expect(response.status).toBe(200);
+      const recovery = await body(response);
+      expect(recovery.providerCandidates).toHaveLength(providerIds.length);
+      expect(recovery.providerCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          providerId: providerIds[0], modelId: RECOVERY_MODEL_ID,
+          modelConfigurationHash: RECOVERY_MODEL_CONFIGURATION_HASH,
+          eligibility: "compatible", enabled: true,
+        }),
+        expect.objectContaining({ providerId: providerIds[1], eligibility: "unavailable", enabled: false }),
+        expect.objectContaining({ providerId: providerIds[2], eligibility: "stale", enabled: false }),
+        expect.objectContaining({ providerId: providerIds[3], eligibility: "budget_incompatible", enabled: false }),
+        expect.objectContaining({ providerId: providerIds[4], eligibility: "enforcement_incompatible", enabled: false }),
+        expect.objectContaining({
+          providerId: providerIds[5], modelId: null, modelConfigurationHash: null,
+          eligibility: "unavailable", enabled: false,
+        }),
+      ]));
+      for (const candidate of recovery.providerCandidates) expect(candidate.reason).toMatch(/\S/u);
+      expect(recovery.actions.find((item: any) => item.kind === "change_provider")).toMatchObject({
+        available: true,
+        command: "change_provider",
+      });
+    } finally { database.close(); }
+
+    const failClosed = await application({ providerRouteIds: [] });
+    try {
+      const boundary = seedGuidedRecoveryMutationBoundary(
+        failClosed.database, "provider-none", "provider_turn", "2026-07-15T11:00:00.000Z",
+      );
+      const response = await fetch(`${failClosed.url}/api/v2/operations/runs/${boundary.runId}/recovery`, {
+        headers: { "X-Test-Actor": "operator-one", "X-Test-Access": "recovery" },
+      });
+      const recovery = await body(response);
+      expect(recovery.providerCandidates).toEqual([]);
+      expect(recovery.actions.find((item: any) => item.kind === "change_provider")).toMatchObject({
+        available: false,
+        command: null,
+      });
+      const mutation = await fetch(
+        `${failClosed.url}/api/v2/operations/runs/${boundary.runId}/recovery/provider`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": "provider-empty-registry",
+            "X-Test-Actor": "operator-one",
+            "X-Test-Access": "recovery",
+          },
+          body: JSON.stringify({
+            ...boundary.exact,
+            providerId: "grok-acp",
+            modelId: RECOVERY_MODEL_ID,
+            modelConfigurationHash: RECOVERY_MODEL_CONFIGURATION_HASH,
+            guidedDecisionId: boundary.decisionId,
+            expectedDecisionFingerprint: boundary.fingerprint,
+            reason: "Prove the empty provider registry stays fail closed",
+          }),
+        },
+      );
+      expect(mutation.status).toBe(409);
+      expect(await body(mutation)).toMatchObject({ error: { code: "provider_route_not_callable" } });
+    } finally { failClosed.database.close(); }
+  });
+
   test("binds Guided recovery changes to the current unexpired exact decision without renewing expiry", async () => {
     const { database, url } = await application();
     try {
@@ -1030,6 +1308,9 @@ describe("canonical operations HTTP API", () => {
         enforcesAutonomousBoundary: true,
         reportsExactTokenUsage: true,
         reportsExactCostUsage: true,
+        requestedModel: RECOVERY_MODEL_ID,
+        returnedModel: RECOVERY_MODEL_ID,
+        modelConfigurationHash: RECOVERY_MODEL_CONFIGURATION_HASH,
         attestedAt: "2026-07-15T10:30:00.000Z",
       }));
       const headers = (key: string) => ({
@@ -1072,6 +1353,8 @@ describe("canonical operations HTTP API", () => {
           body: JSON.stringify({
             ...expiredProvider.exact,
             providerId: "grok-acp",
+            modelId: RECOVERY_MODEL_ID,
+            modelConfigurationHash: RECOVERY_MODEL_CONFIGURATION_HASH,
             guidedDecisionId: expiredProvider.decisionId,
             expectedDecisionFingerprint: expiredProvider.fingerprint,
             reason: "Use the healthy callable provider route",
@@ -1133,6 +1416,41 @@ describe("canonical operations HTTP API", () => {
       const currentProvider = seedGuidedRecoveryMutationBoundary(
         database, "current-provider", "provider_turn", "2026-07-15T11:00:00.000Z",
       );
+      const missingModelHash = await fetch(
+        `${url}/api/v2/operations/runs/${currentProvider.runId}/recovery/provider`,
+        {
+          method: "POST",
+          headers: headers("guided-current-provider-missing-model-hash"),
+          body: JSON.stringify({
+            ...currentProvider.exact,
+            providerId: "grok-acp",
+            modelId: RECOVERY_MODEL_ID,
+            guidedDecisionId: currentProvider.decisionId,
+            expectedDecisionFingerprint: currentProvider.fingerprint,
+            reason: "Use only an exact provider and model configuration",
+          }),
+        },
+      );
+      expect(missingModelHash.status).toBe(400);
+      expect(await body(missingModelHash)).toMatchObject({ error: { code: "invalid_request" } });
+      const changedReadiness = await fetch(
+        `${url}/api/v2/operations/runs/${currentProvider.runId}/recovery/provider`,
+        {
+          method: "POST",
+          headers: headers("guided-current-provider-stale-model"),
+          body: JSON.stringify({
+            ...currentProvider.exact,
+            providerId: "grok-acp",
+            modelId: "xai/different-model",
+            modelConfigurationHash: RECOVERY_MODEL_CONFIGURATION_HASH,
+            guidedDecisionId: currentProvider.decisionId,
+            expectedDecisionFingerprint: currentProvider.fingerprint,
+            reason: "Use only the exact provider model shown by readiness",
+          }),
+        },
+      );
+      expect(changedReadiness.status).toBe(409);
+      expect(await body(changedReadiness)).toMatchObject({ error: { code: "provider_route_model_changed" } });
       const changedProvider = await fetch(
         `${url}/api/v2/operations/runs/${currentProvider.runId}/recovery/provider`,
         {
@@ -1141,6 +1459,8 @@ describe("canonical operations HTTP API", () => {
           body: JSON.stringify({
             ...currentProvider.exact,
             providerId: "grok-acp",
+            modelId: RECOVERY_MODEL_ID,
+            modelConfigurationHash: RECOVERY_MODEL_CONFIGURATION_HASH,
             guidedDecisionId: currentProvider.decisionId,
             expectedDecisionFingerprint: currentProvider.fingerprint,
             reason: "Use the healthy callable provider route",
@@ -1149,7 +1469,31 @@ describe("canonical operations HTTP API", () => {
       );
       expect(changedProvider.status).toBe(200);
       expect(await body(changedProvider)).toMatchObject({
-        mutation: { kind: "change_provider", providerId: "grok-acp", providerRouteVersion: 1 },
+        mutation: {
+          kind: "change_provider",
+          providerId: "grok-acp",
+          modelId: RECOVERY_MODEL_ID,
+          modelConfigurationHash: RECOVERY_MODEL_CONFIGURATION_HASH,
+          providerRouteVersion: 1,
+        },
+      });
+      const binding = JSON.parse((database.prepare(`SELECT value_json FROM settings WHERE key = ?`)
+        .get(recoveryProviderRouteSettingKey(currentProvider.runId)) as { value_json: string }).value_json);
+      expect(binding).toMatchObject({
+        schemaVersion: 2,
+        providerId: "grok-acp",
+        modelId: RECOVERY_MODEL_ID,
+        modelConfigurationHash: RECOVERY_MODEL_CONFIGURATION_HASH,
+        stepId: currentProvider.stepId,
+        assignmentId: currentProvider.assignmentId,
+      });
+      const routeEvent = database.prepare(`
+        SELECT payload_json FROM events WHERE run_id = ? AND event_type = 'run.provider_route_changed'
+      `).get(currentProvider.runId) as { payload_json: string };
+      expect(JSON.parse(routeEvent.payload_json)).toMatchObject({
+        providerId: "grok-acp",
+        modelId: RECOVERY_MODEL_ID,
+        modelConfigurationHash: RECOVERY_MODEL_CONFIGURATION_HASH,
       });
     } finally { database.close(); }
   });
@@ -1217,9 +1561,10 @@ describe("canonical operations HTTP API", () => {
     } finally { database.close(); }
   });
 
-  test("resolves only same-mission run, artifact, and evidence relationships for stable deep links", async () => {
+  test("keeps archived-run evidence deep links stable and never constructs deleted or cross-scope relationships", async () => {
     const { database, url } = await application();
     try {
+      database.prepare("UPDATE missions SET status = 'archived' WHERE id = 'mission-a'").run();
       database.prepare(`
         INSERT INTO evidence (
           id, mission_id, run_id, source, acquired_at, target, evidence_type,
@@ -1229,6 +1574,18 @@ describe("canonical operations HTTP API", () => {
           'evidence-cross-relation', 'mission-a', 'run-b', 'fixture', ?, 'lab.internal',
           'service', ?, '{}', 0.5, 'private', 'unverified',
           'Cross-mission historical relation', 'artifact-report-b', 'operator', ?
+        )
+      `).run(A, HASH_B, A);
+      database.prepare(`
+        INSERT INTO evidence (
+          id, mission_id, run_id, source, acquired_at, target, evidence_type,
+          content_hash, provenance_json, confidence, sensitivity, verification_state,
+          summary, artifact_id, created_by, created_at
+        ) VALUES (
+          'evidence-deleted-artifact', 'mission-a', 'run-a', 'fixture', ?, 'lab.internal',
+          'file_artifact_with_hash', ?, '{"lifecycle":"deleted_artifact"}', 0.5,
+          'private', 'disputed', 'Archived evidence with a deleted artifact reference',
+          'artifact-deleted', 'operator', ?
         )
       `).run(A, HASH_B, A);
       database.prepare(`
@@ -1250,7 +1607,13 @@ describe("canonical operations HTTP API", () => {
           'artifact-store://metadata/cross', ?, 1, 'application/json', 'private', '{}', ?
         )
       `).run(HASH_B, A);
-      const evidence = await body(await fetch(`${url}/api/v2/intelligence/evidence/evidence-a-new`));
+      expect(database.prepare("SELECT status FROM missions WHERE id = 'mission-a'").get())
+        .toEqual({ status: "archived" });
+      const archivedEvidenceResponse = await fetch(
+        `${url}/api/v2/intelligence/evidence/evidence-a-new`,
+      );
+      expect(archivedEvidenceResponse.status).toBe(200);
+      const evidence = await body(archivedEvidenceResponse);
       expect(evidence).toMatchObject({
         id: "evidence-a-new",
         mission: { id: "mission-a", name: "Engagement A" },
@@ -1258,6 +1621,18 @@ describe("canonical operations HTTP API", () => {
         run: { id: "run-a" },
         artifactId: "artifact-report-a",
         artifact: { id: "artifact-report-a", artifactType: "mission_report" },
+      });
+      const deletedArtifactEvidenceResponse = await fetch(
+        `${url}/api/v2/intelligence/evidence/evidence-deleted-artifact`,
+      );
+      expect(deletedArtifactEvidenceResponse.status).toBe(200);
+      expect(await body(deletedArtifactEvidenceResponse)).toMatchObject({
+        id: "evidence-deleted-artifact",
+        mission: { id: "mission-a", name: "Engagement A" },
+        runId: "run-a",
+        run: { id: "run-a" },
+        artifactId: "artifact-deleted",
+        artifact: null,
       });
 
       const mismatchedEvidence = await body(await fetch(`${url}/api/v2/intelligence/evidence/evidence-cross-relation`));
@@ -1304,6 +1679,10 @@ describe("canonical operations HTTP API", () => {
       expect(report.items.map((item: any) => item.id)).toEqual(["artifact-report-a"]);
       expect(report.items[0].storage).toEqual({ scheme: "https", available: true });
       expect(report.items[0].contextPackIds).toEqual(["context-a"]);
+      expect(report.items[0].metadata).toMatchObject({
+        downloadUrl: "/api/v2/reports/artifact-report-a/download",
+        producerPath: "[REDACTED LOCATION]",
+      });
       const actions = await body(await fetch(`${url}/api/v2/operations/actions?runId=run-a`));
       expect(actions.items).toMatchObject([{
         id: "action-a", runId: "run-a", journey: "guided", status: "succeeded",

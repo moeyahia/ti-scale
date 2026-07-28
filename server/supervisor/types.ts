@@ -74,6 +74,8 @@ export interface TransitionResult {
 export interface ActionIntent {
   missionId: string;
   actionType: string;
+  /** Canonical ActionClassRegistry ID when the intent is a durable runtime action. */
+  actionClass?: string;
   arguments: Readonly<Record<string, unknown>>;
   target: string;
   runId: string;

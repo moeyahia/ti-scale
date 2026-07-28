@@ -4,7 +4,9 @@ import {
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
   fstatSync,
+  ftruncateSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -16,6 +18,7 @@ import {
   rmSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
@@ -77,6 +80,12 @@ export interface VerifiedStaticRelease {
   readonly manifest: StaticArtifactManifest;
 }
 
+export interface StaticArtifactSourceFingerprint {
+  readonly artifactSha256: string;
+  readonly entryCount: number;
+  readonly totalBytes: number;
+}
+
 export interface ActiveStaticReleasePointer {
   readonly schemaVersion: typeof POINTER_SCHEMA;
   readonly scope: typeof POINTER_SCOPE;
@@ -95,6 +104,27 @@ export interface PinnedStaticRelease extends VerifiedStaticRelease {
 export interface StaticArtifactReleaseStoreOptions {
   readonly releaseRoot: string;
   readonly clock?: () => Date;
+  /** Test/audit hook invoked only after the kernel advisory lock is held. */
+  readonly onLockAcquired?: (path: string) => void;
+}
+
+export interface FinalizeForwardOnlyStaticActivationInput {
+  readonly activeReleaseId: string;
+  readonly activeManifestSha256: string;
+  readonly supersededReleaseId: string;
+  readonly supersededManifestSha256: string;
+  /**
+   * Test/audit hook invoked after the durable pointer no longer retains a
+   * previous-release identity and before the superseded tree is removed.
+   */
+  readonly onPreviousIdentityCleared?: () => void;
+}
+
+export interface FinalizeForwardOnlyStaticActivationResult {
+  readonly activeReleaseId: string;
+  readonly pointerGeneration: number;
+  readonly previousIdentityCleared: true;
+  readonly supersededReleaseDeleted: boolean;
 }
 
 function isNodeError(error: unknown, code: string): boolean {
@@ -190,12 +220,37 @@ function resolveArtifactPath(root: string, relativePath: string): string {
 
 function ensureDirectory(path: string, label: string): void {
   assertNoExistingSymlinkComponents(path, label);
+  const absolute = resolve(path);
+  const created: string[] = [];
+  let existingAncestor = absolute;
+  while (!existsSync(existingAncestor)) {
+    created.push(existingAncestor);
+    const parent = dirname(existingAncestor);
+    if (parent === existingAncestor) {
+      throw new StaticReleaseError("invalid_v2_release_path", `${label} has no existing directory ancestor`);
+    }
+    existingAncestor = parent;
+  }
+  const ancestorMetadata = lstatSync(existingAncestor);
+  if (
+    !ancestorMetadata.isDirectory() || ancestorMetadata.isSymbolicLink() ||
+    realpathSync(existingAncestor) !== existingAncestor
+  ) {
+    throw new StaticReleaseError("invalid_v2_release_path", `${label} must not traverse symbolic links`);
+  }
   mkdirSync(path, { recursive: true, mode: 0o700 });
   const metadata = lstatSync(path);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+  if (
+    !metadata.isDirectory() || metadata.isSymbolicLink() ||
+    realpathSync(absolute) !== absolute
+  ) {
     throw new StaticReleaseError("invalid_v2_release_path", `${label} must be a regular directory`);
   }
   assertNoExistingSymlinkComponents(path, label);
+  // `created` is deepest-first. Commit every new directory's own entries before
+  // committing the entry that names it in the next existing ancestor.
+  for (const directory of created) fsyncDirectory(directory);
+  if (created.length) fsyncDirectory(existingAncestor);
 }
 
 function requireDirectory(path: string, label: string): void {
@@ -264,6 +319,111 @@ function fsyncDirectory(path: string): void {
   }
 }
 
+interface StaticArtifactAdvisoryLock {
+  release(): void;
+}
+
+/**
+ * `flock` owns the lock on the open-file description inherited from this
+ * process. The short-lived helper exits after acquisition, while this process'
+ * descriptor keeps ownership until close or process death. The pathname is
+ * intentionally persistent: stale owner metadata never grants or denies
+ * ownership, and SIGKILL releases the kernel lock without cleanup code.
+ */
+function acquireStaticArtifactAdvisoryLock(
+  path: string,
+  acquiredAt: string,
+): StaticArtifactAdvisoryLock {
+  const descriptor = openSync(
+    path,
+    constants.O_RDWR | constants.O_CREAT | NO_FOLLOW,
+    0o600,
+  );
+  let acquired = false;
+  try {
+    const descriptorMetadata = fstatSync(descriptor);
+    const pathMetadata = lstatSync(path);
+    if (
+      !descriptorMetadata.isFile() || descriptorMetadata.nlink !== 1 ||
+      pathMetadata.isSymbolicLink() || !pathMetadata.isFile() ||
+      descriptorMetadata.dev !== pathMetadata.dev || descriptorMetadata.ino !== pathMetadata.ino
+    ) {
+      throw new StaticReleaseError("invalid_v2_release_path", "Static artifact lock must be one real regular file");
+    }
+    fchmodSync(descriptor, 0o600);
+    const lock = Bun.spawnSync(
+      ["/usr/bin/flock", "--exclusive", "--nonblock", "0"],
+      {
+        cwd: "/",
+        env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" },
+        stdin: descriptor,
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 5_000,
+        killSignal: "SIGKILL",
+      },
+    );
+    if (lock.exitCode === 1) {
+      throw new StaticReleaseError("release_locked", "Another V2 static artifact handoff holds the release lock");
+    }
+    if (lock.exitCode !== 0) {
+      const detail = new TextDecoder().decode(lock.stderr).trim().slice(0, 500);
+      throw new Error(`Static artifact advisory lock acquisition failed${detail ? `: ${detail}` : ""}`);
+    }
+    acquired = true;
+    const owner = `${JSON.stringify({
+      schemaVersion: "ti-scale.static-artifact-lock-owner.v1",
+      pid: process.pid,
+      acquiredAt,
+    })}\n`;
+    ftruncateSync(descriptor, 0);
+    writeSync(descriptor, owner, 0, "utf8");
+    fsyncSync(descriptor);
+    fsyncDirectory(dirname(path));
+  } catch (error) {
+    closeSync(descriptor);
+    throw error;
+  }
+
+  let released = false;
+  return {
+    release: () => {
+      if (released) return;
+      released = true;
+      if (acquired) closeSync(descriptor);
+    },
+  };
+}
+
+function fsyncStaticReleaseTree(root: string): void {
+  const directories: string[] = [];
+  const visit = (directory: string): void => {
+    directories.push(directory);
+    for (const name of readdirSync(directory).sort((left, right) => left.localeCompare(right, "en"))) {
+      const path = join(directory, name);
+      const metadata = lstatSync(path);
+      if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+        visit(path);
+        continue;
+      }
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        throw new StaticReleaseError("unsafe_artifact_source", "Immutable release contains an unsafe filesystem entry");
+      }
+      const descriptor = openSync(path, constants.O_RDONLY | NO_FOLLOW);
+      try {
+        if (!fstatSync(descriptor).isFile()) {
+          throw new StaticReleaseError("unsafe_artifact_source", "Immutable release file changed before durability sync");
+        }
+        fsyncSync(descriptor);
+      } finally {
+        closeSync(descriptor);
+      }
+    }
+  };
+  visit(root);
+  for (const directory of directories.reverse()) fsyncDirectory(directory);
+}
+
 function scanRegularArtifactTree(root: string, excludeRootManifest: boolean): readonly StaticArtifactManifestEntry[] {
   requireDirectory(root, "Static artifact directory");
   const canonicalRoot = realpathSync(root);
@@ -302,6 +462,41 @@ function scanRegularArtifactTree(root: string, excludeRootManifest: boolean): re
   visit(root, "");
   entries.sort((left, right) => left.path.localeCompare(right.path, "en"));
   return entries;
+}
+
+/**
+ * Read-only identity for the exact browser artifact tree that `stageRelease`
+ * would publish. It performs the same path, symlink, and regular-file checks
+ * as staging and does not create a candidate or other retained payload.
+ */
+export function fingerprintStaticArtifactSource(
+  sourceDirectory: string,
+): StaticArtifactSourceFingerprint {
+  const source = v2OwnedAbsolutePath(
+    sourceDirectory,
+    "Ti-Scale static artifact source",
+  );
+  const entries = scanRegularArtifactTree(source, false);
+  if (
+    entries.length === 0 ||
+    !entries.some((entry) => entry.path === "index.html")
+  ) {
+    throw new StaticReleaseError(
+      "unsafe_artifact_source",
+      "Built V2 artifact source must contain index.html",
+    );
+  }
+  if (entries.some((entry) => entry.path === STATIC_ARTIFACT_MANIFEST)) {
+    throw new StaticReleaseError(
+      "unsafe_artifact_source",
+      `${STATIC_ARTIFACT_MANIFEST} is reserved for the immutable handoff`,
+    );
+  }
+  return {
+    artifactSha256: canonicalEntriesDigest(entries),
+    entryCount: entries.length,
+    totalBytes: entries.reduce((total, entry) => total + entry.bytes, 0),
+  };
 }
 
 function assertSameEntries(
@@ -417,6 +612,7 @@ export class StaticArtifactReleaseStore {
   readonly stateDirectory: string;
   readonly pointerPath: string;
   readonly #clock: () => Date;
+  readonly #onLockAcquired: ((path: string) => void) | undefined;
 
   constructor(options: StaticArtifactReleaseStoreOptions) {
     this.releaseRoot = v2OwnedAbsolutePath(options.releaseRoot, "TI_SCALE_STATIC_RELEASE_ROOT");
@@ -424,6 +620,7 @@ export class StaticArtifactReleaseStore {
     this.stateDirectory = join(this.releaseRoot, "state");
     this.pointerPath = join(this.stateDirectory, STATIC_RELEASE_POINTER);
     this.#clock = options.clock ?? (() => new Date());
+    this.#onLockAcquired = options.onLockAcquired;
   }
 
   stageRelease(input: { readonly releaseId: string; readonly sourceDirectory: string }): VerifiedStaticRelease {
@@ -482,7 +679,7 @@ export class StaticArtifactReleaseStore {
         writeExclusiveFile(join(staging, STATIC_ARTIFACT_MANIFEST), manifestBytes, 0o444);
         this.#verifyDirectory(staging, id, manifestSha256, false);
         readonlyTree(staging);
-        fsyncDirectory(staging);
+        fsyncStaticReleaseTree(staging);
         renameSync(staging, destination);
         promoted = true;
         fsyncDirectory(this.releasesDirectory);
@@ -544,6 +741,129 @@ export class StaticArtifactReleaseStore {
     });
   }
 
+  /**
+   * Complete a forward-only activation after the replacement runtime has
+   * passed its compatibility proof. The active release is reverified under the
+   * store lock, the previous pointer identity is durably cleared first, and
+   * only the exact superseded immutable tree may then be deleted.
+   *
+   * The operation is deliberately idempotent. A crash after the pointer write
+   * but before deletion leaves an unreferenced tree which a restarted release
+   * controller can delete by replaying this exact call.
+   */
+  finalizeForwardOnlyActivation(
+    input: FinalizeForwardOnlyStaticActivationInput,
+  ): FinalizeForwardOnlyStaticActivationResult {
+    const activeReleaseId = releaseId(input.activeReleaseId);
+    const supersededReleaseId = releaseId(input.supersededReleaseId);
+    if (!SHA256.test(input.activeManifestSha256) || !SHA256.test(input.supersededManifestSha256)) {
+      throw new StaticReleaseError(
+        "artifact_manifest_invalid",
+        "Forward-only static finalization requires exact manifest SHA-256 values",
+      );
+    }
+    if (activeReleaseId === supersededReleaseId) {
+      throw new StaticReleaseError(
+        "active_pointer_invalid",
+        "Forward-only static finalization must never delete the active release",
+      );
+    }
+    return this.#withLock(() => {
+      const current = this.#readPointer(true)!;
+      const active = this.#verifyDirectory(
+        join(this.releasesDirectory, activeReleaseId),
+        activeReleaseId,
+        input.activeManifestSha256,
+        true,
+      );
+      if (
+        current.activeReleaseId !== active.releaseId ||
+        current.activeManifestSha256 !== active.manifestSha256
+      ) {
+        throw new StaticReleaseError(
+          "active_pointer_invalid",
+          "Forward-only static finalization does not match the active release",
+        );
+      }
+      if (
+        current.previousReleaseId !== null &&
+        (
+          current.previousReleaseId !== supersededReleaseId ||
+          current.previousManifestSha256 !== input.supersededManifestSha256
+        )
+      ) {
+        throw new StaticReleaseError(
+          "active_pointer_invalid",
+          "Forward-only static finalization does not match the recorded superseded release",
+        );
+      }
+
+      let pointer = current;
+      if (
+        current.previousReleaseId !== null ||
+        current.previousManifestSha256 !== null
+      ) {
+        pointer = {
+          ...current,
+          generation: current.generation + 1,
+          previousReleaseId: null,
+          previousManifestSha256: null,
+        };
+        this.#writePointer(pointer);
+        input.onPreviousIdentityCleared?.();
+      }
+
+      const supersededDirectory = join(
+        this.releasesDirectory,
+        supersededReleaseId,
+      );
+      let supersededReleaseDeleted = false;
+      try {
+        const metadata = lstatSync(supersededDirectory);
+        if (
+          !metadata.isDirectory() ||
+          metadata.isSymbolicLink() ||
+          realpathSync(supersededDirectory) !== supersededDirectory
+        ) {
+          throw new StaticReleaseError(
+            "unsafe_artifact_source",
+            "Superseded static release is not an exact immutable directory",
+          );
+        }
+        rmSync(supersededDirectory, { recursive: true, force: false });
+        fsyncDirectory(this.releasesDirectory);
+        supersededReleaseDeleted = true;
+      } catch (error) {
+        if (!isNodeError(error, "ENOENT")) throw error;
+      }
+
+      const stillActive = this.#verifyDirectory(
+        join(this.releasesDirectory, activeReleaseId),
+        activeReleaseId,
+        input.activeManifestSha256,
+        true,
+      );
+      const finalPointer = this.#readPointer(true)!;
+      if (
+        finalPointer.activeReleaseId !== stillActive.releaseId ||
+        finalPointer.activeManifestSha256 !== stillActive.manifestSha256 ||
+        finalPointer.previousReleaseId !== null ||
+        finalPointer.previousManifestSha256 !== null
+      ) {
+        throw new StaticReleaseError(
+          "active_pointer_invalid",
+          "Forward-only static finalization did not preserve the exact active release",
+        );
+      }
+      return {
+        activeReleaseId,
+        pointerGeneration: finalPointer.generation,
+        previousIdentityCleared: true,
+        supersededReleaseDeleted,
+      };
+    });
+  }
+
   pinActiveRelease(): PinnedStaticRelease {
     this.#requireLayout();
     const pointer = this.#readPointer(true)!;
@@ -554,39 +874,6 @@ export class StaticArtifactReleaseStore {
       true,
     );
     return { ...verified, pointerGeneration: pointer.generation };
-  }
-
-  rollbackPointer(): PinnedStaticRelease {
-    return this.#withLock(() => {
-      const current = this.#readPointer(true)!;
-      if (!current.previousReleaseId || !current.previousManifestSha256) {
-        throw new StaticReleaseError("rollback_target_missing", "No verified prior V2 static release is recorded");
-      }
-      const active = this.#verifyDirectory(
-        join(this.releasesDirectory, current.activeReleaseId),
-        current.activeReleaseId,
-        current.activeManifestSha256,
-        true,
-      );
-      const prior = this.#verifyDirectory(
-        join(this.releasesDirectory, current.previousReleaseId),
-        current.previousReleaseId,
-        current.previousManifestSha256,
-        true,
-      );
-      const pointer: ActiveStaticReleasePointer = {
-        schemaVersion: POINTER_SCHEMA,
-        scope: POINTER_SCOPE,
-        generation: current.generation + 1,
-        activeReleaseId: prior.releaseId,
-        activeManifestSha256: prior.manifestSha256,
-        previousReleaseId: active.releaseId,
-        previousManifestSha256: active.manifestSha256,
-        activatedAt: this.#clock().toISOString(),
-      };
-      this.#writePointer(pointer);
-      return { ...prior, pointerGeneration: pointer.generation };
-    });
   }
 
   readActivePointer(): ActiveStaticReleasePointer {
@@ -609,27 +896,12 @@ export class StaticArtifactReleaseStore {
   #withLock<T>(operation: () => T): T {
     this.#ensureLayout();
     const path = join(this.releaseRoot, ".static-artifact-handoff.lock");
-    let descriptor: number;
+    const lock = acquireStaticArtifactAdvisoryLock(path, this.#clock().toISOString());
     try {
-      descriptor = openSync(
-        path,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
-        0o600,
-      );
-    } catch (error) {
-      if (isNodeError(error, "EEXIST")) {
-        throw new StaticReleaseError("release_locked", "Another V2 static artifact handoff holds the release lock");
-      }
-      throw error;
-    }
-    try {
-      writeFileSync(descriptor, JSON.stringify({ pid: process.pid, acquiredAt: this.#clock().toISOString() }));
-      fsyncSync(descriptor);
+      this.#onLockAcquired?.(path);
       return operation();
     } finally {
-      closeSync(descriptor);
-      unlinkSync(path);
-      fsyncDirectory(this.releaseRoot);
+      lock.release();
     }
   }
 

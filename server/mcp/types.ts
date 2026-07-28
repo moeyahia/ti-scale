@@ -48,16 +48,20 @@ interface McpServerConnectionBase {
   readonly attestation: McpAttestationPolicy;
 }
 
-/**
- * Authentication values are referenced by environment-variable name. Secret
- * values are deliberately not part of this configuration object or an
- * attestation record.
- */
+export interface McpHeaderCredentialReference {
+  readonly id: string;
+  readonly scheme?: string;
+}
+
+/** Secret values are never part of this descriptor or an attestation. */
 export interface McpStreamableHttpConnectionConfig extends McpServerConnectionBase {
   readonly transport: "streamable-http";
   readonly endpoint: string;
   readonly allowInsecureLoopback: boolean;
-  readonly headerEnvironment: Readonly<Record<string, string>>;
+  /** Compatibility path for non-sensitive or separately reviewed references. */
+  readonly headerEnvironment?: Readonly<Record<string, string>>;
+  /** Preferred production path: a credential ID in systemd's private mount. */
+  readonly headerCredentials?: Readonly<Record<string, McpHeaderCredentialReference>>;
 }
 
 /**

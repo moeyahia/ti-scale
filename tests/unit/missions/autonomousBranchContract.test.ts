@@ -42,6 +42,7 @@ function requestWith(
       providerPolicy: "automatic_enforcing_only",
       toolPolicy: "contract_allowlist",
       specialistAgentIds: [],
+      agentModelAssignments: [],
       memoryScopes: [],
       contextNodeIds: [],
       safeStopConditions: [],

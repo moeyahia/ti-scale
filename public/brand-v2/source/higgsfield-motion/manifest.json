@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "status": "ready",
+  "updatedAt": "2026-07-18T16:55:00Z",
+  "studyTitle": "Titanium Core Transformation",
+  "statusDetail": "The verified keyframes and continuous 15-second mechanical sequence are available. The review uses a cross-browser H.264 delivery composited onto the exact Ti-Scale canvas color; the transparent VP9 and untouched 4K Higgsfield masters remain preserved.",
+  "stages": [
+    {
+      "id": "locked-assembled",
+      "label": "Locked assembly",
+      "summary": "The approved Ti-Scale core remains intact while the production sequence establishes its exact geometry, material, camera, and light.",
+      "progress": 0,
+      "imagePath": "brand-v2/optimized/higgsfield-motion/01-locked-assembled-transparent-1440p.webp",
+      "imageAlt": "Assembled sculptural Ti-Scale core rendered in light titanium and graphite with a transparent background.",
+      "width": 2560,
+      "height": 1429
+    },
+    {
+      "id": "engineering-explosion",
+      "label": "Engineering explosion",
+      "summary": "The same titanium components separate along their real seams and joint normals, exposing a credible reassemblable mechanical system without changing the core identity.",
+      "progress": 0.42,
+      "imagePath": "brand-v2/optimized/higgsfield-motion/02-exploded-transparent-1440p.webp",
+      "imageAlt": "Transparent-background exploded engineering view of the same Ti-Scale titanium core with its original components separated along visible seams.",
+      "width": 2560,
+      "height": 1429
+    },
+    {
+      "id": "architectural-chassis",
+      "label": "Architectural chassis",
+      "summary": "The titanium assembly resolves into a shadow-free physical chassis reserved for accessible live interface modules; no rendered dashboard data is embedded in the artwork.",
+      "progress": 1,
+      "imagePath": "brand-v2/optimized/higgsfield-motion/03-destination-shadowfree-1440p-172f33ba.webp",
+      "imageAlt": "Transparent-background titanium and graphite architectural chassis assembled from the Ti-Scale material system.",
+      "width": 2560,
+      "height": 1429
+    }
+  ],
+  "motion": {
+    "path": "brand-v2/optimized/higgsfield-motion/04-transformation-titanium-matte-1440p.mp4",
+    "mimeType": "video/mp4",
+    "durationSeconds": 15.042,
+    "posterPath": "brand-v2/optimized/higgsfield-motion/01-locked-assembled-transparent-1440p.webp",
+    "width": 2560,
+    "height": 1440
+  }
+}

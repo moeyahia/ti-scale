@@ -7,6 +7,14 @@ const source = readFileSync(
   new URL("../../e2e/accessibility-axe.spec.ts", import.meta.url),
   "utf8",
 );
+const zoomSource = readFileSync(
+  new URL("../../e2e/zoom-accessibility.spec.ts", import.meta.url),
+  "utf8",
+);
+const readinessSource = readFileSync(
+  new URL("../../e2e/support/applicationReadiness.ts", import.meta.url),
+  "utf8",
+);
 const tokenSource = readFileSync(
   new URL("../../../src/design-system/tokens/ti-scale.css", import.meta.url),
   "utf8",
@@ -15,6 +23,11 @@ const tokenSource = readFileSync(
 const MATERIAL_STATES = [
   "overview-command-palette-open",
   "autonomous-intake-scope",
+  "autonomous-intake-outcome",
+  "autonomous-intake-contract-expanded",
+  "autonomous-intake-team",
+  "autonomous-intake-context",
+  "autonomous-intake-review-blocked",
   "guided-intake-scope",
   "versioned-plan-workspace",
   "guided-waiting-decision",
@@ -29,6 +42,7 @@ const MATERIAL_STATES = [
   "report-review",
   "system-policies",
   "system-settings",
+  "particle-module-transition-review",
 ] as const;
 
 type Rgb = readonly [number, number, number];
@@ -131,5 +145,16 @@ describe("automated accessibility gate policy", () => {
   test("Brain graph accessibility waits for the worker in development and immutable release builds", () => {
     expect(source).toContain('response.url().includes("memoryGraphLayout.worker")');
     expect(source).not.toContain('/src/workers/memoryGraphLayout.worker.ts');
+  });
+
+  test("axe and zoom gates audit the released application rather than its inert startup subtree", () => {
+    expect(source).toContain("await waitForInteractiveApplication(page);");
+    expect(zoomSource.match(/await waitForInteractiveApplication\(page\);/gu)).toHaveLength(3);
+    expect(readinessSource).toContain('"data-ti-boot-readiness", "ready"');
+    expect(readinessSource).toContain('"data-ti-boot-phase", "complete"');
+    expect(readinessSource).toContain('"aria-busy", "false"');
+    expect(readinessSource).toContain('not.toHaveAttribute("inert", /.*/u)');
+    expect(readinessSource).toContain('not.toHaveAttribute("disabled", /.*/u)');
+    expect(readinessSource).toContain('not.toHaveAttribute("aria-hidden", /.*/u)');
   });
 });

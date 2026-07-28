@@ -4,10 +4,22 @@ import { createServer, type Server } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DATABASE_MIGRATIONS } from "../../db";
+import {
+  createDatabaseConnection,
+  DATABASE_MIGRATIONS,
+  type SqliteDatabase,
+} from "../../db";
 import { ControlPlaneLeaseService, type ControlPlaneLease } from "../../control-plane";
-import { createRuntimeReadinessProviders } from "../RuntimeReadiness";
-import { createCommandOsApplication, type CommandOsApplication } from "../CommandOsApplication";
+import { EventRepository } from "../../events/EventRepository";
+import {
+  createRuntimeReadinessProviders,
+  type RuntimeReadinessSnapshot,
+} from "../RuntimeReadiness";
+import {
+  autonomousExecutionHealthReady,
+  createCommandOsApplication,
+  type CommandOsApplication,
+} from "../CommandOsApplication";
 
 const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
@@ -22,6 +34,369 @@ afterEach(async () => {
 });
 
 describe("CommandOsApplication", () => {
+  test("keeps in-memory authentication responsive while the dedicated outbox connection defers a writer lock", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ti-scale-outbox-isolation-"));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, "ti-scale.sqlite");
+    const readiness: RuntimeReadinessSnapshot = {
+      actionBoundaryActive: false,
+      delegationEnforced: false,
+      noHandsCommanderEnforced: true,
+      directCommanderToolsDenied: true,
+      specialistAssignmentRequired: false,
+      specialistsConfigured: 0,
+      providers: [],
+      mcp: {
+        enabled: false,
+        executionMode: "disabled",
+        startPermitted: false,
+        configuredServers: 0,
+        runnableServers: 0,
+        missingDependencies: 0,
+        missingSecrets: 0,
+      },
+      eventStream: "healthy",
+      secondBrain: "healthy",
+      legacyExecutionEnabled: false,
+    };
+    const commandOs = createCommandOsApplication({
+      databasePath,
+      readinessProviders: (_database, readRuntimeProjection) =>
+        createRuntimeReadinessProviders(() => readRuntimeProjection().readiness),
+      runtimeProjection: () => ({ readiness, agents: [], mcpServers: [] }),
+      resolveActor: () => "operator",
+      assertRunMutationLease: () => undefined,
+      projectionIntervalMs: 60_000,
+    });
+    applications.push(commandOs);
+
+    const now = new Date().toISOString();
+    commandOs.database.prepare(`
+      INSERT INTO missions (
+        id, name, objective, journey, created_by, created_at, updated_at
+      ) VALUES ('mission:outbox-isolation', 'Outbox isolation', 'Keep HTTP responsive',
+        'autonomous', 'operator', ?, ?)
+    `).run(now, now);
+    commandOs.database.prepare(`
+      INSERT INTO runs (
+        id, mission_id, journey, status, created_at, updated_at
+      ) VALUES ('run:outbox-isolation', 'mission:outbox-isolation',
+        'autonomous', 'running', ?, ?)
+    `).run(now, now);
+    new EventRepository(commandOs.database).append({
+      id: "event:outbox-isolation",
+      runId: "run:outbox-isolation",
+      eventType: "run.progressed",
+      actorType: "system",
+      summary: "An event waits behind the external writer",
+    });
+
+    const blocker = createDatabaseConnection({
+      filename: databasePath,
+      fileMustExist: true,
+      verifyIntegrity: false,
+      busyTimeoutMs: 0,
+    });
+    blocker.exec("BEGIN IMMEDIATE");
+
+    const app = express();
+    app.get("/api/v2/auth/session", (_request, response) => {
+      response.json({ schemaVersion: "2.4", configured: true, authenticated: true });
+    });
+    app.use(commandOs.router);
+    const server = createServer(app);
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Test server has no TCP address");
+
+    try {
+      const startAt = performance.now();
+      commandOs.eventStream.start();
+      const initialStartMs = performance.now() - startAt;
+      expect(initialStartMs).toBeLessThan(250);
+
+      const latencies: number[] = [];
+      const probeDeadline = Date.now() + 750;
+      while (Date.now() < probeDeadline) {
+        const probeAt = performance.now();
+        const response = await fetch(
+          `http://127.0.0.1:${address.port}/api/v2/auth/session`,
+        );
+        latencies.push(performance.now() - probeAt);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ authenticated: true });
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      expect(latencies.length).toBeGreaterThan(10);
+      expect(Math.max(...latencies)).toBeLessThan(250);
+
+      const pumpAt = performance.now();
+      const deferred = await commandOs.eventStream.pumpOnce();
+      expect(performance.now() - pumpAt).toBeLessThan(250);
+      expect(deferred.deferred?.reason).toBe("database_busy");
+      expect(commandOs.database.pragma("busy_timeout", { simple: true })).toBe(5_000);
+
+      blocker.exec("ROLLBACK");
+      const deliveryDeadline = Date.now() + 2_000;
+      let status = "pending";
+      while (Date.now() < deliveryDeadline) {
+        status = String((commandOs.database.prepare(`
+          SELECT status FROM event_outbox WHERE event_id = 'event:outbox-isolation'
+        `).get() as { readonly status: string }).status);
+        if (status === "delivered") break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(status).toBe("delivered");
+    } finally {
+      if (blocker.inTransaction) blocker.exec("ROLLBACK");
+      blocker.close();
+    }
+  });
+
+  test("keeps authentication responsive while Research reports bounded writer pressure and accepts the exact retry", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ti-scale-research-isolation-"));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, "ti-scale.sqlite");
+    const readiness: RuntimeReadinessSnapshot = {
+      actionBoundaryActive: false,
+      delegationEnforced: false,
+      noHandsCommanderEnforced: true,
+      directCommanderToolsDenied: true,
+      specialistAssignmentRequired: false,
+      specialistsConfigured: 0,
+      providers: [],
+      mcp: {
+        enabled: false,
+        executionMode: "disabled",
+        startPermitted: false,
+        configuredServers: 0,
+        runnableServers: 0,
+        missingDependencies: 0,
+        missingSecrets: 0,
+      },
+      eventStream: "healthy",
+      secondBrain: "healthy",
+      legacyExecutionEnabled: false,
+    };
+    const commandOs = createCommandOsApplication({
+      databasePath,
+      readinessProviders: (_database, readRuntimeProjection) =>
+        createRuntimeReadinessProviders(() => readRuntimeProjection().readiness),
+      runtimeProjection: () => ({ readiness, agents: [], mcpServers: [] }),
+      resolveActor: () => "operator",
+      assertRunMutationLease: () => undefined,
+      projectionIntervalMs: 60_000,
+    });
+    applications.push(commandOs);
+
+    const app = express();
+    app.use(express.json());
+    app.get("/api/v2/auth/session", (_request, response) => {
+      response.json({
+        schemaVersion: "2.4",
+        configured: true,
+        authenticated: true,
+      });
+    });
+    app.use(commandOs.router);
+    const server = createServer(app);
+    servers.push(server);
+    commandOs.start();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Test server has no TCP address");
+    }
+    const root = `http://127.0.0.1:${address.port}`;
+
+    const blocker = createDatabaseConnection({
+      filename: databasePath,
+      fileMustExist: true,
+      verifyIntegrity: false,
+      busyTimeoutMs: 0,
+    });
+    blocker.exec("BEGIN IMMEDIATE");
+    const idempotencyKey = "research-app-busy-create";
+    const mutationBody = {
+      catalogId: "specialist_routing_quality",
+      ownerAcknowledged: true,
+    };
+    const createCampaign = () => fetch(`${root}/api/v2/research/campaigns`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+      body: JSON.stringify(mutationBody),
+    });
+
+    try {
+      const pressureStartedAt = performance.now();
+      const blockedMutation = createCampaign();
+      const authStartedAt = performance.now();
+      const authResponse = await fetch(`${root}/api/v2/auth/session`);
+      const authElapsedMs = performance.now() - authStartedAt;
+      const unavailable = await blockedMutation;
+      const pressureElapsedMs = performance.now() - pressureStartedAt;
+
+      expect(authResponse.status).toBe(200);
+      expect(await authResponse.json()).toMatchObject({
+        configured: true,
+        authenticated: true,
+      });
+      expect(authElapsedMs).toBeLessThan(250);
+      expect(pressureElapsedMs).toBeLessThan(250);
+      expect(unavailable.status).toBe(503);
+      expect(unavailable.headers.get("Retry-After")).toBe("1");
+      expect(await unavailable.json()).toMatchObject({
+        error: {
+          code: "research_store_busy",
+          retryable: true,
+          category: "persistence",
+        },
+      });
+      expect(
+        commandOs.database.pragma("busy_timeout", { simple: true }),
+      ).toBe(5_000);
+
+      blocker.exec("ROLLBACK");
+      const created = await createCampaign();
+      expect(created.status, await created.clone().text()).toBe(201);
+      const createdPayload = await created.json() as {
+        readonly campaign: { readonly id: string };
+      };
+      const replay = await createCampaign();
+      expect(replay.status, await replay.clone().text()).toBe(201);
+      expect(await replay.json()).toMatchObject({
+        campaign: { id: createdPayload.campaign.id },
+      });
+      expect(commandOs.database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM research_campaigns
+      `).get()).toEqual({ count: 1 });
+      expect(commandOs.database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM audit_records
+        WHERE action = 'research_campaign.created'
+      `).get()).toEqual({ count: 1 });
+    } finally {
+      if (blocker.inTransaction) blocker.exec("ROLLBACK");
+      blocker.close();
+    }
+  });
+
+  test("closes the dedicated Research connection when runner construction fails", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ti-scale-research-construction-"));
+    temporaryDirectories.push(directory);
+    let capturedResearchDatabase: SqliteDatabase | undefined;
+    let capturedResearchBusyTimeout: number | undefined;
+    expect(() => createCommandOsApplication({
+      databasePath: join(directory, "ti-scale.sqlite"),
+      readinessProviders: () => [],
+      runtimeProjection: () => ({
+        readiness: {
+          actionBoundaryActive: false,
+          delegationEnforced: false,
+          noHandsCommanderEnforced: true,
+          directCommanderToolsDenied: true,
+          specialistAssignmentRequired: false,
+          specialistsConfigured: 0,
+          providers: [],
+          mcp: {
+            enabled: false,
+            executionMode: "disabled",
+            startPermitted: false,
+            configuredServers: 0,
+            runnableServers: 0,
+            missingDependencies: 0,
+            missingSecrets: 0,
+          },
+          eventStream: "healthy",
+          secondBrain: "healthy",
+          legacyExecutionEnabled: false,
+        },
+        agents: [],
+        mcpServers: [],
+      }),
+      resolveActor: () => "operator",
+      createResearchExperimentRunner: (researchDatabase) => {
+        capturedResearchDatabase = researchDatabase;
+        capturedResearchBusyTimeout = Number(
+          researchDatabase.pragma("busy_timeout", { simple: true }),
+        );
+        throw new Error("Synthetic Research runner construction failure");
+      },
+    })).toThrow("Synthetic Research runner construction failure");
+    expect(capturedResearchDatabase).toBeDefined();
+    expect(capturedResearchBusyTimeout).toBe(0);
+    expect(capturedResearchDatabase?.open).toBeFalse();
+  });
+
+  test("accepts the exact local-process Autonomous composition without MCP and keeps MCP-backed composition gated", () => {
+    const local: RuntimeReadinessSnapshot = {
+      actionBoundaryActive: true,
+      delegationEnforced: true,
+      noHandsCommanderEnforced: true,
+      directCommanderToolsDenied: true,
+      specialistAssignmentRequired: true,
+      specialistsConfigured: 1,
+      providers: [{
+        id: "local-deterministic-policy",
+        health: "healthy",
+        executionBoundary: "local_deterministic_policy",
+        configured: true,
+        authenticated: true,
+        callable: true,
+        supportsGuided: false,
+        enforcesAutonomousBoundary: true,
+        reportsExactTokenUsage: true,
+        reportsExactCostUsage: true,
+      }],
+      mcp: {
+        enabled: false,
+        executionMode: "disabled",
+        startPermitted: false,
+        configuredServers: 0,
+        runnableServers: 0,
+        missingDependencies: 0,
+        missingSecrets: 0,
+      },
+      autonomousRuntime: {
+        schemaVersion: "ti-scale.autonomous-runtime-composition.v1",
+        status: "ready",
+        readyActionClassIds: ["dns_domain_certificate_discovery"],
+        components: {
+          plannerAdapter: true,
+          outcomeEvaluator: true,
+          resultAwareSpecialistExecution: true,
+          enforcingProvider: true,
+          durableActionBoundary: true,
+          specialistFleet: true,
+          mcpExecution: false,
+          localProcessExecution: true,
+          exactRuntimeManifest: true,
+        },
+        blockers: [],
+      },
+      eventStream: "healthy",
+      secondBrain: "healthy",
+      legacyExecutionEnabled: false,
+    };
+    expect(autonomousExecutionHealthReady(local)).toBeTrue();
+    expect(autonomousExecutionHealthReady({
+      ...local,
+      autonomousRuntime: {
+        ...local.autonomousRuntime!,
+        components: {
+          ...local.autonomousRuntime!.components,
+          localProcessExecution: false,
+          mcpExecution: true,
+        },
+      },
+    })).toBeFalse();
+  });
+
   test("reopens a valid canonical store and fails closed when the existing image is corrupt", async () => {
     const directory = mkdtempSync(join(tmpdir(), "ti-scale-app-integrity-"));
     temporaryDirectories.push(directory);
@@ -36,7 +411,7 @@ describe("CommandOsApplication", () => {
       providers: [],
       mcp: { enabled: false, executionMode: "disabled" as const, startPermitted: false, configuredServers: 0, runnableServers: 0, missingDependencies: 0, missingSecrets: 0 },
       eventStream: "healthy" as const,
-      secondBrain: "healthy" as const,
+      secondBrain: "unknown" as const,
       legacyExecutionEnabled: false,
     };
     const options = {
@@ -78,14 +453,24 @@ describe("CommandOsApplication", () => {
         missingDependencies: 0,
         missingSecrets: 0,
       },
+      publicNvd: {
+        status: "ready" as const,
+        credentialMounted: true,
+        attested: true,
+        lastCheckedAt: "2026-07-18T18:00:05.000Z",
+        attestedAt: "2026-07-18T18:00:00.000Z",
+        expiresAt: "2026-07-18T18:01:00.000Z",
+        reason: "The exact read-only sidecar contract is attested; execution remains disabled.",
+      },
       eventStream: "healthy" as const,
-      secondBrain: "healthy" as const,
+      secondBrain: "unknown" as const,
       legacyExecutionEnabled: false,
     };
     const mutationLeases = new Map<string, () => ControlPlaneLease>();
     const commandOs = createCommandOsApplication({
       databasePath: join(directory, "ti-scale.sqlite"),
-      readinessProviders: () => createRuntimeReadinessProviders(() => snapshot),
+      readinessProviders: (_database, readRuntimeProjection) =>
+        createRuntimeReadinessProviders(() => readRuntimeProjection().readiness),
       runtimeProjection: () => ({ readiness: snapshot, agents: [], mcpServers: [] }),
       resolveActor: () => "operator",
       assertRunMutationLease: ({ runId }) => mutationLeases.get(runId)?.(),
@@ -103,6 +488,24 @@ describe("CommandOsApplication", () => {
 
     commandOs.start();
     expect(commandOs.started).toBe(true);
+    expect(commandOs.database.prepare(`
+      SELECT status FROM health_snapshots
+      WHERE component_type = 'memory' AND component_id = 'second-brain'
+      ORDER BY captured_at DESC LIMIT 1
+    `).get()).toEqual({ status: "healthy" });
+    const livenessResponse = await fetch(`http://127.0.0.1:${address.port}/api/v2/health`);
+    expect(livenessResponse.status).toBe(200);
+    expect(await livenessResponse.json()).toMatchObject({
+      schemaVersion: "2.4",
+      status: "healthy",
+      service: "ti-scale",
+      database: {
+        healthy: true,
+        integrityStatus: "verified",
+        integritySource: "startup",
+      },
+      eventStream: { status: "healthy" },
+    });
     const response = await fetch(`http://127.0.0.1:${address.port}/api/v2/system/readiness`);
     expect(response.status).toBe(200);
     const health = await response.json() as any;
@@ -113,7 +516,26 @@ describe("CommandOsApplication", () => {
     expect(health.dependencies).toMatchObject({
       providers: { status: "unavailable", declared: 0, callable: 0, enforcing: 0 },
       mcp: { status: "unavailable", configuredServers: 0, runnableServers: 0 },
-      specialists: { status: "unavailable", configured: 0 },
+      publicNvd: {
+        status: "ready",
+        credentialMounted: true,
+        attested: true,
+        executionAuthorized: false,
+        lastCheckedAt: "2026-07-18T18:00:05.000Z",
+      },
+      specialists: {
+        status: "unavailable",
+        declared: 0,
+        configured: 0,
+        reason: "No specialist execution adapter is mounted in this Ti-Scale process.",
+      },
+      secondBrain: {
+        status: "healthy",
+        databaseHealthy: true,
+        canonicalStoreAvailable: true,
+        lexicalIndexAvailable: true,
+        lexicalIndexSynchronized: true,
+      },
     });
 
     const overview = await fetch(`http://127.0.0.1:${address.port}/api/v2/overview`);
@@ -435,5 +857,80 @@ describe("CommandOsApplication", () => {
     );
     expect(cveResponse.status).toBe(200);
     expect(await cveResponse.json() as any).toEqual({ schemaVersion: "2.4", items: [] });
+  });
+
+  test("keeps liveness and rich readiness off a deterministically slow integrity path", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ti-scale-app-health-latency-"));
+    temporaryDirectories.push(directory);
+    let integrityChecks = 0;
+    const snapshot: RuntimeReadinessSnapshot = {
+      actionBoundaryActive: false,
+      delegationEnforced: false,
+      noHandsCommanderEnforced: true,
+      directCommanderToolsDenied: true,
+      specialistAssignmentRequired: false,
+      specialistsConfigured: 0,
+      providers: [],
+      mcp: {
+        enabled: false,
+        executionMode: "disabled",
+        startPermitted: false,
+        configuredServers: 0,
+        runnableServers: 0,
+        missingDependencies: 0,
+        missingSecrets: 0,
+      },
+      eventStream: "healthy",
+      secondBrain: "healthy",
+      legacyExecutionEnabled: false,
+    };
+    const startupStartedAt = performance.now();
+    const commandOs = createCommandOsApplication({
+      databasePath: join(directory, "ti-scale.sqlite"),
+      databaseIntegrityChecker: () => {
+        integrityChecks += 1;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+        return { ok: true, messages: ["ok"] };
+      },
+      readinessProviders: (_database, readRuntimeProjection) =>
+        createRuntimeReadinessProviders(() => readRuntimeProjection().readiness),
+      runtimeProjection: () => ({ readiness: snapshot, agents: [], mcpServers: [] }),
+      resolveActor: () => "operator",
+      projectionIntervalMs: 60_000,
+    });
+    expect(performance.now() - startupStartedAt).toBeGreaterThanOrEqual(190);
+    let requestPathQuickChecks = 0;
+    const originalPragma = commandOs.database.pragma.bind(commandOs.database);
+    Object.defineProperty(commandOs.database, "pragma", {
+      configurable: true,
+      value(source: string, options?: { simple?: boolean }) {
+        if (source.trim().toLocaleLowerCase("en-US") === "quick_check") {
+          requestPathQuickChecks += 1;
+        }
+        return originalPragma(source, options);
+      },
+    });
+    applications.push(commandOs);
+    const app = express();
+    app.use(commandOs.router);
+    const server = createServer(app);
+    servers.push(server);
+    commandOs.start();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Test server has no TCP address");
+
+    for (const path of ["/api/v2/health", "/api/v2/system/readiness"] as const) {
+      const requestStartedAt = performance.now();
+      const response = await fetch(`http://127.0.0.1:${address.port}${path}`);
+      const elapsedMs = performance.now() - requestStartedAt;
+      expect(response.status).toBe(200);
+      // The semantic guard below proves no full scan occurred; the generous
+      // wall-clock bound catches blocking regressions without making loaded CI
+      // scheduling noise look like a product defect.
+      expect(elapsedMs).toBeLessThan(500);
+    }
+    expect(integrityChecks).toBe(1);
+    expect(requestPathQuickChecks).toBe(0);
   });
 });

@@ -144,7 +144,10 @@ export class EventRepository {
         ?,
         COALESCE((SELECT MAX(sequence) + 1 FROM events WHERE run_id = ?), 1)
       )
-      ON CONFLICT(run_id) DO UPDATE SET last_sequence = last_sequence + 1
+      ON CONFLICT(run_id) DO UPDATE SET last_sequence = MAX(
+        run_event_sequences.last_sequence + 1,
+        excluded.last_sequence
+      )
       RETURNING last_sequence
     `);
     this.insertEvent = database.prepare(`

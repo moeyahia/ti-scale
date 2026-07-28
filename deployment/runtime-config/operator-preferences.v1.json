@@ -1,0 +1,139 @@
+{
+  "schemaVersion": "ti-scale.operator-preferences.v1",
+  "manifestVersion": "operator-product-preferences-2026.07.21-v1",
+  "operatorId": "local-operator",
+  "source": {
+    "sourceType": "operator_instruction_manifest",
+    "sourceId": "operator-product-direction-2026.07.21",
+    "acquiredAt": "2026-07-21T00:00:00.000Z"
+  },
+  "preferences": [
+    {
+      "id": "technical-readable-language",
+      "preferenceKey": "communication.technical_readability",
+      "title": "Readable technical language",
+      "summary": "Use technically accurate language that remains readable without becoming simplistic.",
+      "body": "Explain what is happening, why it matters, and what changes next. Keep useful technical detail, but replace opaque internal phrasing and unexplained implementation jargon with clear operational language.",
+      "value": {
+        "style": "technical_readable",
+        "avoid": ["oversimplified wording", "opaque internal jargon"],
+        "include": ["purpose", "operational meaning", "useful technical detail"]
+      },
+      "appliesTo": ["guided_explanations", "evidence_presentation", "reports"],
+      "sensitivity": "private",
+      "consentPolicy": "explicit_operator_confirmation"
+    },
+    {
+      "id": "attack-centric-memory",
+      "preferenceKey": "memory.attack_centric_taxonomy",
+      "title": "Attack-centric reusable memory",
+      "summary": "Prioritize reusable technology, version, vector, procedure, failure, and recovery knowledge over transient target identity.",
+      "body": "Organize reusable knowledge around matching technology stacks, exact versions, attack vectors, procedures, scripts, prerequisites, observed outcomes, failed approaches, hazards, and recovery steps. Keep target names and addresses only as private provenance when they are required for traceability.",
+      "value": {
+        "primaryEntities": ["technology", "exact version", "attack vector", "procedure", "script", "failure", "recovery"],
+        "transientIdentifiers": "provenance_only"
+      },
+      "appliesTo": ["memory_taxonomy", "brain_graph"],
+      "sensitivity": "private",
+      "consentPolicy": "explicit_operator_confirmation"
+    },
+    {
+      "id": "titanium-visual-identity",
+      "preferenceKey": "visual.titanium_identity",
+      "title": "Titanium visual identity",
+      "summary": "Use a sophisticated titanium, precision-engineered technology identity across Ti-Scale.",
+      "body": "Favor high-contrast titanium materials, precise geometry, premium editorial typography, and an advanced corporate technology aesthetic. Avoid green as the defining titanium color and avoid generic cyberpunk decoration.",
+      "value": {
+        "material": "titanium",
+        "character": ["precision engineered", "futuristic", "sophisticated", "premium corporate technology"]
+      },
+      "appliesTo": ["visual_identity"],
+      "sensitivity": "private",
+      "consentPolicy": "explicit_operator_confirmation"
+    },
+    {
+      "id": "light-ui-dark-brain",
+      "preferenceKey": "visual.theme_surfaces",
+      "title": "Light interface with dark titanium Brain",
+      "summary": "Keep the main product light while presenting the Brain graph in a dark titanium theme.",
+      "body": "Use an off-white, minimalist main application surface with precise gray dividers. Use a dark titanium graph workspace so the brain structure, nodes, and neuron signals remain visible and legible.",
+      "value": {
+        "mainInterface": "light_off_white",
+        "brainGraph": "dark_titanium"
+      },
+      "appliesTo": ["main_interface", "brain_graph"],
+      "sensitivity": "private",
+      "consentPolicy": "explicit_operator_confirmation"
+    },
+    {
+      "id": "mechanical-particle-motion",
+      "preferenceKey": "motion.mechanical_particle_system",
+      "title": "Sophisticated mechanical and particle motion",
+      "summary": "Use advanced mechanical assembly, exploded-view, transformation, and particle motion with an accessible reduced-motion alternative.",
+      "body": "Motion should make the product feel like an advanced engineered system: components assemble and disassemble with physical purpose, routes transition coherently, and graph activity resembles controlled neuron signals. Reduced-motion mode must preserve meaning without spectacle.",
+      "value": {
+        "motionLanguage": ["mechanical assembly", "exploded view", "transformation", "particle system", "neuron signals"],
+        "reducedMotion": "required"
+      },
+      "appliesTo": ["motion", "brain_graph"],
+      "sensitivity": "private",
+      "consentPolicy": "explicit_operator_confirmation"
+    },
+    {
+      "id": "app-owned-controls",
+      "preferenceKey": "controls.app_owned_visuals",
+      "title": "Application-owned controls",
+      "summary": "Use controls whose interaction and visual language belong to Ti-Scale rather than native operating-system menus.",
+      "body": "Dropdowns, menus, buttons, selectors, and overlays should use accessible Ti-Scale components with consistent titanium styling, keyboard operation, focus behavior, and deterministic states.",
+      "value": {
+        "controlSurface": "ti_scale_design_system",
+        "nativeOsMenus": "avoid_when_custom_accessible_control_exists"
+      },
+      "appliesTo": ["controls", "main_interface"],
+      "sensitivity": "private",
+      "consentPolicy": "explicit_operator_confirmation"
+    },
+    {
+      "id": "native-mobile-roadmap",
+      "preferenceKey": "roadmap.native_mobile",
+      "title": "Native iOS and Android delivery later",
+      "summary": "Treat native iOS and Android applications as later delivery targets after the platform is ready.",
+      "body": "Preserve domain and API boundaries that support future native mobile clients. Do not silently replace the current web delivery or claim native packaging is complete before dedicated compilation and validation on the target platforms.",
+      "value": {
+        "ios": "later_native_delivery",
+        "android": "later_native_delivery"
+      },
+      "appliesTo": ["mobile_roadmap"],
+      "sensitivity": "private",
+      "consentPolicy": "explicit_operator_confirmation"
+    },
+    {
+      "id": "high-autonomy-within-policy",
+      "preferenceKey": "autonomy.default_posture",
+      "title": "High autonomy within enforced policy",
+      "summary": "Prefer end-to-end autonomous progress when authorization, readiness, and safety policy permit it.",
+      "body": "Minimize routine operator interruption after a valid Autonomous contract launches. This preference never expands authorization, weakens action policy, bypasses evidence requirements, or overrides a mandatory safe stop.",
+      "value": {
+        "posture": "high_autonomy",
+        "boundary": "signed_contract_and_platform_policy"
+      },
+      "appliesTo": ["autonomy_presentation"],
+      "sensitivity": "private",
+      "consentPolicy": "explicit_operator_confirmation"
+    },
+    {
+      "id": "evidence-first-explanations",
+      "preferenceKey": "communication.evidence_first",
+      "title": "Evidence-first explanations",
+      "summary": "Anchor explanations, classifications, failures, and recommendations in inspectable evidence.",
+      "body": "State what was observed, what it supports, confidence, important uncertainty, and the next justified action. Keep raw output available for inspection, but do not present raw logs as verified evidence or make unsupported success claims.",
+      "value": {
+        "structure": ["observation", "meaning", "confidence", "uncertainty", "next justified action"],
+        "rawLogs": "not_automatically_evidence"
+      },
+      "appliesTo": ["evidence_presentation", "guided_explanations", "reports"],
+      "sensitivity": "private",
+      "consentPolicy": "explicit_operator_confirmation"
+    }
+  ]
+}

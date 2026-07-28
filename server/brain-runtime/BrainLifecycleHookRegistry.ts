@@ -14,6 +14,28 @@ function definition(
   });
 }
 
+const STACK_MEMORY_TYPES = [
+  "technology_product", "exact_version_fingerprint", "version_range_fingerprint",
+  "operating_system", "kernel", "framework", "runtime", "database", "firewall",
+  "waf", "proxy", "security_control", "topology_pattern", "topology_role",
+  "discovery_pattern", "fingerprint_pattern",
+] as const satisfies readonly MemoryNodeType[];
+
+const ATTACK_KNOWLEDGE_TYPES = [
+  "attack_tactic", "attack_technique", "attack_procedure", "procedure_version", "attack_vector",
+  "prerequisite", "attribute", "cve", "advisory", "cwe", "misconfiguration",
+  "script_artifact", "tool_artifact", "evidence_pattern", "validation_pattern",
+] as const satisfies readonly MemoryNodeType[];
+
+const HAZARD_MEMORY_TYPES = [
+  "outcome", "failure_mode", "operational_hazard", "target_state_transition",
+  "recovery_pattern", "health_check", "alternative", "detection", "remediation",
+] as const satisfies readonly MemoryNodeType[];
+
+const LEARNING_MEMORY_TYPES = [
+  "strategy", "research", "attack_lesson",
+] as const satisfies readonly MemoryNodeType[];
+
 const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition>> = Object.freeze({
   intake: definition({
     hook: "intake",
@@ -22,7 +44,10 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: false,
     requiresStep: false,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["preference", "mission", "target", "lesson", "failure", "recovery", "source"],
+    allowedNodeTypes: [
+      "preference", "mission", "target", "lesson", "failure", "recovery", "source",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 2_000,
     maximumContextBudget: 4_000,
@@ -40,11 +65,34 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     allowedNodeTypes: [
       "preference", "mission", "run", "plan", "agent", "tool", "mcp_capability",
       "technique", "procedure", "target", "asset", "failure", "recovery", "lesson", "report",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+      ...LEARNING_MEMORY_TYPES,
     ],
     maximumSensitivity: "private",
     defaultContextBudget: 6_000,
     maximumContextBudget: 8_000,
     defaultLimit: 12,
+    maximumLimit: 24,
+    graphDepth: 1,
+  }),
+  guided_briefing: definition({
+    hook: "guided_briefing",
+    label: "Guided briefing",
+    purpose: "Retrieve confirmed teaching preferences, relevant attack knowledge, and prior outcomes before explaining or recommending the current represented Guided step.",
+    requiresRun: true,
+    requiresStep: true,
+    allowGlobalWhenExplicit: true,
+    allowedNodeTypes: [
+      "preference", "mission", "run", "plan", "phase", "step", "agent", "tool",
+      "mcp_capability", "technique", "procedure", "target", "asset", "evidence",
+      "finding", "failure", "recovery", "lesson", "report",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+      ...LEARNING_MEMORY_TYPES,
+    ],
+    maximumSensitivity: "private",
+    defaultContextBudget: 4_000,
+    maximumContextBudget: 8_000,
+    defaultLimit: 10,
     maximumLimit: 24,
     graphDepth: 1,
   }),
@@ -55,7 +103,10 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: true,
     requiresStep: true,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["step", "agent", "tool", "mcp_capability", "technique", "failure", "recovery", "lesson"],
+    allowedNodeTypes: [
+      "step", "agent", "tool", "mcp_capability", "technique", "failure", "recovery", "lesson",
+      ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 2_500,
     maximumContextBudget: 4_000,
@@ -70,7 +121,10 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: true,
     requiresStep: true,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["step", "tool", "mcp_capability", "technique", "procedure", "target", "asset", "failure", "recovery", "lesson"],
+    allowedNodeTypes: [
+      "step", "tool", "mcp_capability", "technique", "procedure", "target", "asset", "failure", "recovery", "lesson",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 2_500,
     maximumContextBudget: 4_000,
@@ -85,7 +139,10 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: true,
     requiresStep: true,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["step", "tool", "technique", "procedure", "target", "asset", "evidence", "finding", "failure", "recovery", "lesson"],
+    allowedNodeTypes: [
+      "step", "tool", "technique", "procedure", "target", "asset", "evidence", "finding", "failure", "recovery", "lesson",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 3_000,
     maximumContextBudget: 5_000,
@@ -100,7 +157,10 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: true,
     requiresStep: false,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["preference", "mission", "run", "plan", "phase", "step", "target", "asset", "evidence", "finding", "failure", "recovery", "lesson"],
+    allowedNodeTypes: [
+      "preference", "mission", "run", "plan", "phase", "step", "target", "asset", "evidence", "finding", "failure", "recovery", "lesson",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 4_000,
     maximumContextBudget: 8_000,
@@ -115,7 +175,10 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: true,
     requiresStep: false,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["step", "agent", "tool", "mcp_capability", "technique", "procedure", "failure", "recovery", "lesson"],
+    allowedNodeTypes: [
+      "step", "agent", "tool", "mcp_capability", "technique", "procedure", "failure", "recovery", "lesson",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 5_000,
     maximumContextBudget: 8_000,
@@ -130,7 +193,11 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: true,
     requiresStep: false,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["plan", "step", "agent", "tool", "mcp_capability", "technique", "procedure", "target", "asset", "evidence", "finding", "failure", "recovery", "lesson"],
+    allowedNodeTypes: [
+      "plan", "step", "agent", "tool", "mcp_capability", "technique", "procedure", "target", "asset", "evidence", "finding", "failure", "recovery", "lesson",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+      ...LEARNING_MEMORY_TYPES,
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 5_000,
     maximumContextBudget: 8_000,
@@ -145,7 +212,11 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: true,
     requiresStep: true,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["step", "target", "asset", "technique", "procedure", "evidence", "finding", "artifact", "lesson"],
+    allowedNodeTypes: [
+      "step", "target", "asset", "technique", "procedure", "evidence", "finding", "artifact", "lesson",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES,
+      "outcome",
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 4_000,
     maximumContextBudget: 6_000,
@@ -160,7 +231,11 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: true,
     requiresStep: false,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["preference", "mission", "run", "plan", "evidence", "finding", "artifact", "evaluation", "lesson", "report", "source"],
+    allowedNodeTypes: [
+      "preference", "mission", "run", "plan", "evidence", "finding", "artifact", "evaluation", "lesson", "report", "source",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+      ...LEARNING_MEMORY_TYPES,
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 6_000,
     maximumContextBudget: 8_000,
@@ -175,7 +250,10 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: true,
     requiresStep: false,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["mission", "run", "evidence", "finding", "failure", "recovery", "evaluation", "lesson", "source"],
+    allowedNodeTypes: [
+      "mission", "run", "evidence", "finding", "failure", "recovery", "evaluation", "lesson", "source",
+      ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES, ...LEARNING_MEMORY_TYPES,
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 4_000,
     maximumContextBudget: 6_000,
@@ -190,7 +268,11 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: true,
     requiresStep: false,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["mission", "run", "plan", "step", "evidence", "finding", "failure", "recovery", "evaluation", "lesson", "report"],
+    allowedNodeTypes: [
+      "mission", "run", "plan", "step", "evidence", "finding", "failure", "recovery", "evaluation", "lesson", "report",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+      ...LEARNING_MEMORY_TYPES,
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 5_000,
     maximumContextBudget: 8_000,
@@ -205,7 +287,11 @@ const REGISTRY: Readonly<Record<BrainLifecycleHook, BrainLifecycleHookDefinition
     requiresRun: true,
     requiresStep: false,
     allowGlobalWhenExplicit: true,
-    allowedNodeTypes: ["preference", "mission", "run", "plan", "phase", "step", "agent", "target", "asset", "decision", "evidence", "finding", "artifact", "failure", "recovery", "evaluation", "lesson", "report", "source"],
+    allowedNodeTypes: [
+      "preference", "mission", "run", "plan", "phase", "step", "agent", "target", "asset", "decision", "evidence", "finding", "artifact", "failure", "recovery", "evaluation", "lesson", "report", "source",
+      ...STACK_MEMORY_TYPES, ...ATTACK_KNOWLEDGE_TYPES, ...HAZARD_MEMORY_TYPES,
+      ...LEARNING_MEMORY_TYPES,
+    ],
     maximumSensitivity: "private",
     defaultContextBudget: 5_000,
     maximumContextBudget: 8_000,

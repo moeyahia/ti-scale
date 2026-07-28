@@ -25,7 +25,114 @@ export const MEMORY_NODE_TYPES = [
   "lesson",
   "report",
   "source",
+  "technology_product",
+  "exact_version_fingerprint",
+  "version_range_fingerprint",
+  "operating_system",
+  "kernel",
+  "framework",
+  "runtime",
+  "database",
+  "firewall",
+  "waf",
+  "proxy",
+  "security_control",
+  "topology_pattern",
+  "topology_role",
+  "cve",
+  "advisory",
+  "cwe",
+  "misconfiguration",
+  "attack_vector",
+  "prerequisite",
+  "attribute",
+  "discovery_pattern",
+  "fingerprint_pattern",
+  "script_artifact",
+  "tool_artifact",
+  "outcome",
+  "failure_mode",
+  "alternative",
+  "evidence_pattern",
+  "validation_pattern",
+  "detection",
+  "remediation",
+  "strategy",
+  "research",
+  "procedure_version",
+  "operational_hazard",
+  "target_state_transition",
+  "recovery_pattern",
+  "health_check",
+  "attack_tactic",
+  "attack_technique",
+  "attack_procedure",
+  "attack_lesson",
 ] as const;
+
+/**
+ * Generalized, operator-reviewed knowledge that may be reused across
+ * engagements. Mission, run, target, asset, evidence, finding, and artifact
+ * records deliberately remain outside this registry: they are private
+ * operational provenance, not semantic retrieval signals.
+ */
+export const ATTACK_CENTRIC_REUSABLE_NODE_TYPES = [
+  "technology_product",
+  "exact_version_fingerprint",
+  "version_range_fingerprint",
+  "operating_system",
+  "kernel",
+  "framework",
+  "runtime",
+  "database",
+  "firewall",
+  "waf",
+  "proxy",
+  "security_control",
+  "topology_pattern",
+  "topology_role",
+  "cve",
+  "advisory",
+  "cwe",
+  "misconfiguration",
+  "attack_vector",
+  "prerequisite",
+  "attribute",
+  "discovery_pattern",
+  "fingerprint_pattern",
+  "script_artifact",
+  "tool_artifact",
+  "outcome",
+  "failure_mode",
+  "alternative",
+  "evidence_pattern",
+  "validation_pattern",
+  "detection",
+  "remediation",
+  "strategy",
+  "research",
+  "procedure_version",
+  "operational_hazard",
+  "target_state_transition",
+  "recovery_pattern",
+  "health_check",
+  "attack_tactic",
+  "attack_technique",
+  "attack_procedure",
+  "attack_lesson",
+] as const satisfies readonly (typeof MEMORY_NODE_TYPES)[number][];
+
+export type AttackCentricReusableNodeType =
+  (typeof ATTACK_CENTRIC_REUSABLE_NODE_TYPES)[number];
+
+const ATTACK_CENTRIC_REUSABLE_NODE_TYPE_SET: ReadonlySet<string> =
+  new Set(ATTACK_CENTRIC_REUSABLE_NODE_TYPES);
+
+export function isAttackCentricReusableNodeType(
+  value: MemoryNodeType,
+): value is AttackCentricReusableNodeType {
+  return ATTACK_CENTRIC_REUSABLE_NODE_TYPE_SET.has(value);
+}
 
 export const MEMORY_EDGE_TYPES = [
   "prefers",
@@ -48,7 +155,112 @@ export const MEMORY_EDGE_TYPES = [
   "verified_by",
   "mentioned_in",
   "influenced",
+  "has_exact_version",
+  "has_version_range",
+  "version_in_range",
+  "runs_on",
+  "built_with",
+  "uses_runtime",
+  "uses_database",
+  "protected_by",
+  "has_topology_role",
+  "matches_fingerprint",
+  "discovered_by",
+  "fingerprinted_by",
+  "affects",
+  "classified_as",
+  "exploits",
+  "requires",
+  "has_attribute",
+  "implemented_by",
+  "tested_against",
+  "produces_outcome",
+  "failed_because",
+  "recovered_with",
+  "alternative_to",
+  "validated_by",
+  "detected_by",
+  "remediated_by",
+  "applicable_to",
+  "not_applicable_to",
+  "mitigates",
+  "bypasses",
+  "improves",
+  "caused",
+  "leaves_in_state",
+  "requires_recovery",
+  "avoid_after",
+  "safe_when",
+  "mitigated_by",
 ] as const;
+
+export const ATTACK_CENTRIC_EDGE_TYPES = [
+  "has_exact_version",
+  "has_version_range",
+  "version_in_range",
+  "runs_on",
+  "built_with",
+  "uses_runtime",
+  "uses_database",
+  "protected_by",
+  "has_topology_role",
+  "matches_fingerprint",
+  "discovered_by",
+  "fingerprinted_by",
+  "affects",
+  "classified_as",
+  "exploits",
+  "requires",
+  "has_attribute",
+  "implemented_by",
+  "tested_against",
+  "produces_outcome",
+  "failed_because",
+  "recovered_with",
+  "alternative_to",
+  "validated_by",
+  "detected_by",
+  "remediated_by",
+  "applicable_to",
+  "not_applicable_to",
+  "mitigates",
+  "bypasses",
+  "improves",
+  "caused",
+  "leaves_in_state",
+  "requires_recovery",
+  "avoid_after",
+  "safe_when",
+  "mitigated_by",
+] as const satisfies readonly (typeof MEMORY_EDGE_TYPES)[number][];
+
+export interface OperationalHazardContext {
+  readonly procedureNodeId: string;
+  readonly procedureVersionNodeId?: string;
+  readonly productNodeIds: readonly string[];
+  readonly versionNodeIds: readonly string[];
+  readonly stackNodeIds: readonly string[];
+  readonly prerequisiteNodeIds: readonly string[];
+  readonly observedStateNodeIds?: readonly string[];
+  readonly normalizedParameters: Readonly<Record<string, string | number | boolean>>;
+  readonly load?: number;
+  readonly concurrency?: number;
+  readonly timingWindowMs?: number;
+}
+
+export interface OperationalHazardAssessment {
+  readonly decision: "allow" | "warn" | "block";
+  readonly matchedHazardNodeIds: readonly string[];
+  readonly blockedProcedureNodeIds: readonly string[];
+  readonly warning?: string;
+  readonly checklist: readonly string[];
+  readonly saferKnownSequence: readonly string[];
+  readonly unsafeRetryConditions: readonly string[];
+  readonly healthGate: readonly string[];
+  readonly safeRetryGate: readonly string[];
+}
+
+export type AttackCentricEdgeType = (typeof ATTACK_CENTRIC_EDGE_TYPES)[number];
 
 export const MEMORY_LIFECYCLE_STATES = [
   "candidate",
@@ -162,6 +374,8 @@ export interface CorrectMemoryNodeInput {
   readonly pinned?: boolean;
   /** New immutable provenance links discovered during an explicit correction/import. */
   readonly additionalProvenanceSources?: readonly ProvenanceSource[];
+  /** Updated human-readable provenance explanation; immutable sources remain additive. */
+  readonly provenanceExplanation?: string;
   readonly authorType: MemoryAuthorType;
   readonly authorId?: string;
   readonly changeReason: string;
@@ -258,15 +472,34 @@ export interface RetrievalPolicy {
    * field preserves the existing Guided and operator-search behavior.
    */
   readonly allowedScopeClasses?: readonly AutonomousMemoryScopeClass[];
+  /** Structured, target-free facts used to prevent a known harmful retry. */
+  readonly hazardContext?: OperationalHazardContext;
 }
 
 export const AUTONOMOUS_MEMORY_SCOPE_CLASSES = [
   "confirmed_preferences",
   "verified_lessons",
+  "confirmed_attack_knowledge",
+  "verified_attack_knowledge",
   "engagement_memory",
 ] as const;
 
-export type AutonomousMemoryScopeClass = (typeof AUTONOMOUS_MEMORY_SCOPE_CLASSES)[number];
+/**
+ * Current system-authored, Vault-synchronized agent/tool compatibility
+ * attestations. This is deliberately absent from the operator-signed/default
+ * scope-class registry: only the trusted runtime may add it alongside exact
+ * stable capability node IDs.
+ */
+export const RUNTIME_CAPABILITY_MEMORY_SCOPE_CLASS =
+  "current_runtime_capabilities" as const;
+
+export const SUPPORTED_MEMORY_SCOPE_CLASSES = [
+  ...AUTONOMOUS_MEMORY_SCOPE_CLASSES,
+  RUNTIME_CAPABILITY_MEMORY_SCOPE_CLASS,
+] as const;
+
+export type AutonomousMemoryScopeClass =
+  (typeof SUPPORTED_MEMORY_SCOPE_CLASSES)[number];
 
 export interface RetrievedMemory {
   readonly node: MemoryNode;
@@ -284,6 +517,9 @@ export interface ContextPackItemDisposition {
   readonly corrected?: boolean;
 }
 
+export const RELEASE_DATA_CLASSES = ["canonical", "startup_readiness"] as const;
+export type ReleaseDataClass = (typeof RELEASE_DATA_CLASSES)[number];
+
 export interface ContextPack {
   readonly id: string;
   readonly missionId?: string;
@@ -297,6 +533,12 @@ export interface ContextPack {
   readonly scopePolicy: RetrievalPolicy;
   readonly contextBudget: number;
   readonly retrievalMetrics: Record<string, unknown>;
+  /**
+   * Release-integrity classification. Only a tightly constrained, content-free
+   * startup readiness lineage may use `startup_readiness`; every operational
+   * Context Pack remains canonical release data.
+   */
+  readonly releaseDataClass: ReleaseDataClass;
   readonly createdBy: string;
   readonly createdAt: string;
   readonly items: readonly ContextPackItemDisposition[];

@@ -2,18 +2,25 @@ import { describe, expect, test } from "bun:test";
 import { parseRuntimeReadiness } from "../../../src/domain/schemas/runtimeReadiness";
 
 function payload(providers: Record<string, unknown>, options: {
-  guidedToolExecution?: "ready" | "unavailable";
+  guided?: unknown;
+  autonomous?: unknown;
+  guidedToolExecution?: unknown;
+  localCommanderGuidance?: unknown;
   mcp?: Record<string, unknown>;
+  secondBrain?: Record<string, unknown>;
 } = {}) {
   return {
     schemaVersion: "2.4",
     status: "degraded",
     execution: {
-      autonomous: "unavailable",
-      guided: "unavailable",
+      autonomous: options.autonomous ?? "unavailable",
+      guided: options.guided ?? "unavailable",
       ...(options.guidedToolExecution === undefined
         ? {}
         : { guidedToolExecution: options.guidedToolExecution }),
+      ...(options.localCommanderGuidance === undefined
+        ? {}
+        : { localCommanderGuidance: options.localCommanderGuidance }),
       actionBoundaryActive: false,
       delegationEnforced: true,
       noHandsCommanderEnforced: true,
@@ -21,12 +28,46 @@ function payload(providers: Record<string, unknown>, options: {
     dependencies: {
       providers,
       ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
+      ...(options.secondBrain === undefined ? {} : { secondBrain: options.secondBrain }),
     },
     checkedAt: "2026-07-18T05:30:00.000Z",
   };
 }
 
 describe("runtime readiness provider initialization contract", () => {
+  test("accepts manual_only only for the Guided execution boundary", () => {
+    const result = parseRuntimeReadiness(payload({
+      status: "unavailable",
+      declared: 0,
+      callable: 0,
+      enforcing: 0,
+      guidedCapable: 0,
+    }, { guided: "manual_only" }));
+
+    expect(result.execution.guided).toBe("manual_only");
+    expect(() => parseRuntimeReadiness(payload({
+      status: "unavailable",
+      declared: 0,
+      callable: 0,
+      enforcing: 0,
+      guidedCapable: 0,
+    }, { autonomous: "manual_only" }))).toThrow("autonomous execution must be ready or unavailable");
+    expect(() => parseRuntimeReadiness(payload({
+      status: "unavailable",
+      declared: 0,
+      callable: 0,
+      enforcing: 0,
+      guidedCapable: 0,
+    }, { guidedToolExecution: "manual_only" }))).toThrow("Guided tool execution must be ready or unavailable");
+    expect(() => parseRuntimeReadiness(payload({
+      status: "unavailable",
+      declared: 0,
+      callable: 0,
+      enforcing: 0,
+      guidedCapable: 0,
+    }, { localCommanderGuidance: "manual_only" }))).toThrow("Local Commander guidance must be ready or unavailable");
+  });
+
   test("parses the additive probing state and operator-readable reason", () => {
     expect(parseRuntimeReadiness(payload({
       status: "unavailable",
@@ -63,6 +104,7 @@ describe("runtime readiness provider initialization contract", () => {
       reason: null,
     });
     expect(result.execution.guidedToolExecution).toBe("unavailable");
+    expect(result.execution.localCommanderGuidance).toBe("unavailable");
     expect(result.dependencies.mcp).toEqual({
       status: "unavailable",
       initializing: false,
@@ -72,6 +114,26 @@ describe("runtime readiness provider initialization contract", () => {
       runnableServers: 0,
       executionMode: "disabled",
     });
+    expect(result.dependencies.secondBrain).toEqual({
+      status: "unknown",
+      canonicalStoreAvailable: false,
+      reason: null,
+    });
+  });
+
+  test("parses provider-independent local Commander guidance explicitly", () => {
+    const result = parseRuntimeReadiness(payload({
+      status: "unavailable",
+      declared: 0,
+      callable: 0,
+      enforcing: 0,
+      guidedCapable: 0,
+    }, {
+      guided: "manual_only",
+      localCommanderGuidance: "ready",
+    }));
+    expect(result.execution.localCommanderGuidance).toBe("ready");
+    expect(result.dependencies.providers.guidedCapable).toBe(0);
   });
 
   test("retains precise MCP probing and Guided tool-execution readiness", () => {
@@ -102,6 +164,28 @@ describe("runtime readiness provider initialization contract", () => {
       configuredServers: 4,
       runnableServers: 0,
       executionMode: "enabled",
+    });
+  });
+
+  test("parses canonical Second Brain readiness independently from its optional Vault projection", () => {
+    const result = parseRuntimeReadiness(payload({
+      status: "unavailable",
+      declared: 0,
+      callable: 0,
+      enforcing: 0,
+      guidedCapable: 0,
+    }, {
+      secondBrain: {
+        status: "degraded",
+        canonicalStoreAvailable: true,
+        reason: "Canonical memory is ready while an optional Vault projection is offline.",
+        vaultProjection: { status: "degraded" },
+      },
+    }));
+    expect(result.dependencies.secondBrain).toEqual({
+      status: "degraded",
+      canonicalStoreAvailable: true,
+      reason: "Canonical memory is ready while an optional Vault projection is offline.",
     });
   });
 });

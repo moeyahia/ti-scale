@@ -146,6 +146,14 @@ export class LegacyImporter {
       case "session_json": await this.importSessionJson(stats); break;
       case "event_jsonl": await this.importEventJsonl(stats); break;
       case "raw_llm_jsonl": await this.importRawLlmJsonl(stats); break;
+      case "provider_session_json": await this.importSessionJson(stats); break;
+      case "provider_session_jsonl": await this.importRawLlmJsonl(stats); break;
+      case "provider_log": await this.importDashboardLog(stats); break;
+      case "conversation_markdown":
+        // Markdown history is intentionally canonical only in the bounded
+        // attack-knowledge pipeline; legacy target-centric projection skips it.
+        stats.skipped += 1;
+        break;
       case "dashboard_log": await this.importDashboardLog(stats); break;
       case "memory_json": await this.importMemoryJson(stats); break;
       case "training_json": await this.importTrainingJson(stats); break;

@@ -87,9 +87,9 @@ Use the published API contract and avoid constructing deep links from missing re
 
 SQLite uses WAL and a bounded busy timeout. Persistent busy errors usually indicate an unexpectedly long transaction, a stalled writer, an external filesystem tool touching the database, or storage latency.
 
-- Do not copy the live database directly; use the backup command.
+- Do not copy the live database. This installation has no backup or restore command; diagnose the writer and recover the canonical database forward.
 - Check the process list and database directory permissions.
-- Stop the service before restore.
+- Stop the service before maintenance that requires exclusive database ownership.
 - Do not place the active database on an unreliable network filesystem.
 
 ## Reporting a problem

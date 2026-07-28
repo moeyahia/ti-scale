@@ -16,7 +16,7 @@ const FOCUSABLE_SELECTOR = [
 ].join(",");
 
 function focusableElements(root: HTMLElement): HTMLElement[] {
-  return [...root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
     .filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
 }
 

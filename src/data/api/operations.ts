@@ -4,14 +4,18 @@ import {
   parseLesson, parseLessonPage, parseLessonUsagePage, parseLogPage, parseMcpPage, parsePolicyPage, parseProviderPage,
   parseFindingReview, parseFollowUpRun, parseLessonReview, parseRecoveryMutation, parseRunRecovery, parseTraceDetail, parseTracePage,
   parseAdministrativeApprovalReview, parseDecisionInboxPage,
+  parseReportGeneration,
 } from "../../domain/schemas/operations";
+import { parseRunMutation } from "../../domain/schemas/runtimeV2";
 import type {
   ActionRecord, AgentAssignment, AgentRecord, ArtifactRecord, EvaluationRecord, EventRecord, EvidenceRecord, FindingRecord,
   AdministrativeApprovalReviewRecord, DecisionInboxRecord,
   FollowUpRunRecord,
   HealthStatus, LessonRecord, LessonUsageRecord, LogRecord, McpRecord, OperationsPage, PolicyRecord, ProviderRecord,
   RecoveryMutationRecord, RunRecoveryRecord, TraceDetailRecord, TraceSummaryRecord,
+  ReportGenerationRecord,
 } from "../../domain/types/operations";
+import type { RunSnapshot } from "../../domain/types/runtimeV2";
 import { apiRequest } from "./client";
 
 export const OPERATIONS_ENDPOINTS = {
@@ -65,6 +69,42 @@ function mutate<T>(path: string, body: unknown, parse: (payload: unknown) => T, 
   return apiRequest(path, { method: "POST", signal, headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify(body), parse });
 }
 
+/**
+ * Dispatch an already-validated Recovery Panel attempt without reserializing
+ * it. The first request and every explicit retry therefore carry the same
+ * represented JSON bytes and Idempotency-Key.
+ */
+export function dispatchRecoveryOperation(input: {
+  readonly runId: string;
+  readonly command: "replan" | "reassign" | "change_provider" | "resume" | "cancel";
+  readonly serializedBody: string;
+  readonly idempotencyKey: string;
+  readonly signal?: AbortSignal;
+}): Promise<RecoveryMutationRecord | RunSnapshot> {
+  const encodedRunId = encodeURIComponent(input.runId);
+  const path = input.command === "replan"
+    ? `${OPERATIONS_ENDPOINTS.recovery}/${encodedRunId}/recovery/replan`
+    : input.command === "reassign"
+      ? `${OPERATIONS_ENDPOINTS.recovery}/${encodedRunId}/recovery/reassign`
+      : input.command === "change_provider"
+        ? `${OPERATIONS_ENDPOINTS.recovery}/${encodedRunId}/recovery/provider`
+        : `/api/v2/runs/${encodedRunId}/${input.command}`;
+  const request = {
+    method: "POST",
+    ...(input.signal ? { signal: input.signal } : {}),
+    headers: { "Idempotency-Key": input.idempotencyKey },
+    body: input.serializedBody,
+  } as const;
+  if (
+    input.command === "replan"
+    || input.command === "reassign"
+    || input.command === "change_provider"
+  ) {
+    return apiRequest(path, { ...request, parse: parseRecoveryMutation });
+  }
+  return apiRequest(path, { ...request, parse: parseRunMutation });
+}
+
 export const operationsApi = {
   agents: (query: Record<string, QueryValue>, signal?: AbortSignal): Promise<OperationsPage<AgentRecord>> => get(queryPath(OPERATIONS_ENDPOINTS.agents, query), parseAgents, signal),
   agent: (id: string, signal?: AbortSignal): Promise<AgentRecord> => get(`${OPERATIONS_ENDPOINTS.agents}/${encodeURIComponent(id)}`, parseAgent, signal),
@@ -92,6 +132,19 @@ export const operationsApi = {
   lessonUsage: (query: Record<string, QueryValue>, signal?: AbortSignal): Promise<OperationsPage<LessonUsageRecord>> => get(queryPath(OPERATIONS_ENDPOINTS.lessonUsage, query), parseLessonUsagePage, signal),
   reports: (query: Record<string, QueryValue>, signal?: AbortSignal): Promise<OperationsPage<ArtifactRecord>> => get(queryPath(OPERATIONS_ENDPOINTS.reports, query), parseArtifactPage, signal),
   report: (id: string, signal?: AbortSignal): Promise<ArtifactRecord> => get(`${OPERATIONS_ENDPOINTS.reports}/${encodeURIComponent(id)}`, parseArtifact, signal),
+  generateReport: (
+    runId: string,
+    reportVersion: number,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<ReportGenerationRecord> => mutate(
+    `${OPERATIONS_ENDPOINTS.reports}/runs/${encodeURIComponent(runId)}/generate`,
+    { reportVersion },
+    parseReportGeneration,
+    idempotencyKey,
+    signal,
+  ),
+  reportDownloadUrl: (id: string): string => `${OPERATIONS_ENDPOINTS.reports}/${encodeURIComponent(id)}/download`,
   runCompletionExportUrl: (runId: string): string => `${OPERATIONS_ENDPOINTS.runCompletionExport}/${encodeURIComponent(runId)}/export`,
   providers: (query: Record<string, QueryValue>, signal?: AbortSignal): Promise<OperationsPage<ProviderRecord>> => get(queryPath(OPERATIONS_ENDPOINTS.providers, query), parseProviderPage, signal),
   mcp: (query: Record<string, QueryValue>, signal?: AbortSignal): Promise<OperationsPage<McpRecord>> => get(queryPath(OPERATIONS_ENDPOINTS.mcp, query), parseMcpPage, signal),
@@ -128,7 +181,7 @@ export const operationsApi = {
   changeRecoveryProvider: (
     runId: string,
     body: ExactRecoveryBoundaryInput & {
-      providerId: string; reason: string;
+      providerId: string; modelId: string; modelConfigurationHash: string; reason: string;
       guidedDecisionId?: string; expectedDecisionFingerprint?: string;
     },
     key: string,

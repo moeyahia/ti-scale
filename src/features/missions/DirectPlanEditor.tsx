@@ -4,6 +4,7 @@ import { operationsApi } from "../../data/api/operations";
 import { planChangesApi } from "../../data/api/planChanges";
 import { useQuery } from "../../data/cache/QueryProvider";
 import { Button, Card, ErrorPanel, LoadingPanel, StatusPill } from "../../design-system/components/Primitives";
+import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
 import type { IntakeActionClass } from "../../domain/types/intake";
 import type { AgentRecord } from "../../domain/types/operations";
 import type {
@@ -353,11 +354,11 @@ function ActionClassSelect({
 }) {
   const currentIsMissing = Boolean(currentValue && !classes.some((item) => item.id === currentValue));
   return <label htmlFor={id}>Action class
-    <select id={id} data-control-id={controlId} value={value} disabled={disabled} required onChange={(event) => onChange(event.target.value)}>
+    <TitaniumSelect id={id} data-control-id={controlId} value={value} disabled={disabled} required onChange={(event) => onChange(event.target.value)}>
       <option value="" disabled>Select from the live action-class registry</option>
       {currentIsMissing && <option value={currentValue} disabled>{currentValue} · not present in the live registry</option>}
       {classes.map((item) => <option key={item.id} value={item.id}>{classOptionLabel(item)}</option>)}
-    </select>
+    </TitaniumSelect>
     <span>Values, policy state, capability mapping, and availability come from the runtime intake registry.</span>
   </label>;
 }
@@ -384,13 +385,13 @@ function AgentSelect({
   const currentIsMissing = Boolean(currentValue && !agents.some((agent) => agent.id === currentValue));
   const mapped = new Set(actionClass?.capability.agentIds ?? []);
   return <label htmlFor={id}>Assigned specialist
-    <select id={id} data-control-id={controlId} value={value} disabled={disabled} required onChange={(event) => onChange(event.target.value)}>
+    <TitaniumSelect id={id} data-control-id={controlId} value={value} disabled={disabled} required onChange={(event) => onChange(event.target.value)}>
       <option value="" disabled>Select from the canonical agent fleet</option>
       {currentIsMissing && <option value={currentValue} disabled>{currentValue} · not present in the canonical fleet</option>}
       {agentOptionsFor(actionClass, agents).map((agent) => <option key={agent.id} value={agent.id}>
         {agent.displayName} · {agent.status}{mapped.has(agent.id) ? " · mapped capability" : ""}
       </option>)}
-    </select>
+    </TitaniumSelect>
     <span>Fleet status is live. The server performs the authoritative capability and readiness check on the proposal.</span>
   </label>;
 }
@@ -431,9 +432,9 @@ function RepresentationFields({
         <span>Use the bounded runtime action identifier, not a shell command.</span>
       </label>
       <label htmlFor={`${prefix}-kind`}>Execution kind
-        <select id={`${prefix}-kind`} data-control-id={`${prefix}-kind`} disabled={disabled} value={draft.kind} onChange={(event) => set("kind", event.target.value as PlanStepActionKind)}>
+        <TitaniumSelect id={`${prefix}-kind`} data-control-id={`${prefix}-kind`} disabled={disabled} value={draft.kind} onChange={(event) => set("kind", event.target.value as PlanStepActionKind)}>
           {ACTION_KINDS.map((kind) => <option key={kind.id} value={kind.id}>{kind.label}</option>)}
-        </select>
+        </TitaniumSelect>
         <span>This declares how the represented action is routed; it does not grant execution permission.</span>
       </label>
     </div>
@@ -592,7 +593,14 @@ export function DirectPlanEditor({
         ? `Proposal ${result.request.id} was saved as version ${result.request.version} with status ${result.request.status}. The active plan and execution state were not changed.`
         : `Proposal ${result.request.id} was created with status ${result.request.status}. The active plan and execution state were not changed.`);
       if (!editRequest) setChangeReason("");
-      await onProposalCreated?.();
+      try {
+        await onProposalCreated?.();
+      } catch (refreshError) {
+        setError(new Error(
+          `Proposal ${result.request.id} was committed, but the canonical proposal list could not be refreshed. Refresh it before taking another action.`,
+          { cause: refreshError },
+        ));
+      }
       if (editRequest) onEditCompleted?.(result.request);
       return true;
     } catch (caught) {
@@ -772,9 +780,9 @@ export function DirectPlanEditor({
 
     <div className="os-field-grid">
       {!editRequest && <label htmlFor="plan-direct-editor-mode">Structured operation
-        <select id="plan-direct-editor-mode" data-control-id="plan-direct-editor-mode" value={mode} onChange={(event) => { setMode(event.target.value as EditorMode); setError(undefined); setConfirmation(undefined); }}>
+        <TitaniumSelect id="plan-direct-editor-mode" data-control-id="plan-direct-editor-mode" value={mode} onChange={(event) => { setMode(event.target.value as EditorMode); setError(undefined); setConfirmation(undefined); }}>
           {MODES.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-        </select>
+        </TitaniumSelect>
         <span>Each submission proposes one bounded operation so its exact diff and impact remain reviewable.</span>
       </label>}
       <label htmlFor="plan-direct-change-reason">Reason for this structured amendment <small>Required</small>
@@ -784,9 +792,9 @@ export function DirectPlanEditor({
     </div>
 
     {mode !== "add" && mode !== "reorder" && <label htmlFor="plan-direct-step">Plan step
-      <select id="plan-direct-step" data-control-id="plan-direct-step" value={selectedStep?.id ?? ""} disabled={steps.length === 0} onChange={(event) => chooseStep(event.target.value)}>
+      <TitaniumSelect id="plan-direct-step" data-control-id="plan-direct-step" value={selectedStep?.id ?? ""} disabled={steps.length === 0} onChange={(event) => chooseStep(event.target.value)}>
         {steps.map((step) => <option key={step.id} value={step.id}>{step.ordinal}. {step.title} · {step.phase}</option>)}
-      </select>
+      </TitaniumSelect>
       <span>Stable step IDs and current values come from plan {plan.id}, version {plan.version}.</span>
     </label>}
 
@@ -804,14 +812,14 @@ export function DirectPlanEditor({
             <span>Use the <span className="os-mono">draft-</span> namespace. A stable canonical step ID is created only if the proposal is applied.</span>
           </label>
           <label htmlFor="plan-direct-add-after">Place after
-            <select id="plan-direct-add-after" data-control-id="plan-direct-add-after" value={addDraft.afterStepId} onChange={(event) => {
+            <TitaniumSelect id="plan-direct-add-after" data-control-id="plan-direct-add-after" value={addDraft.afterStepId} onChange={(event) => {
               const nextAfterStep = steps.find((step) => step.id === event.target.value);
               const validDependencies = new Set(nextAfterStep ? steps.filter((step) => step.ordinal <= nextAfterStep.ordinal).map((step) => step.id) : steps.map((step) => step.id));
               setAddDraft((current) => ({ ...current, afterStepId: event.target.value, dependencyStepIds: canonicalDependencies(current.dependencyStepIds.filter((id) => validDependencies.has(id)), steps) }));
             }}>
               <option value="">End of plan</option>
               {steps.map((step) => <option key={step.id} value={step.id}>{step.ordinal}. {step.title}</option>)}
-            </select>
+            </TitaniumSelect>
             <span>The server recomputes the final ordinal and dependency validity.</span>
           </label>
         </div>

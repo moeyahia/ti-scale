@@ -46,7 +46,8 @@ export interface GuidedReviewedObservation {
   readonly fileName: string | null;
   readonly byteSize: number;
   readonly redactionCount: number;
-  readonly interpretationSummary: string;
+  readonly reviewSummary: string;
+  readonly reviewKind: "ingestion_attestation" | "semantic_interpretation";
   readonly verificationState: "unverified" | "verified" | "disputed" | "rejected";
   readonly acquiredAt: string;
 }

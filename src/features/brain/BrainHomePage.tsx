@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { fetchBrainSummary, fetchMemoryNodes } from "../../data/api/brain";
 import { useQuery } from "../../data/cache/QueryProvider";
 import { Button, ButtonLink, Card, ErrorPanel, LoadingPanel, PageHeader, StatusPill } from "../../design-system/components/Primitives";
+import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
 import type { MemoryLifecycle, MemoryNodeType, MemorySensitivity } from "../../domain/types/brain";
 import { MEMORY_LIFECYCLE_STATES, MEMORY_NODE_TYPES, MEMORY_SENSITIVITIES } from "../../domain/types/brain";
 import { CursorControls, useUrlFilters } from "../runs/OperationalSurface";
@@ -47,7 +48,8 @@ export default function BrainHomePage() {
           <section className="brain-pulse" aria-label="Memory health">
             <div><span>Confirmed</span><strong>{summary.data.counts.confirmed}</strong></div>
             <div><span>Verified</span><strong>{summary.data.counts.verified}</strong></div>
-            <div><span>Candidates</span><strong>{summary.data.counts.candidates}</strong></div>
+            <div><span>Candidate nodes</span><strong>{summary.data.counts.candidateNodes}</strong></div>
+            <div><span>Inbox reviews</span><strong>{summary.data.counts.pendingReviews}</strong></div>
             <div><span>Stale</span><strong>{summary.data.counts.stale}</strong></div>
             <div><span>Disputed</span><strong>{summary.data.counts.disputed}</strong></div>
             <div><span>Relationships</span><strong>{summary.data.counts.edges}</strong></div>
@@ -70,9 +72,9 @@ export default function BrainHomePage() {
         <div className="os-section-heading"><div><p className="os-eyebrow">Search and review</p><h2>Memory nodes</h2></div><ButtonLink href="/brain/inbox" variant="secondary">Review candidates</ButtonLink></div>
         <form className="brain-search" onSubmit={(event) => { event.preventDefault(); urlFilters.set({ query: query.trim() || undefined }); }} role="search">
           <label>Search title, summary, and note text<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search operational memory" /></label>
-          <label>Node type<select value={nodeType} onChange={(event) => urlFilters.set({ nodeType: event.target.value || undefined })}><option value="">All types</option>{MEMORY_NODE_TYPES.map((type) => <option key={type} value={type}>{type.replaceAll("_", " ")}</option>)}</select></label>
-          <label>Lifecycle<select value={status} onChange={(event) => urlFilters.set({ status: event.target.value || undefined })}><option value="">All active states</option>{MEMORY_LIFECYCLE_STATES.filter((item) => item !== "forgotten").map((item) => <option key={item}>{item}</option>)}</select></label>
-          <label>Sensitivity<select value={sensitivity} onChange={(event) => urlFilters.set({ sensitivity: event.target.value || undefined })}><option value="">Permitted levels</option>{MEMORY_SENSITIVITIES.map((item) => <option key={item}>{item}</option>)}</select></label>
+          <label>Node type<TitaniumSelect value={nodeType} onChange={(event) => urlFilters.set({ nodeType: event.target.value || undefined })}><option value="">All types</option>{MEMORY_NODE_TYPES.map((type) => <option key={type} value={type}>{type.replaceAll("_", " ")}</option>)}</TitaniumSelect></label>
+          <label>Lifecycle<TitaniumSelect value={status} onChange={(event) => urlFilters.set({ status: event.target.value || undefined })}><option value="">All active states</option>{MEMORY_LIFECYCLE_STATES.filter((item) => item !== "forgotten").map((item) => <option key={item}>{item}</option>)}</TitaniumSelect></label>
+          <label>Sensitivity<TitaniumSelect value={sensitivity} onChange={(event) => urlFilters.set({ sensitivity: event.target.value || undefined })}><option value="">Permitted levels</option>{MEMORY_SENSITIVITIES.map((item) => <option key={item}>{item}</option>)}</TitaniumSelect></label>
           <Button type="submit">Search</Button>
         </form>
         {nodes.isLoading && <LoadingPanel label="Searching canonical memory" />}

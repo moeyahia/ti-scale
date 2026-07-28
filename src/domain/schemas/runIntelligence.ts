@@ -282,9 +282,23 @@ function parseAttemptEvidence(value: unknown): AttackAttempt["evidence"][number]
   };
 }
 
+function parseAttemptActionBinding(value: unknown): NonNullable<AttackAttempt["representedActionBinding"]> {
+  const item = exact(value, "attack attempt represented action binding", [
+    "actionType", "actionClass", "normalizedArguments", "scopedTarget", "bindingHash", "createdAt",
+  ]);
+  return {
+    actionType: text(item.actionType, "attack attempt represented action type"),
+    actionClass: text(item.actionClass, "attack attempt represented action class"),
+    normalizedArguments: jsonObject(item.normalizedArguments, "attack attempt represented action arguments"),
+    scopedTarget: text(item.scopedTarget, "attack attempt represented scoped target"),
+    bindingHash: text(item.bindingHash, "attack attempt represented action binding hash"),
+    createdAt: timestamp(item.createdAt, "attack attempt represented action binding created time"),
+  };
+}
+
 export function parseAttackAttempt(value: unknown): AttackAttempt {
   const item = exact(value, "attack attempt", [
-    "id", "missionId", "runId", "planId", "stepId", "targetAssetId", "targetServiceId", "objective",
+    "id", "missionId", "runId", "planId", "stepId", "targetAssetId", "targetServiceId", "recoverySourceAttackAttemptId", "representedActionBinding", "objective",
     "techniqueId", "techniqueName", "actionClass", "prerequisites", "normalizedParameters", "status",
     "outcomeSummary", "failureCategory", "failureDiagnosisId", "assignedAgentId", "modelAssignmentId",
     "startedAt", "endedAt", "createdAt", "updatedAt", "version", "evidence",
@@ -299,6 +313,10 @@ export function parseAttackAttempt(value: unknown): AttackAttempt {
     runId: text(item.runId, "attack attempt run ID"), planId: nullableText(item.planId, "attack attempt plan ID"),
     stepId: nullableText(item.stepId, "attack attempt step ID"), targetAssetId: nullableText(item.targetAssetId, "attack attempt target asset ID"),
     targetServiceId: nullableText(item.targetServiceId, "attack attempt target service ID"),
+    recoverySourceAttackAttemptId: nullableText(item.recoverySourceAttackAttemptId, "attack attempt recovery source ID"),
+    representedActionBinding: item.representedActionBinding === null
+      ? null
+      : parseAttemptActionBinding(item.representedActionBinding),
     objective: text(item.objective, "attack attempt objective"), techniqueId: nullableText(item.techniqueId, "attack attempt technique ID"),
     techniqueName: text(item.techniqueName, "attack attempt technique name"), actionClass: text(item.actionClass, "attack attempt action class"),
     prerequisites: list(item.prerequisites, "attack attempt prerequisites").map((candidate, index) => jsonValue(candidate, `attack attempt prerequisite ${index}`)),

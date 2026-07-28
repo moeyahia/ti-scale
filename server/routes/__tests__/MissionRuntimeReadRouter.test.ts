@@ -12,6 +12,10 @@ import { ActionRepository } from "../../orchestration/ActionRepository";
 import { CheckpointRepository } from "../../orchestration/CheckpointRepository";
 import { canonicalJson, hashJson } from "../../orchestration/serialization";
 import { createMissionRuntimeReadRouter } from "../MissionRuntimeReadRouter";
+import {
+  AutonomousActivationReceiptRepository,
+  AutonomousActivationReceiptVerifier,
+} from "../../autonomous-runtime";
 
 const NOW = "2026-07-16T12:00:00.000Z";
 const servers: Server[] = [];
@@ -257,6 +261,10 @@ async function application() {
   app.use(createMissionRuntimeReadRouter({
     repository,
     checkpoints,
+    autonomousActivationReceipts: new AutonomousActivationReceiptRepository(database),
+    autonomousActivationReceiptVerifier:
+      new AutonomousActivationReceiptVerifier(database, () => new Date(NOW)),
+    clock: () => new Date(NOW),
     resolveActor: () => actor,
     authorizeMission: (_request, actorId, missionId) => {
       authorizationCalls.push(`mission:${actorId}:${missionId}`);
@@ -300,6 +308,7 @@ describe("MissionRuntimeReadRouter", () => {
         prohibitedTargets: [],
         successCriteria: ["Retain one attributable observation"],
         memoryPolicy: { allowAutonomous: false, allowGuided: true },
+        executionPreference: "manual",
       },
       runs: [],
     });
@@ -469,6 +478,10 @@ describe("MissionRuntimeReadRouter", () => {
       ["/api/v2/runs?limit=1e2", "invalid_pagination"],
       ["/api/v2/runs?query=%20", "invalid_run_search"],
       ["/api/v2/runs?status=running&status=blocked", "invalid_run_status"],
+      ["/api/v2/runs?view=operational", "invalid_run_view"],
+      ["/api/v2/runs?journey=autonomous&view=operational&status=running", "ambiguous_run_state_filter"],
+      ["/api/v2/runs?journey=autonomous&view=recent", "invalid_run_view"],
+      ["/api/v2/runs?journey=autonomous&view=operational&cursor=not-a-cursor", "invalid_pagination"],
       ["/api/v2/runs?offset=1", "unsupported_runtime_filter"],
       ["/api/v2/decisions?status=authorized", "invalid_decision_status"],
       ["/api/v2/decisions?runId=bad%2Fid", "invalid_resource_id"],
@@ -480,6 +493,135 @@ describe("MissionRuntimeReadRouter", () => {
         error: { code, category: "invalid_input", retryable: false },
       });
     }
+  });
+
+  test("filters journey and operational state before the limit so newer Guided work cannot hide an Autonomous run", async () => {
+    const fixture = await application();
+    fixture.allowedMissions.add("mission-private");
+    fixture.allowedRuns.add("run-private");
+    fixture.database.prepare(`
+      UPDATE runs SET updated_at = '2026-07-15T00:00:00.000Z' WHERE id = 'run-private'
+    `).run();
+
+    for (let index = 0; index < 24; index += 1) {
+      const suffix = String(index).padStart(2, "0");
+      const missionId = `mission-newer-guided-${suffix}`;
+      const runId = `run-newer-guided-${suffix}`;
+      seedMission(fixture.database, {
+        id: missionId,
+        name: `Newer Guided mission ${suffix}`,
+        journey: "guided",
+        target: `guided-${suffix}.lab`,
+      });
+      seedRun(fixture.database, {
+        id: runId,
+        missionId,
+        journey: "guided",
+        status: "running",
+        owner: "GuidedCommander",
+        progress: 0.3,
+      });
+      fixture.database.prepare("UPDATE runs SET updated_at = ? WHERE id = ?")
+        .run(`2026-07-17T12:${String(index).padStart(2, "0")}:00.000Z`, runId);
+      fixture.allowedMissions.add(missionId);
+      fixture.allowedRuns.add(runId);
+    }
+
+    const live = await json<{
+      readonly schemaVersion: "2.4";
+      readonly items: readonly { readonly id: string; readonly journey: string; readonly status: string }[];
+      readonly nextCursor: string | null;
+    }>(await fetch(`${fixture.url}/api/v2/runs?journey=autonomous&view=operational&limit=1`));
+    expect(live).toEqual({
+      schemaVersion: "2.4",
+      items: [expect.objectContaining({ id: "run-private", journey: "autonomous", status: "running" })],
+      nextCursor: null,
+    });
+
+    fixture.database.prepare(`
+      UPDATE runs SET status = 'completed', ended_at = updated_at, version = version + 1
+      WHERE id = 'run-private'
+    `).run();
+    expect(await json<unknown>(await fetch(
+      `${fixture.url}/api/v2/runs?journey=autonomous&view=operational&limit=50`,
+    ))).toEqual({ schemaVersion: "2.4", items: [], nextCursor: null });
+    expect(await json<{ readonly items: readonly { readonly id: string }[] }>(await fetch(
+      `${fixture.url}/api/v2/runs?journey=autonomous&status=completed&limit=50`,
+    ))).toMatchObject({ items: [{ id: "run-private" }] });
+  });
+
+  test("paginates the operational projection with a stable filter-bound cursor", async () => {
+    const fixture = await application();
+    fixture.allowedMissions.add("mission-private");
+    fixture.allowedRuns.add("run-private");
+    for (let index = 0; index < 3; index += 1) {
+      const suffix = String(index);
+      const missionId = `mission-autonomous-page-${suffix}`;
+      const runId = `run-autonomous-page-${suffix}`;
+      seedMission(fixture.database, {
+        id: missionId,
+        name: `Autonomous page ${suffix}`,
+        journey: "autonomous",
+        target: `autonomous-${suffix}.lab`,
+      });
+      seedRun(fixture.database, {
+        id: runId,
+        missionId,
+        journey: "autonomous",
+        status: "running",
+        owner: "Supervisor",
+        progress: 0.2,
+      });
+      fixture.database.prepare("UPDATE runs SET updated_at = ? WHERE id = ?")
+        .run(`2026-07-18T12:00:0${index}.000Z`, runId);
+      fixture.allowedMissions.add(missionId);
+      fixture.allowedRuns.add(runId);
+    }
+
+    const first = await json<{
+      readonly items: readonly { readonly id: string }[];
+      readonly nextCursor: string | null;
+    }>(await fetch(`${fixture.url}/api/v2/runs?journey=autonomous&view=operational&limit=2`));
+    expect(first.items.map((run) => run.id)).toEqual([
+      "run-autonomous-page-2",
+      "run-autonomous-page-1",
+    ]);
+    expect(first.nextCursor).toBeTruthy();
+
+    const second = await json<{
+      readonly items: readonly { readonly id: string }[];
+      readonly nextCursor: string | null;
+    }>(await fetch(
+      `${fixture.url}/api/v2/runs?journey=autonomous&view=operational&limit=2&cursor=${encodeURIComponent(first.nextCursor!)}`,
+    ));
+    expect(second.items.map((run) => run.id)).toEqual([
+      "run-autonomous-page-0",
+      "run-private",
+    ]);
+    expect(second.nextCursor).toBeNull();
+
+    const changedFilters = await fetch(
+      `${fixture.url}/api/v2/runs?journey=autonomous&status=running&limit=2&cursor=${encodeURIComponent(first.nextCursor!)}`,
+    );
+    expect(changedFilters.status).toBe(400);
+    expect(await json<ErrorEnvelope>(changedFilters)).toMatchObject({
+      error: { code: "invalid_pagination", category: "invalid_input" },
+    });
+
+    const decodedCursor = JSON.parse(
+      Buffer.from(first.nextCursor!, "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    const nonCanonicalCursor = Buffer.from(JSON.stringify({
+      ...decodedCursor,
+      updatedAt: "0",
+    }), "utf8").toString("base64url");
+    const nonCanonicalBoundary = await fetch(
+      `${fixture.url}/api/v2/runs?journey=autonomous&view=operational&limit=2&cursor=${encodeURIComponent(nonCanonicalCursor)}`,
+    );
+    expect(nonCanonicalBoundary.status).toBe(400);
+    expect(await json<ErrorEnvelope>(nonCanonicalBoundary)).toMatchObject({
+      error: { code: "invalid_pagination", category: "invalid_input" },
+    });
   });
 
   test("exposes no write route and preserves durable state on rejected methods", async () => {

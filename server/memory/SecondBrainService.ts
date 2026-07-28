@@ -97,7 +97,8 @@ export class SecondBrainService {
     readonly messageId?: string;
   }): ContextPack {
     const startedAt = performance.now();
-    const items = this.retrieval.retrieve(input.query, input.policy);
+    const trace = this.retrieval.retrieveWithTrace(input.query, input.policy);
+    const items = trace.items;
     return this.repository.persistContextPack({
       missionId: input.missionId,
       runId: input.runId,
@@ -113,6 +114,9 @@ export class SecondBrainService {
         durationMs: Number((performance.now() - startedAt).toFixed(3)),
         retrievedCount: items.length,
         signals: [...new Set(items.flatMap((item) => item.signals))],
+        rejectedCount: trace.rejectedCount,
+        rejected: trace.rejected,
+        rejectedTruncated: trace.rejectedTruncated,
       },
       createdBy: input.createdBy,
       items,

@@ -8,6 +8,8 @@ import { normalizeFixtureNamespace } from "./fixtureNamespace";
 const FIXTURE_DATE = "2099-07-16";
 const FIXTURE_BASE_TIME = Date.parse(`${FIXTURE_DATE}T23:59:59.000Z`);
 const PORTFOLIO_PAGE_SIZE = 50;
+const LIVE_CURSOR_BASE_TIME = Date.parse("2199-07-16T23:59:59.000Z");
+const LIVE_CURSOR_RUN_COUNT = 51;
 
 type FixtureRunStatus = Extract<RunStatus, "running" | "recovering" | "completed">;
 
@@ -48,6 +50,9 @@ export interface MissionPortfolioFixture {
   readonly terminalMissionId: string;
   readonly terminalRunId: string;
   readonly terminalTitle: string;
+  readonly failureTerminalMissionId: string;
+  readonly failureTerminalRunId: string;
+  readonly failureTerminalTitle: string;
   readonly totalMissionCount: number;
 }
 
@@ -57,6 +62,18 @@ export interface MissionPortfolioFixtureState {
   readonly terminalRunStatus: string;
   readonly terminalArchiveAuditCount: number;
   readonly terminalExportAuditCount: number;
+  readonly failureTerminalMissionStatus: string;
+  readonly failureTerminalRunStatus: string;
+  readonly failureTerminalArchiveAuditCount: number;
+  readonly failureTerminalExportAuditCount: number;
+}
+
+export interface LiveRunPaginationFixture {
+  readonly namespace: string;
+  readonly missionIds: readonly string[];
+  readonly runIds: readonly string[];
+  readonly firstPageRunIds: readonly string[];
+  readonly boundaryRunId: string;
 }
 
 function databasePath(): string {
@@ -313,9 +330,11 @@ export function createMissionPortfolioFixture(instanceId: string): MissionPortfo
   const primaryMissionId = `mission-portfolio-primary-${namespace}`;
   const autonomousMissionId = `mission-portfolio-autonomous-${namespace}`;
   const terminalMissionId = `mission-portfolio-terminal-${namespace}`;
+  const failureTerminalMissionId = `mission-portfolio-failure-terminal-${namespace}`;
   const primaryTitle = `Guided recovery ${namespace}`;
   const autonomousTitle = `Autonomous active ${namespace}`;
   const terminalTitle = `Disposable terminal ${namespace}`;
+  const failureTerminalTitle = `Failure recovery terminal ${namespace}`;
   const totalMissionCount = PORTFOLIO_PAGE_SIZE + 1;
   const database = createDatabaseConnection({
     filename: databasePath(),
@@ -326,6 +345,7 @@ export function createMissionPortfolioFixture(instanceId: string): MissionPortfo
     let primaryRunId = "";
     let autonomousRunId = "";
     let terminalRunId = "";
+    let failureTerminalRunId = "";
     inImmediateTransaction(database, () => {
       database.prepare(`
         INSERT INTO agents (
@@ -385,12 +405,27 @@ export function createMissionPortfolioFixture(instanceId: string): MissionPortfo
         updatedAt: fixtureTime(2),
         risk: "low",
       }).runId;
+      failureTerminalRunId = insertMission(database, {
+        id: failureTerminalMissionId,
+        title: failureTerminalTitle,
+        objective: `bulk-failure-recovery-${namespace} is isolated from the portfolio pagination fixture.`,
+        journey: "autonomous",
+        missionStatus: "completed",
+        runStatus: "completed",
+        engagementId: `failure-terminal-${engagementId}`,
+        target: `failure-terminal-${namespace}.example.test`,
+        // Keep this auxiliary record older than the shared-query portfolio so
+        // it cannot perturb the existing first-page or Overview expectations.
+        updatedAt: fixtureTime(PORTFOLIO_PAGE_SIZE + 100),
+        risk: "low",
+      }).runId;
       // Bulk archive is a real mission mutation and therefore remains fenced
       // by the same trusted, server-side control-plane authority as production.
       // Publish the disposable terminal run and its E2E runtime lease in the
       // same transaction so no browser request can observe an unfenced fixture;
       // the raw lease token is never exposed to the page or HTTP boundary.
       acquireTestRunMutationAuthority(database, terminalRunId);
+      acquireTestRunMutationAuthority(database, failureTerminalRunId);
 
       for (let index = 0; index < PORTFOLIO_PAGE_SIZE - 2; index += 1) {
         insertMission(database, {
@@ -424,6 +459,9 @@ export function createMissionPortfolioFixture(instanceId: string): MissionPortfo
       terminalMissionId,
       terminalRunId,
       terminalTitle,
+      failureTerminalMissionId,
+      failureTerminalRunId,
+      failureTerminalTitle,
       totalMissionCount,
     };
   } finally {
@@ -452,15 +490,33 @@ export function readMissionPortfolioFixtureState(
       readonly run_status: string;
     } | undefined;
     if (!terminal) throw new Error("The disposable terminal portfolio fixture is missing");
+    const failureTerminal = database.prepare(`
+      SELECT m.status AS mission_status, r.status AS run_status
+      FROM missions m JOIN runs r ON r.id = ? WHERE m.id = ?
+    `).get(fixture.failureTerminalRunId, fixture.failureTerminalMissionId) as {
+      readonly mission_status: string;
+      readonly run_status: string;
+    } | undefined;
+    if (!failureTerminal) throw new Error("The failure-recovery terminal portfolio fixture is missing");
     const auditCounts = database.prepare(`
       SELECT
         SUM(CASE WHEN action = 'mission.archived' AND resource_id = ? THEN 1 ELSE 0 END) AS archive_count,
         SUM(CASE WHEN action = 'mission.bulk_metadata_exported'
-          AND instr(details_json, ?) > 0 THEN 1 ELSE 0 END) AS export_count
+          AND instr(details_json, ?) > 0 THEN 1 ELSE 0 END) AS export_count,
+        SUM(CASE WHEN action = 'mission.archived' AND resource_id = ? THEN 1 ELSE 0 END) AS failure_archive_count,
+        SUM(CASE WHEN action = 'mission.bulk_metadata_exported'
+          AND instr(details_json, ?) > 0 THEN 1 ELSE 0 END) AS failure_export_count
       FROM audit_records
-    `).get(fixture.terminalMissionId, fixture.terminalMissionId) as {
+    `).get(
+      fixture.terminalMissionId,
+      fixture.terminalMissionId,
+      fixture.failureTerminalMissionId,
+      fixture.failureTerminalMissionId,
+    ) as {
       readonly archive_count: number | null;
       readonly export_count: number | null;
+      readonly failure_archive_count: number | null;
+      readonly failure_export_count: number | null;
     };
     return {
       visibleFixtureMissions: Number(visible.count),
@@ -468,7 +524,107 @@ export function readMissionPortfolioFixtureState(
       terminalRunStatus: terminal.run_status,
       terminalArchiveAuditCount: Number(auditCounts.archive_count ?? 0),
       terminalExportAuditCount: Number(auditCounts.export_count ?? 0),
+      failureTerminalMissionStatus: failureTerminal.mission_status,
+      failureTerminalRunStatus: failureTerminal.run_status,
+      failureTerminalArchiveAuditCount: Number(auditCounts.failure_archive_count ?? 0),
+      failureTerminalExportAuditCount: Number(auditCounts.failure_export_count ?? 0),
     };
+  } finally {
+    database.close();
+  }
+}
+
+function removeLiveRunPaginationRows(
+  database: ReturnType<typeof createDatabaseConnection>,
+  namespace: string,
+): void {
+  const missionPattern = `mission-live-cursor-${namespace}-%`;
+  const runPattern = `run-${missionPattern}`;
+  database.prepare("DELETE FROM run_event_sequences WHERE run_id LIKE ?").run(runPattern);
+  database.prepare("DELETE FROM runs WHERE id LIKE ?").run(runPattern);
+  database.prepare("DELETE FROM mission_targets WHERE mission_id LIKE ?").run(missionPattern);
+  database.prepare("DELETE FROM missions WHERE id LIKE ?").run(missionPattern);
+}
+
+/**
+ * Publish one page plus one boundary row later than every ordinary E2E record.
+ * This keeps the Live cursor assertion deterministic without relying on state
+ * created by another browser test or changing production pagination limits.
+ */
+export function createLiveRunPaginationFixture(instanceId: string): LiveRunPaginationFixture {
+  const namespace = normalizeFixtureNamespace(instanceId);
+  const missionIds = Array.from(
+    { length: LIVE_CURSOR_RUN_COUNT },
+    (_, index) => `mission-live-cursor-${namespace}-${String(index).padStart(2, "0")}`,
+  );
+  const database = createDatabaseConnection({
+    filename: databasePath(),
+    fileMustExist: true,
+    busyTimeoutMs: 120_000,
+  });
+  try {
+    inImmediateTransaction(database, () => {
+      removeLiveRunPaginationRows(database, namespace);
+      const insertCursorMission = database.prepare(`
+        INSERT INTO missions (
+          id, name, objective, journey, status, authorization_status, engagement_id,
+          scope_json, success_criteria_json, retention_policy_json, memory_policy_json,
+          created_by, version, created_at, updated_at
+        ) VALUES (?, ?, ?, 'autonomous', 'active', 'verified', ?, ?, '[]', '{}', '{}',
+          'e2e-local-operator', 1, ?, ?)
+      `);
+      const insertCursorRun = database.prepare(`
+        INSERT INTO runs (
+          id, mission_id, journey, status, progress, status_reason, next_action_summary,
+          budget_json, budget_usage_json, last_heartbeat_at, started_at, created_at, updated_at, version
+        ) VALUES (?, ?, 'autonomous', 'running', 0.25,
+          'Executing the bounded cursor fixture inside its authorized contract.',
+          'Continue the bounded cursor fixture', '{}', '{}', ?, ?, ?, ?, 1)
+      `);
+      missionIds.forEach((missionId, index) => {
+        const ordinal = String(index).padStart(2, "0");
+        const updatedAt = new Date(LIVE_CURSOR_BASE_TIME - index * 1_000).toISOString();
+        const createdAt = new Date(Date.parse(updatedAt) - 60_000).toISOString();
+        insertCursorMission.run(
+          missionId,
+          `Autonomous cursor fixture ${String(index + 1).padStart(2, "0")} ${namespace}`,
+          `Bounded ${namespace} Live Operations cursor fixture.`,
+          `engagement-live-cursor-${namespace}-${ordinal}`,
+          JSON.stringify({ allowedTargets: [`live-cursor-${ordinal}-${namespace}.example.test`] }),
+          createdAt,
+          updatedAt,
+        );
+        insertCursorRun.run(
+          `run-${missionId}`,
+          missionId,
+          updatedAt,
+          createdAt,
+          createdAt,
+          updatedAt,
+        );
+      });
+    });
+  } finally {
+    database.close();
+  }
+  const runIds = missionIds.map((missionId) => `run-${missionId}`);
+  return {
+    namespace,
+    missionIds,
+    runIds,
+    firstPageRunIds: runIds.slice(0, PORTFOLIO_PAGE_SIZE),
+    boundaryRunId: runIds[PORTFOLIO_PAGE_SIZE]!,
+  };
+}
+
+export function removeLiveRunPaginationFixture(fixture: LiveRunPaginationFixture): void {
+  const database = createDatabaseConnection({
+    filename: databasePath(),
+    fileMustExist: true,
+    busyTimeoutMs: 120_000,
+  });
+  try {
+    inImmediateTransaction(database, () => removeLiveRunPaginationRows(database, fixture.namespace));
   } finally {
     database.close();
   }

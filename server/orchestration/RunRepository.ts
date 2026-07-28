@@ -1,9 +1,13 @@
 import type { SqliteDatabase } from "../db";
-import { evaluateDestructiveAuthorization } from "../domain";
+import {
+  evaluateDestructiveAuthorization,
+  isSpecialistMcpExecutionPolicy,
+} from "../domain";
 import {
   acquireLease,
   heartbeatLease,
   isRunState,
+  runNextActionOverride,
   type AutonomousContractBoundary,
   type BudgetKey,
   type BudgetState,
@@ -114,6 +118,51 @@ export type AutonomousIntentBoundaryResult =
 export type CurrentActionBoundaryResult =
   | { readonly allowed: true }
   | { readonly allowed: false; readonly code: string; readonly humanMessage: string };
+
+export const REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION =
+  "ti-scale.reviewed-local-tool-action.v1" as const;
+
+export interface ReviewedLocalToolActionEnvelope {
+  readonly schemaVersion: typeof REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION;
+  readonly executionBinding: "reviewed_local_process";
+  readonly toolId: string;
+  readonly parameters: Readonly<Record<string, unknown>>;
+}
+
+const PUBLIC_TOOL_ID = /^[A-Za-z0-9._:@/-]{1,200}$/u;
+
+/**
+ * Truthful local-process action envelope. It is intentionally distinct from
+ * the MCP `{mcpServer, toolName, parameters}` shape so a direct executable is
+ * never represented as an MCP invocation in events, readiness, or policy.
+ */
+export function reviewedLocalToolActionEnvelope(
+  value: Readonly<Record<string, unknown>>,
+): ReviewedLocalToolActionEnvelope | undefined {
+  const keys = Object.keys(value).sort();
+  const expected = ["executionBinding", "parameters", "schemaVersion", "toolId"].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    return undefined;
+  }
+  if (
+    value.schemaVersion !== REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION
+    || value.executionBinding !== "reviewed_local_process"
+    || typeof value.toolId !== "string"
+    || value.toolId !== value.toolId.trim()
+    || !PUBLIC_TOOL_ID.test(value.toolId)
+    || value.parameters === null
+    || typeof value.parameters !== "object"
+    || Array.isArray(value.parameters)
+    || (Object.getPrototypeOf(value.parameters) !== Object.prototype
+      && Object.getPrototypeOf(value.parameters) !== null)
+  ) return undefined;
+  return {
+    schemaVersion: REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION,
+    executionBinding: "reviewed_local_process",
+    toolId: value.toolId,
+    parameters: value.parameters as Readonly<Record<string, unknown>>,
+  };
+}
 
 const BUDGET_KEYS: readonly BudgetKey[] = [
   "wallClockMs",
@@ -343,10 +392,16 @@ export class RunRepository {
     const expiresAt = replacement?.expiresAt ?? retained?.expiresAt ?? null;
     const heartbeatAt = owner ? input.now : null;
     const startedAt = input.nextRun.launched ? input.nextRun.updatedAt : null;
+    const terminal = ["completed", "failed", "cancelled"].includes(input.nextRun.state);
+    const nextActionOverride = runNextActionOverride(
+      input.nextRun.state,
+      input.nextRun.journey,
+    );
     const result = this.database
       .prepare(`
         UPDATE runs SET
           status = ?, status_reason = ?, budget_json = ?, budget_usage_json = ?,
+          next_action_summary = CASE WHEN ? = 1 THEN ? ELSE next_action_summary END,
           retry_count = ?, replan_count = ?, lease_owner = ?,
           lease_acquired_at = CASE
             WHEN ? IS NULL THEN NULL
@@ -354,6 +409,8 @@ export class RunRepository {
             ELSE lease_acquired_at
           END,
           last_heartbeat_at = ?, lease_expires_at = ?,
+          current_step_id = CASE WHEN ? = 1 THEN NULL ELSE current_step_id END,
+          current_owner_id = CASE WHEN ? = 1 THEN NULL ELSE current_owner_id END,
           started_at = CASE WHEN ? IS NULL THEN started_at ELSE COALESCE(started_at, ?) END,
           ended_at = ?, updated_at = ?, version = ?
         WHERE id = ? AND version = ?
@@ -363,6 +420,8 @@ export class RunRepository {
         input.nextRun.stateReason,
         canonicalJson(input.control.budget.limits),
         canonicalJson(input.control.budget.usage),
+        nextActionOverride === undefined ? 0 : 1,
+        nextActionOverride ?? null,
         input.control.retryCount,
         input.control.replanCount,
         owner,
@@ -371,6 +430,8 @@ export class RunRepository {
         acquiredAt,
         heartbeatAt,
         expiresAt,
+        terminal ? 1 : 0,
+        terminal ? 1 : 0,
         startedAt,
         startedAt,
         input.nextRun.endedAt ?? null,
@@ -481,13 +542,18 @@ export class RunRepository {
         .map(normalize)
         .filter(Boolean),
     );
+    const localEnvelope = intent.kind === "tool"
+      ? reviewedLocalToolActionEnvelope(intent.arguments)
+      : null;
     const actionType = normalize(intent.actionType);
     const actionClass = normalize(intent.actionClass);
     if (
-      !allowed.has(actionType) || !allowed.has(actionClass) ||
-      prohibited.has(actionType) || prohibited.has(actionClass)
+      (!localEnvelope && !allowed.has(actionType)) ||
+      !allowed.has(actionClass) ||
+      (!localEnvelope && prohibited.has(actionType)) ||
+      prohibited.has(actionClass)
     ) {
-      return deny("autonomous_action_not_allowed", "The action type or class is outside the current signed contract.");
+      return deny("autonomous_action_not_allowed", "The action class is outside the current signed contract.");
     }
     const destructivePolicy = typeof policy.destructivePolicy === "string"
       ? normalize(policy.destructivePolicy)
@@ -557,6 +623,19 @@ export class RunRepository {
       return deny("autonomous_specialist_not_signed", "The assigned specialist is not in the current signed specialist pool.");
     }
     if (intent.kind === "tool") {
+      if (localEnvelope) {
+        if (!this.localToolAllowed(
+          assignment.agent_id,
+          localEnvelope.toolId,
+          intent.actionClass,
+        )) {
+          return deny(
+            "autonomous_tool_policy_denied",
+            "The current specialist policy does not allow this exact reviewed local tool binding.",
+          );
+        }
+        return { allowed: true, agentId: assignment.agent_id };
+      }
       const mcpServer = intent.arguments.mcpServer;
       const toolName = intent.arguments.toolName;
       if (
@@ -565,7 +644,12 @@ export class RunRepository {
       ) {
         return deny("autonomous_tool_binding_invalid", "The tool action lacks an exact MCP server and tool binding.");
       }
-      if (!this.specialistToolAllowed(assignment.agent_id, mcpServer, toolName)) {
+      if (!this.specialistToolAllowed(
+        assignment.agent_id,
+        mcpServer,
+        toolName,
+        intent.actionClass,
+      )) {
         return deny("autonomous_tool_policy_denied", "The current specialist policy does not allow this exact MCP tool binding.");
       }
     }
@@ -659,6 +743,124 @@ export class RunRepository {
     return { allowed: true };
   }
 
+  /**
+   * Final specialist-tool assertion for the execution adapter immediately
+   * before an MCP call. Guided exact-step authorization is necessary but not
+   * sufficient: the current assigned specialist, MCP server, and tool policy
+   * must still permit this exact binding.
+   */
+  authorizePersistedSpecialistTool(
+    run: DurableRun,
+    action: DurableAction,
+    mcpServer: string,
+    toolName: string,
+  ): CurrentActionBoundaryResult {
+    const base = this.authorizePersistedAction(run, action);
+    if (!base.allowed) return base;
+    if (action.kind !== "tool") {
+      return {
+        allowed: false,
+        code: "action_not_specialist_tool",
+        humanMessage: "The persisted action is not a specialist tool action.",
+      };
+    }
+    const persistedServer = action.arguments.mcpServer;
+    const persistedTool = action.arguments.toolName;
+    if (
+      typeof persistedServer !== "string" || persistedServer !== mcpServer || !persistedServer.trim() ||
+      typeof persistedTool !== "string" || persistedTool !== toolName || !persistedTool.trim()
+    ) {
+      return {
+        allowed: false,
+        code: "action_tool_binding_changed",
+        humanMessage: "The requested MCP server or tool differs from the exact persisted action binding.",
+      };
+    }
+    const assignment = this.currentPersistedActionAssignment(action);
+    if (!assignment?.agent_id || !this.specialistToolAllowed(
+      assignment.agent_id,
+      mcpServer,
+      toolName,
+      action.actionClass,
+    )) {
+      return {
+        allowed: false,
+        code: "action_specialist_tool_policy_denied",
+        humanMessage: "The current specialist, MCP server, or tool policy no longer permits this exact binding.",
+      };
+    }
+    return { allowed: true };
+  }
+
+  /**
+   * Final direct-process assertion. This repeats the canonical mission,
+   * target, decision/contract, assignment, agent-health, and per-agent tool
+   * policy checks immediately before a reviewed local executable starts.
+   */
+  authorizePersistedLocalTool(
+    run: DurableRun,
+    action: DurableAction,
+    toolId: string,
+  ): CurrentActionBoundaryResult {
+    const envelope = reviewedLocalToolActionEnvelope(action.arguments);
+    if (!envelope || envelope.toolId !== toolId) {
+      return {
+        allowed: false,
+        code: "action_local_tool_binding_changed",
+        humanMessage: "The requested local executable differs from the exact persisted action binding.",
+      };
+    }
+    return this.authorizePersistedReviewedProcessTool(
+      run,
+      action,
+      toolId,
+      "reviewed_local_process",
+    );
+  }
+
+  /**
+   * Shared final boundary for explicitly reviewed direct-process families.
+   * The binding string is closed here so arbitrary action envelopes cannot
+   * opt themselves into local execution.
+   */
+  authorizePersistedReviewedProcessTool(
+    run: DurableRun,
+    action: DurableAction,
+    toolId: string,
+    executionBinding: "reviewed_local_process" | "reviewed_windows_identity_process",
+  ): CurrentActionBoundaryResult {
+    const base = this.authorizePersistedAction(run, action);
+    if (!base.allowed) return base;
+    if (action.kind !== "tool") {
+      return {
+        allowed: false,
+        code: "action_not_local_tool",
+        humanMessage: "The persisted action is not a reviewed local tool action.",
+      };
+    }
+    if (action.arguments.executionBinding !== executionBinding
+      || action.arguments.toolId !== toolId) {
+      return {
+        allowed: false,
+        code: "action_local_tool_binding_changed",
+        humanMessage: "The requested local executable differs from the exact persisted action binding.",
+      };
+    }
+    const assignment = this.currentPersistedActionAssignment(action);
+    if (!assignment?.agent_id || !this.localToolAllowed(
+      assignment.agent_id,
+      toolId,
+      action.actionClass,
+    )) {
+      return {
+        allowed: false,
+        code: "action_local_tool_policy_denied",
+        humanMessage: "The current specialist or local tool policy no longer permits this exact executable binding.",
+      };
+    }
+    return { allowed: true };
+  }
+
   private currentMissionScope(missionId: string, target: string): CurrentActionBoundaryResult {
     const mission = this.database.prepare(`
       SELECT authorization_status FROM missions WHERE id = ?
@@ -733,12 +935,18 @@ export class RunRepository {
         .map((value) => value.trim())
         .filter(Boolean),
     );
+    const localEnvelope = action.kind === "tool"
+      ? reviewedLocalToolActionEnvelope(action.arguments)
+      : null;
     const actionType = normalize(action.actionType);
     const actionClass = normalize(action.actionClass);
+    // ActionClassRegistry values belong to the signed mission contract. Tool
+    // IDs are authorized independently by canonical specialist tool policy,
+    // capabilities, and the exact persisted execution envelope below.
     if (
-      !allowed.has(actionType) ||
+      (!localEnvelope && !allowed.has(actionType)) ||
       !allowed.has(actionClass) ||
-      prohibited.has(actionType) ||
+      (!localEnvelope && prohibited.has(actionType)) ||
       prohibited.has(actionClass)
     ) return false;
     const destructivePolicy = typeof policy.destructivePolicy === "string"
@@ -761,13 +969,127 @@ export class RunRepository {
     if (!targetScope.allowed || signedSpecialists.size === 0) return false;
     if (!currentAssignment?.agent_id || !signedSpecialists.has(currentAssignment.agent_id)) return false;
     if (action.kind !== "tool") return true;
+    const local = reviewedLocalToolActionEnvelope(action.arguments);
+    if (local) {
+      return this.localToolAllowed(
+        currentAssignment.agent_id,
+        local.toolId,
+        action.actionClass,
+      );
+    }
     const mcpServer = action.arguments.mcpServer;
     const toolName = action.arguments.toolName;
     if (
       typeof mcpServer !== "string" || !mcpServer.trim() || mcpServer !== mcpServer.trim() ||
       typeof toolName !== "string" || !toolName.trim() || toolName !== toolName.trim()
     ) return false;
-    return this.specialistToolAllowed(currentAssignment.agent_id, mcpServer, toolName);
+    return this.specialistToolAllowed(
+      currentAssignment.agent_id,
+      mcpServer,
+      toolName,
+      action.actionClass,
+    );
+  }
+
+  private localToolCapabilityAllowsActionClass(
+    agentId: string,
+    toolId: string,
+    actionClass: string,
+  ): boolean {
+    const rows = this.database.prepare(`
+      SELECT metadata_json
+      FROM agent_capabilities
+      WHERE agent_id = ? AND capability = ? AND enabled = 1
+    `).all(agentId, toolId) as Array<{ metadata_json: string }>;
+    if (rows.length === 0) return false;
+    const declaredRows = rows.flatMap(({ metadata_json }) => {
+      const metadata = parseObject(metadata_json);
+      const actionClassIds = [
+        ...(typeof metadata.actionClassId === "string"
+          ? [metadata.actionClassId]
+          : []),
+        ...(Array.isArray(metadata.actionClassIds)
+          ? metadata.actionClassIds.filter(
+              (value): value is string => typeof value === "string",
+            )
+          : []),
+      ];
+      return actionClassIds.length > 0 ? [actionClassIds] : [];
+    });
+    // Historical reviewed-local capability rows did not carry the manifest
+    // relation. Preserve that compatibility; once the projection exposes the
+    // relation, however, it becomes an exact fail-closed dispatch constraint.
+    return declaredRows.length === 0
+      || declaredRows.some((actionClassIds) => actionClassIds.includes(actionClass));
+  }
+
+  private localToolAllowed(
+    agentId: string,
+    toolId: string,
+    actionClass: string,
+  ): boolean {
+    const agent = this.database.prepare(`
+      SELECT status, tool_policy_json, configuration_json
+      FROM agents WHERE id = ?
+    `).get(agentId) as {
+      status: string;
+      tool_policy_json: string;
+      configuration_json: string;
+    } | undefined;
+    if (!agent || ["offline", "quarantined"].includes(agent.status)) return false;
+    const toolPolicy = parseObject(agent.tool_policy_json);
+    const strings = (value: unknown): string[] => Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string")
+      : [];
+    const allowed = new Set(strings(toolPolicy.allowedTools));
+    const denied = new Set(strings(toolPolicy.deniedTools));
+    const approvalRequired = new Set(strings(toolPolicy.approvalRequiredTools));
+    if (!allowed.has(toolId) || denied.has(toolId) || approvalRequired.has(toolId)) return false;
+    if (!this.localToolCapabilityAllowsActionClass(
+      agentId,
+      toolId,
+      actionClass,
+    )) return false;
+    const configuration = parseObject(agent.configuration_json);
+    const configuredBindings = configuration.productAgent === true
+      ? this.runtimeBindingAgentIds(agentId, configuration).filter((id) => id !== agentId)
+      : [];
+    const executionAgentIds = configuredBindings.length > 0
+      ? configuredBindings
+      : [agentId];
+    return executionAgentIds.some((runtimeAgentId) => {
+      const runtimeAgent = this.database.prepare(`
+        SELECT status FROM agents WHERE id = ?
+      `).get(runtimeAgentId) as { status: string } | undefined;
+      return Boolean(
+        runtimeAgent
+        && !["offline", "quarantined"].includes(runtimeAgent.status)
+        && this.localToolCapabilityAllowsActionClass(
+          runtimeAgentId,
+          toolId,
+          actionClass,
+        ),
+      );
+    });
+  }
+
+  /**
+   * Product assignments remain the durable/audited owner. Execution policies
+   * may still name one or more internal runtime adapters; those bindings are
+   * projected into the product row and resolved only at this final boundary.
+   */
+  private runtimeBindingAgentIds(
+    agentId: string,
+    configuration: Readonly<Record<string, unknown>>,
+  ): readonly string[] {
+    const configured = configuration.productAgent === true
+      && Array.isArray(configuration.runtimeBindingAgentIds)
+      ? configuration.runtimeBindingAgentIds
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.trim())
+        .filter(Boolean)
+      : [];
+    return [...new Set([agentId, ...configured])];
   }
 
   /**
@@ -776,10 +1098,43 @@ export class RunRepository {
    * fail closed. This replaces the legacy in-process roster import and keeps
    * the parallel server independent from legacy agent and MCP modules.
    */
-  private specialistToolAllowed(agentId: string, mcpServer: string, toolName: string): boolean {
+  private manifestToolCapabilityAllowsActionClass(
+    agentId: string,
+    toolName: string,
+    actionClass: string,
+  ): boolean {
+    const rows = this.database.prepare(`
+      SELECT metadata_json
+      FROM agent_capabilities
+      WHERE agent_id = ? AND capability = ? AND enabled = 1
+        AND source = 'runtime-manifest-tool-binding'
+    `).all(agentId, toolName) as Array<{ metadata_json: string }>;
+    return rows.some(({ metadata_json }) => {
+      const metadata = parseObject(metadata_json);
+      const actionClassIds = Array.isArray(metadata.actionClassIds)
+        ? metadata.actionClassIds.filter(
+            (value): value is string => typeof value === "string",
+          )
+        : [];
+      return metadata.toolId === toolName
+        && actionClassIds.includes(actionClass);
+    });
+  }
+
+  private specialistToolAllowed(
+    agentId: string,
+    mcpServer: string,
+    toolName: string,
+    actionClass: string,
+  ): boolean {
     const agent = this.database.prepare(`
-      SELECT status, tool_policy_json FROM agents WHERE id = ?
-    `).get(agentId) as { status: string; tool_policy_json: string } | undefined;
+      SELECT status, tool_policy_json, configuration_json
+      FROM agents WHERE id = ?
+    `).get(agentId) as {
+      status: string;
+      tool_policy_json: string;
+      configuration_json: string;
+    } | undefined;
     if (!agent || ["offline", "quarantined"].includes(agent.status)) return false;
     const toolPolicy = parseObject(agent.tool_policy_json);
     const strings = (value: unknown): string[] => Array.isArray(value)
@@ -790,12 +1145,11 @@ export class RunRepository {
     const approvalRequired = new Set(strings(toolPolicy.approvalRequiredTools));
     if (!allowed.has(toolName) || denied.has(toolName) || approvalRequired.has(toolName)) return false;
 
-    const capability = this.database.prepare(`
-      SELECT 1 AS present FROM agent_capabilities
-      WHERE agent_id = ? AND capability = ? AND enabled = 1
-      LIMIT 1
-    `).get(agentId, toolName);
-    if (!capability) return false;
+    if (!this.manifestToolCapabilityAllowsActionClass(
+      agentId,
+      toolName,
+      actionClass,
+    )) return false;
 
     const server = this.database.prepare(`
       SELECT status, capabilities_json, policy_json
@@ -810,10 +1164,27 @@ export class RunRepository {
     if (!server || server.status !== "healthy") return false;
     const serverPolicy = parseObject(server.policy_json);
     const capabilities = new Set(strings(parseObject(`{\"items\":${server.capabilities_json}}`).items));
-    const assignedAgents = new Set(strings(serverPolicy.assignedAgents));
-    return serverPolicy.enabled === true
-      && serverPolicy.startPermitted === true
-      && assignedAgents.has(agentId)
+    if (!isSpecialistMcpExecutionPolicy(serverPolicy)) return false;
+    const assignedAgents = new Set(serverPolicy.assignedAgents);
+    const runtimeBindingAgentIds = this.runtimeBindingAgentIds(
+      agentId,
+      parseObject(agent.configuration_json),
+    );
+    const exactLiveBinding = runtimeBindingAgentIds.some((runtimeAgentId) => {
+      if (!assignedAgents.has(runtimeAgentId)) return false;
+      const runtimeAgent = this.database.prepare(`
+        SELECT status FROM agents WHERE id = ?
+      `).get(runtimeAgentId) as { status: string } | undefined;
+      if (!runtimeAgent || ["offline", "quarantined"].includes(runtimeAgent.status)) return false;
+      return this.manifestToolCapabilityAllowsActionClass(
+        runtimeAgentId,
+        toolName,
+        actionClass,
+      );
+    });
+    return serverPolicy.enabled
+      && serverPolicy.startPermitted
+      && exactLiveBinding
       && capabilities.has(toolName);
   }
 

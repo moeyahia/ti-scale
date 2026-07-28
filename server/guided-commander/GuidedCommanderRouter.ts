@@ -14,6 +14,7 @@ import { GuidedCommanderRepository } from "./GuidedCommanderRepository";
 import { GuidedCommanderService } from "./GuidedCommanderService";
 import { createGuidedMemoryCandidateRouter } from "./GuidedMemoryCandidateRouter";
 import type { GuidedCommanderOptions, GuidedCommanderPort } from "./types";
+import type { GuidedCommanderRuntimeBindingResolver } from "./types";
 import {
   GuidedCommanderError,
   validateContextualActionRequest,
@@ -24,11 +25,17 @@ import {
 
 export interface GuidedCommanderRouterDependencies {
   readonly database: SqliteDatabase;
-  readonly port: GuidedCommanderPort;
+  readonly port?: GuidedCommanderPort;
+  readonly resolveRuntimeBinding?: GuidedCommanderRuntimeBindingResolver;
   readonly resolveActor: (request: Request) => string;
   readonly secondBrain?: SecondBrainService;
   readonly brainContext?: BrainContextService;
   readonly options?: GuidedCommanderOptions;
+  /**
+   * Result ingestion remains on the local deterministic attestation boundary
+   * until a selected semantic interpreter has its own reviewed evidence gate.
+   */
+  readonly mountInterpretResult?: boolean;
   /** Trusted server callback; raw control-plane tokens never cross HTTP. */
   readonly assertRunMutationLease?: AssertRunMutationLease;
 }
@@ -104,7 +111,10 @@ export function createGuidedCommanderRouter(
   const repository = new GuidedCommanderRepository(dependencies.database, dependencies.options);
   const service = new GuidedCommanderService({
     repository,
-    port: dependencies.port,
+    ...(dependencies.port ? { port: dependencies.port } : {}),
+    ...(dependencies.resolveRuntimeBinding
+      ? { resolveRuntimeBinding: dependencies.resolveRuntimeBinding }
+      : {}),
     secondBrain: dependencies.secondBrain,
     brainContext: dependencies.brainContext,
     options: dependencies.options,
@@ -175,7 +185,32 @@ export function createGuidedCommanderRouter(
           signal: controller.signal,
           assertMutationAuthority: authority.assertCurrent,
         });
-        response.json({ schemaVersion: "2.4", result });
+        response.json({
+          schemaVersion: "2.4",
+          result,
+          ...(result.runtimeBinding
+            ? {
+                guidance: {
+                  mode: result.runtimeBinding.providerContacted
+                    ? "pinned_agent_model"
+                    : "local_deterministic",
+                  productAgentId: result.runtimeBinding.productAgentId,
+                  modelAssignmentId: result.runtimeBinding.modelAssignmentId,
+                  modelConfigurationId:
+                    result.runtimeBinding.modelConfigurationId,
+                  providerId: result.runtimeBinding.providerId,
+                  modelId: result.runtimeBinding.modelId,
+                  usedFallbackModel: result.runtimeBinding.usedFallback,
+                  providerContacted:
+                    result.runtimeBinding.providerContacted,
+                  toolDispatched: false,
+                  targetContacted: false,
+                  planMutated: false,
+                  exactDecisionRequired: true,
+                },
+              }
+            : {}),
+        });
       } finally {
         request.off("aborted", abort);
       }
@@ -194,43 +229,45 @@ export function createGuidedCommanderRouter(
     providerAction("use_another_approach"),
   );
 
-  router.post("/api/v2/guided/:missionId/commander/interpret-result", route(async (request, response) => {
-    const missionId = validatePathId(request.params.missionId, "missionId");
-    const actorId = operatorId(dependencies, request);
-    const key = validateIdempotencyKey(request.get("Idempotency-Key"));
-    const body = validateInterpretResultRequest(request.body);
-    const authority = authorizeMutation(
-      mutationAuthority,
-      dependencies,
-      missionId,
-      body.runId,
-      actorId,
-    );
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    request.once("aborted", abort);
-    try {
-      const result = await service.interpret({
+  if (dependencies.mountInterpretResult !== false) {
+    router.post("/api/v2/guided/:missionId/commander/interpret-result", route(async (request, response) => {
+      const missionId = validatePathId(request.params.missionId, "missionId");
+      const actorId = operatorId(dependencies, request);
+      const key = validateIdempotencyKey(request.get("Idempotency-Key"));
+      const body = validateInterpretResultRequest(request.body);
+      const authority = authorizeMutation(
+        mutationAuthority,
+        dependencies,
         missionId,
-        request: body,
-        idempotencyKey: key,
+        body.runId,
         actorId,
-        signal: controller.signal,
-        assertMutationAuthority: authority.assertCurrent,
-      });
-      response.json({
-        schemaVersion: "2.4",
-        result,
-        ingestion: {
-          multipartSupported: false,
-          acceptedSources: ["paste", "text_upload"],
-          rawContentRetained: false,
-        },
-      });
-    } finally {
-      request.off("aborted", abort);
-    }
-  }));
+      );
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      request.once("aborted", abort);
+      try {
+        const result = await service.interpret({
+          missionId,
+          request: body,
+          idempotencyKey: key,
+          actorId,
+          signal: controller.signal,
+          assertMutationAuthority: authority.assertCurrent,
+        });
+        response.json({
+          schemaVersion: "2.4",
+          result,
+          ingestion: {
+            multipartSupported: false,
+            acceptedSources: ["paste", "text_upload"],
+            rawContentRetained: false,
+          },
+        });
+      } finally {
+        request.off("aborted", abort);
+      }
+    }));
+  }
 
   router.use(createGuidedMemoryCandidateRouter({
     database: dependencies.database,

@@ -88,7 +88,7 @@ export interface PublicBenchmarkView {
     readonly development: number;
     readonly validation: number;
   };
-  readonly hiddenHoldout: "present_but_opaque";
+  readonly hiddenHoldout: "operator_descriptor_required";
   readonly metricNames: readonly string[];
   readonly hardGateCodes: readonly HardGateCode[];
 }
@@ -188,7 +188,7 @@ export class SecurityEvaluationHarness {
         development: scenarios.filter(({ split }) => split === "development").length,
         validation: scenarios.filter(({ split }) => split === "validation").length,
       },
-      hiddenHoldout: "present_but_opaque",
+      hiddenHoldout: "operator_descriptor_required",
       metricNames: Object.keys(this.#config.metricDirections).sort(),
       hardGateCodes: HARD_GATE_CODES,
     });

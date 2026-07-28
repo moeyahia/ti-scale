@@ -12,7 +12,11 @@ import {
   validateMissionIntakeRequest,
 } from "../intake";
 import { attachV2RequestId, sendV2Error } from "../contracts/ApiErrorContract";
-import { BrainContextHookError, BrainContextService } from "../brain-runtime";
+import {
+  BrainContextHookError,
+  BrainContextService,
+  CanonicalMissionMemoryGraph,
+} from "../brain-runtime";
 import { MemoryRepository, SecondBrainService } from "../memory";
 import {
   ControlPlaneLeaseError,
@@ -37,12 +41,21 @@ import {
   type MissionPortfolioFilterState,
   type ReadinessCheckProvider,
 } from "../missions";
+import type { ModelConfigurationService } from "../model-config";
 
 export interface CommandOsRouterDependencies {
   readonly database: SqliteDatabase;
   readonly readinessProviders: readonly ReadinessCheckProvider[];
   readonly resolveActor: (request: Request) => string;
+  /** Shared canonical Brain boundary used by intake and active runtimes. */
+  readonly brainContext?: BrainContextService;
+  /** Shared application clock for deterministic freshness and intake tests. */
+  readonly clock?: () => Date;
   readonly readRuntimeManifests?: () => RuntimeSourceManifests;
+  /** Scoped model preferences and immutable run/step assignment resolver. */
+  readonly modelConfigurations?: ModelConfigurationService;
+  /** Optional post-commit projection into configured human-readable stores. */
+  readonly projectMemoryNodes?: (nodeIds: readonly string[]) => void;
   /** Trusted runtime callback; HTTP callers never submit raw lease tokens. */
   readonly assertRunMutationLease?: AssertRunMutationLease;
 }
@@ -310,22 +323,34 @@ export function createCommandOsRouter(
   dependencies: CommandOsRouterDependencies,
 ): Router {
   const readiness = new ReadinessService(dependencies.readinessProviders);
-  const missions = new MissionRepository(dependencies.database);
+  const missions = new MissionRepository(dependencies.database, dependencies.clock);
   const service = new MissionService(
     missions,
     new OverviewRepository(dependencies.database),
     readiness,
-    new BrainContextService({
+    dependencies.brainContext ?? new BrainContextService({
       database: dependencies.database,
       secondBrain: new SecondBrainService(new MemoryRepository(dependencies.database)),
     }),
     dependencies.readRuntimeManifests ?? emptyRuntimeSourceManifests,
+    new CanonicalMissionMemoryGraph(dependencies.database),
+    dependencies.projectMemoryNodes,
+    dependencies.modelConfigurations,
   );
-  const branches = new AutonomousBranchService(dependencies.database, service);
+  const branches = new AutonomousBranchService(
+    dependencies.database,
+    service,
+    dependencies.clock ?? (() => new Date()),
+    dependencies.modelConfigurations,
+  );
   const portfolio = new MissionPortfolioService(dependencies.database);
   const mutationAuthority = new RunMutationAuthorityGuard(dependencies.database);
   const intake = new MissionIntakeService({
     readRuntimeManifests: dependencies.readRuntimeManifests ?? emptyRuntimeSourceManifests,
+    ...(dependencies.modelConfigurations
+      ? { modelConfigurations: dependencies.modelConfigurations }
+      : {}),
+    ...(dependencies.clock ? { clock: dependencies.clock } : {}),
   });
   const router = Router();
 

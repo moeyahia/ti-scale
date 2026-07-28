@@ -5,12 +5,16 @@ import {
   type ResumeRunBoundary,
 } from "../command-runtime";
 import { DurableOrchestrationError } from "../orchestration";
-import { ControlPlaneLeaseError } from "../control-plane";
+import {
+  ControlPlaneLeaseError,
+  describeRunMutationAuthorityError,
+} from "../control-plane";
 import type { JsonValue } from "../events";
 import { canonicalJson, hashCanonical } from "../missions/canonical";
-import type { RunState } from "../supervisor";
 import { redactSensitiveText } from "../guided-commander/validation";
+import { sanitizeJson } from "../operations/validation";
 import { attachV2RequestId, sendV2Error } from "../contracts/ApiErrorContract";
+import { encodeRuntimeRunCursor, parseRuntimeRunQuery } from "./RuntimeRunQuery";
 
 export interface MissionRuntimeV2RouterDependencies {
   readonly runtime: MissionRuntimeEngine;
@@ -20,19 +24,23 @@ export interface MissionRuntimeV2RouterDependencies {
 function runtimeError(error: unknown): CommandRuntimeError {
   if (error instanceof CommandRuntimeError) return error;
   if (error instanceof ControlPlaneLeaseError) {
+    const descriptor = describeRunMutationAuthorityError(error);
+    const humanMessage = error.code === "control_plane_mismatch"
+      ? "This mission and run are controlled elsewhere, so Ti-Scale made no changes."
+      : error.code === "run_not_found"
+        ? "This run is no longer available, so Ti-Scale made no changes."
+        : error.code === "journey_unsupported"
+          ? "This Ti-Scale runtime does not support the run's journey, so it made no changes."
+          : "Ti-Scale could not prove current mutation authority for this run, so it made no changes.";
     return new CommandRuntimeError(
-      error.code === "run_not_found" ? 404 : 409,
-      `control_plane_${error.code}`,
+      descriptor.status,
+      descriptor.code,
       error.message,
       {
-        humanMessage: error.code === "control_plane_mismatch"
-          ? "This run belongs to another control plane and Ti-Scale refused to mutate it."
-          : "Ti-Scale could not prove exclusive mutation authority for this run.",
-        retryable: error.retryable,
-        category: error.code === "run_not_found" ? "not_found" : "conflict",
-        remediation: error.retryable
-          ? "Wait for the current fenced controller to release or expire, then resume from the durable checkpoint."
-          : "Open the run through its owning control plane; do not attempt concurrent control.",
+        humanMessage,
+        retryable: descriptor.retryable,
+        category: descriptor.category,
+        remediation: descriptor.remediation,
       },
     );
   }
@@ -202,7 +210,13 @@ function expectedParameters(body: Record<string, unknown>, actual: JsonValue): s
   let represented: string;
   try {
     supplied = canonicalJson(body.expectedParameters);
-    represented = canonicalJson(actual);
+    // The decision inbox deliberately projects secret-bearing fields as
+    // `[REDACTED]`; requiring the browser to echo the hidden canonical value
+    // would make every otherwise legal decision mutation impossible. Compare
+    // against that same deterministic public projection while the independent
+    // action fingerprint continues to bind the complete canonical action that
+    // the runtime—not the request body—will execute.
+    represented = canonicalJson(sanitizeJson(actual));
   } catch {
     throw new CommandRuntimeError(400, "invalid_expected_parameters", "Expected parameters must be valid JSON", {
       category: "invalid_input",
@@ -297,11 +311,22 @@ function runtimeRouterBoundary(dependencies: MissionRuntimeV2RouterDependencies)
         remediation: `Retry after ${claim.leaseExpiresAt}; the same key will return the accepted result once durable.`,
       });
     }
+    const abandonOwnedClaim = (): void => {
+      dependencies.runtime.repository.transaction(() => {
+        dependencies.runtime.repository.abandonIdempotentClaim(
+          scope,
+          key,
+          requestIdentity,
+          claim.ownerToken,
+        );
+      });
+    };
     let heartbeatFailure: unknown;
     const claimHeartbeat = setInterval(() => {
       try {
-        dependencies.runtime.repository.transaction(() =>
-          dependencies.runtime.repository.heartbeatIdempotentClaim(
+        dependencies.runtime.repository.transaction(() => {
+          preflight?.(request);
+          return dependencies.runtime.repository.heartbeatIdempotentClaim(
             scope,
             key,
             requestIdentity,
@@ -309,29 +334,46 @@ function runtimeRouterBoundary(dependencies: MissionRuntimeV2RouterDependencies)
             operatorId,
             new Date().toISOString(),
             30_000,
-          ));
+          );
+        });
       } catch (error) {
-        heartbeatFailure = error;
+        try {
+          abandonOwnedClaim();
+          heartbeatFailure = error;
+        } catch (cleanupError) {
+          heartbeatFailure = cleanupError;
+        }
         clearInterval(claimHeartbeat);
       }
     }, 10_000);
     let payload: JsonValue;
     try {
       payload = await handler(request, operatorId, commandId);
+    } catch (error) {
+      if (error instanceof ControlPlaneLeaseError) abandonOwnedClaim();
+      throw error;
     } finally {
       clearInterval(claimHeartbeat);
     }
     if (heartbeatFailure) throw heartbeatFailure;
-    const completed = dependencies.runtime.repository.transaction(() =>
-      dependencies.runtime.repository.completeIdempotentClaim(
-        scope,
-        key,
-        requestIdentity,
-        payload,
-        claim.ownerToken,
-        operatorId,
-        new Date().toISOString(),
-      ));
+    let completed: JsonValue;
+    try {
+      completed = dependencies.runtime.repository.transaction(() => {
+        preflight?.(request);
+        return dependencies.runtime.repository.completeIdempotentClaim(
+          scope,
+          key,
+          requestIdentity,
+          payload,
+          claim.ownerToken,
+          operatorId,
+          new Date().toISOString(),
+        );
+      });
+    } catch (error) {
+      if (error instanceof ControlPlaneLeaseError) abandonOwnedClaim();
+      throw error;
+    }
     response.json(completed);
   });
 
@@ -420,6 +462,15 @@ function mountRunControlRoutes(
   }
 }
 
+function assertDecisionMutationOwnership(
+  dependencies: MissionRuntimeV2RouterDependencies,
+  request: Request,
+): void {
+  const decisionId = pathId(request.params.decisionId, "decisionId");
+  const decision = dependencies.runtime.repository.getDecision(decisionId);
+  dependencies.runtime.assertV2ControlPlaneOwnership(decision.runId);
+}
+
 /**
  * Mount only operator run intervention controls. This lets a host expose the
  * durable pause/resume/cancel boundary without also advertising Guided or
@@ -445,34 +496,21 @@ export function createMissionRuntimeV2Router(
   }));
 
   router.get("/api/v2/runs", route((request, response) => {
-    const allowedStates = new Set([
-      "queued", "planning", "awaiting_contract_confirmation", "running",
-      "waiting_guided_decision", "blocked", "recovering", "completed", "failed", "cancelled",
-    ]);
-    const journey = typeof request.query.journey === "string" ? request.query.journey.trim() : undefined;
-    if (journey && journey !== "autonomous" && journey !== "guided") {
-      throw new CommandRuntimeError(400, "invalid_journey_filter", "Run journey filter is invalid", { category: "invalid_input" });
-    }
-    const status = typeof request.query.status === "string" ? request.query.status.trim() : undefined;
-    if (status && !allowedStates.has(status)) {
-      throw new CommandRuntimeError(400, "invalid_run_status", "Run status filter is invalid", { category: "invalid_input" });
-    }
-    const query = typeof request.query.query === "string" ? request.query.query.trim() : undefined;
-    if (query && query.length > 300) {
-      throw new CommandRuntimeError(400, "invalid_run_search", "Run search is too long", { category: "invalid_input" });
-    }
-    const limit = request.query.limit === undefined ? 50 : Number(request.query.limit);
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
-      throw new CommandRuntimeError(400, "invalid_pagination", "Run limit must be 1 through 100", { category: "invalid_input" });
-    }
+    const filters = parseRuntimeRunQuery(request.query as Record<string, unknown>);
+    const page = dependencies.runtime.repository.listRunProjectionPage({
+      ...(filters.query ? { query: filters.query } : {}),
+      ...(filters.journey ? { journey: filters.journey } : {}),
+      ...(filters.status ? { status: filters.status } : {}),
+      ...(filters.statuses ? { statuses: filters.statuses } : {}),
+      ...(filters.cursor ? { cursor: filters.cursor } : {}),
+      limit: filters.limit,
+    });
     response.json({
       schemaVersion: "2.4",
-      items: dependencies.runtime.repository.listRunProjections({
-        ...(query ? { query } : {}),
-        ...(journey ? { journey: journey as "autonomous" | "guided" } : {}),
-        ...(status ? { status: status as RunState } : {}),
-        limit,
-      }),
+      items: page.items,
+      nextCursor: page.nextCursor
+        ? encodeRuntimeRunCursor(page.nextCursor, filters.filterHash)
+        : null,
     });
   }));
 
@@ -524,7 +562,38 @@ export function createMissionRuntimeV2Router(
       optionalReason(body.reason),
     );
     return asJson({ schemaVersion: "2.4", decisionId, status: "approved", action });
-  }));
+  }, (request) => assertDecisionMutationOwnership(dependencies, request)));
+
+  router.post("/api/v2/runs/:runId/operational-hazards/retry-authorizations", mutation(
+    "operational-hazard.retry-authorize",
+    async (request, operatorId) => {
+      const runId = pathId(request.params.runId, "runId");
+      const body = bodyObject(request.body);
+      const healthAssessmentId = pathId(body.healthAssessmentId, "healthAssessmentId");
+      const attackAttemptId = pathId(body.attackAttemptId, "attackAttemptId");
+      const ttlMs = body.ttlMs === undefined ? undefined : Number(body.ttlMs);
+      if (ttlMs !== undefined && (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 3_600_000)) {
+        throw new CommandRuntimeError(400, "invalid_hazard_authorization_expiry", "Authorization expiry must be one second through one hour", {
+          category: "invalid_input",
+        });
+      }
+      const authorization = dependencies.runtime.authorizeOperationalHazardRecovery({
+        runId,
+        healthAssessmentId,
+        attackAttemptId,
+        operatorId,
+        ...(ttlMs === undefined ? {} : { ttlMs }),
+      });
+      return asJson({ schemaVersion: "2.4", authorization });
+    },
+    (request) => {
+      const runId = pathId(request.params.runId, "runId");
+      dependencies.runtime.assertV2ControlPlaneOwnership(runId);
+      const body = bodyObject(request.body);
+      pathId(body.healthAssessmentId, "healthAssessmentId");
+      pathId(body.attackAttemptId, "attackAttemptId");
+    },
+  ));
 
   router.post("/api/v2/guided-decisions/:decisionId/reject", mutation("decision.reject", async (request, operatorId) => {
     const decisionId = pathId(request.params.decisionId, "decisionId");
@@ -534,12 +603,12 @@ export function createMissionRuntimeV2Router(
     expectedParameters(body, decision.requestedParameters);
     await dependencies.runtime.rejectGuidedDecision(decisionId, operatorId, requiredReason(body.reason));
     return { schemaVersion: "2.4", decisionId, status: "rejected" };
-  }));
+  }, (request) => assertDecisionMutationOwnership(dependencies, request)));
 
   router.post("/api/v2/guided-decisions/:decisionId/manual-result", mutation("decision.manual", async (request, operatorId) => {
     const decisionId = pathId(request.params.decisionId, "decisionId");
     const body = bodyObject(request.body);
-    const decision = dependencies.runtime.repository.getDecision(decisionId);
+    const decision = dependencies.runtime.repository.requireCurrentPendingDecision(decisionId);
     expectedFingerprint(body, decision.actionFingerprint);
     expectedParameters(body, decision.requestedParameters);
     if (typeof body.evidenceId !== "string") {
@@ -550,38 +619,18 @@ export function createMissionRuntimeV2Router(
       });
     }
     const evidenceId = pathId(body.evidenceId, "evidenceId");
-    const evidence = dependencies.runtime.repository.database.prepare(`
-      SELECT json_extract(chain.details_json, '$.summary') AS summary
-      FROM evidence e
-      JOIN evidence_chain_events chain
-        ON chain.evidence_id = e.id AND chain.event_type = 'interpreted'
-      WHERE e.id = ? AND e.mission_id = ? AND e.run_id = ? AND e.step_id = ?
-        AND e.action_id IS NULL AND e.evidence_type = 'guided_text_result'
-        AND e.verification_state = 'unverified'
-      ORDER BY chain.occurred_at DESC, chain.id DESC LIMIT 1
-    `).get(evidenceId, decision.missionId, decision.runId, decision.stepId) as {
-      summary: string;
-    } | undefined;
-    if (!evidence?.summary.trim()) {
-      throw new CommandRuntimeError(409, "interpreted_evidence_not_current", "Interpreted evidence does not belong to the current exact step", {
-        humanMessage: "The reviewed observation is stale, already consumed, or belongs to another step.",
-        category: "scope_conflict",
-        remediation: "Refresh the Guided workspace and interpret output for the current represented action.",
-      });
-    }
     const receipt = await dependencies.runtime.submitManualGuidedResult(
       decisionId,
       operatorId,
-      evidence.summary,
       evidenceId,
     );
     return asJson({ schemaVersion: "2.4", decisionId, status: "manual", receipt });
-  }));
+  }, (request) => assertDecisionMutationOwnership(dependencies, request)));
 
   router.post("/api/v2/guided-decisions/:decisionId/skip", mutation("decision.skip", async (request, operatorId) => {
     const decisionId = pathId(request.params.decisionId, "decisionId");
     const body = bodyObject(request.body);
-    const decision = dependencies.runtime.repository.getDecision(decisionId);
+    const decision = dependencies.runtime.requireCurrentGuidedDecisionBoundary(decisionId);
     expectedFingerprint(body, decision.actionFingerprint);
     expectedParameters(body, decision.requestedParameters);
     const receipt = await dependencies.runtime.skipGuidedDecision(
@@ -590,59 +639,29 @@ export function createMissionRuntimeV2Router(
       requiredReason(body.reason),
     );
     return asJson({ schemaVersion: "2.4", decisionId, status: "skipped", receipt });
-  }));
+  }, (request) => assertDecisionMutationOwnership(dependencies, request)));
 
   router.post("/api/v2/guided-decisions/:decisionId/stop", mutation("decision.stop", async (request, operatorId, commandId) => {
     const decisionId = pathId(request.params.decisionId, "decisionId");
     const body = bodyObject(request.body);
     const decision = dependencies.runtime.repository.getDecision(decisionId);
     expectedFingerprint(body, decision.actionFingerprint);
-    const parameterHash = expectedParameters(body, decision.requestedParameters);
+    expectedParameters(body, decision.requestedParameters);
     dependencies.runtime.repository.requireCurrentPendingDecision(decisionId);
     const reason = requiredReason(body.reason);
-    await dependencies.runtime.cancelRun(decision.runId, operatorId, reason, commandId);
-    const now = new Date().toISOString();
-    dependencies.runtime.repository.transaction(() => {
-      dependencies.runtime.repository.events.append({
-        missionId: decision.missionId,
-        runId: decision.runId,
-        journey: "guided",
-        eventType: "guided.mission_stopped",
-        actorType: "operator",
-        actorId: operatorId,
-        summary: "Operator stopped the mission from the exact represented Guided step",
-        payload: {
-          decisionId,
-          stepId: decision.stepId,
-          actionFingerprint: decision.actionFingerprint,
-          parameterHash,
-          reason,
-        },
-        sensitivity: "private",
-      });
-      dependencies.runtime.repository.appendAudit({
-        missionId: decision.missionId,
-        runId: decision.runId,
-        actorId: operatorId,
-        action: "guided.mission_stopped",
-        resourceType: "guided_decision",
-        resourceId: decisionId,
-        reason,
-        details: {
-          stepId: decision.stepId,
-          actionFingerprint: decision.actionFingerprint,
-          parameterHash,
-        },
-        now,
-      });
-    });
+    await dependencies.runtime.stopGuidedMission(
+      decisionId,
+      operatorId,
+      reason,
+      commandId,
+    );
     return asJson({
       schemaVersion: "2.4",
       decisionId,
       status: "cancelled",
       run: dependencies.runtime.repository.getRunProjection(decision.runId),
     });
-  }));
+  }, (request) => assertDecisionMutationOwnership(dependencies, request)));
 
   mountRunControlRoutes(router, dependencies, mutation);
 

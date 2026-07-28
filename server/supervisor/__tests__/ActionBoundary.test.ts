@@ -136,6 +136,41 @@ describe("journey action boundary", () => {
     ).toMatchObject({ allowed: false, reason: "guided_decision_consumed" });
   });
 
+  test("Guided rejects a TCP port change after the reviewed Nmap step is authorized", () => {
+    const represented = action({
+      actionType: "kali:nmap-tcp-connect-service-scan",
+      arguments: {
+        schemaVersion: "ti-scale.reviewed-local-tool-action.v1",
+        executionBinding: "reviewed_local_process",
+        toolId: "kali:nmap-tcp-connect-service-scan",
+        parameters: {
+          workspace: "/engagements",
+          target: "10.10.10.10",
+          ports: "22,80,443",
+        },
+      },
+    });
+    const changedPorts = action({
+      actionType: "kali:nmap-tcp-connect-service-scan",
+      arguments: {
+        schemaVersion: "ti-scale.reviewed-local-tool-action.v1",
+        executionBinding: "reviewed_local_process",
+        toolId: "kali:nmap-tcp-connect-service-scan",
+        parameters: {
+          workspace: "/engagements",
+          target: "10.10.10.10",
+          ports: "22,80,443,8443",
+        },
+      },
+    });
+    expect(enforceJourneyActionBoundary({
+      journey: "guided",
+      action: changedPorts,
+      guidedDecision: decision(represented),
+      now: "2026-01-01T00:10:00Z",
+    })).toMatchObject({ allowed: false, reason: "guided_action_changed" });
+  });
+
   test("Guided never executes without an explicit authorized decision", () => {
     expect(
       enforceJourneyActionBoundary({ journey: "guided", action: action(), now: "2026-01-01T00:10:00Z" }),
@@ -183,6 +218,22 @@ describe("journey action boundary", () => {
         now: "2026-01-01T00:10:00Z",
       }),
     ).toMatchObject({ allowed: false, reason: "autonomous_action_not_allowed" });
+    expect(
+      enforceJourneyActionBoundary({
+        journey: "autonomous",
+        action: action({
+          actionType: "kali:host-dns-query",
+          actionClass: "network_scan",
+          arguments: {
+            executionBinding: "reviewed_local_process",
+            toolId: "kali:host-dns-query",
+            parameters: { name: "example.invalid" },
+          },
+        }),
+        autonomousContract: contract,
+        now: "2026-01-01T00:10:00Z",
+      }).allowed,
+    ).toBe(true);
     expect(
       enforceJourneyActionBoundary({
         journey: "autonomous",

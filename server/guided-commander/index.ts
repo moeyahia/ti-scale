@@ -6,9 +6,34 @@ export {
   type GrokGuidedCommanderPortOptions,
 } from "./GrokGuidedCommanderPort";
 export {
+  createOpenRouterGuidedCommanderPort,
+  OpenRouterGuidedCommanderPort,
+  type OpenRouterGuidedCommanderPortOptions,
+} from "./OpenRouterGuidedCommanderPort";
+export {
+  buildGuidedCommanderProviderMessages,
+  buildGuidedCommanderProviderPrompt,
+  GUIDED_COMMANDER_RESPONSE_JSON_SCHEMA,
+} from "./GuidedCommanderProviderContract";
+export {
   createGuidedCommanderRouter,
   type GuidedCommanderRouterDependencies,
 } from "./GuidedCommanderRouter";
+export {
+  createLocalGuidedManualInterpreterRouter,
+  LocalGuidedManualInterpreter,
+  type LocalGuidedManualInterpreterOptions,
+  type LocalGuidedManualInterpreterRouterDependencies,
+} from "./LocalGuidedManualInterpreter";
+export {
+  LocalGuidedCommander,
+  type LocalReviewedToolObservationInterpretation,
+} from "./LocalGuidedCommander";
+export {
+  createLocalDeterministicGuidedCommanderPort,
+  LocalDeterministicGuidedCommanderPort,
+  type LocalDeterministicGuidedCommanderPortOptions,
+} from "./LocalDeterministicGuidedCommanderPort";
 export {
   createGuidedMemoryCandidateRouter,
   type GuidedMemoryCandidateRouterDependencies,
@@ -28,6 +53,7 @@ export {
   validateIdempotencyKey,
   validateInterpretResultRequest,
   validatePathId,
+  validatePortResult,
   validatePortResponse,
   validateRememberRequest,
 } from "./validation";

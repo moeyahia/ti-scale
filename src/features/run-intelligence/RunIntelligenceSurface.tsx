@@ -3,7 +3,8 @@ import { runIntelligenceApi } from "../../data/api/runIntelligence";
 import { cveIntelligenceApi } from "../../data/api/cveIntelligence";
 import { useQuery } from "../../data/cache/QueryProvider";
 import { Button, Card, ErrorPanel, LoadingPanel, StatusPill } from "../../design-system/components/Primitives";
-import { DegradedNotice } from "../runs/OperationalSurface";
+import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
+import { DegradedNotice, useUrlFilters } from "../runs/OperationalSurface";
 import { ReconDigitalTwinPanel } from "./ReconDigitalTwinPanel";
 import { RunMetricsPanel } from "./RunMetricsPanel";
 import { CveApplicabilityPanel } from "./CveApplicabilityPanel";
@@ -44,11 +45,17 @@ export function RunMetricsSurface({ runId }: { readonly runId: string }) {
   </section>;
 }
 
-export function ReconDigitalTwinSurface({ missionId, runId }: {
+export function ReconDigitalTwinSurface({ missionId, runId, currentStepId }: {
   readonly missionId: string;
   readonly runId?: string;
+  readonly currentStepId?: string | null;
 }) {
-  const [selectedNodeId, setSelectedNodeId] = useState("");
+  const filters = useUrlFilters();
+  const selectedNodeFromUrl = filters.values.node ?? "";
+  const [selectedNodeId, setSelectedNodeId] = useState(selectedNodeFromUrl);
+  useEffect(() => {
+    setSelectedNodeId(selectedNodeFromUrl);
+  }, [selectedNodeFromUrl]);
   const graph = useQuery(
     `run-intelligence:topology:${missionId}:${runId ?? "mission"}`,
     (signal) => runIntelligenceApi.getMissionTopology(missionId, runId, signal),
@@ -59,8 +66,21 @@ export function ReconDigitalTwinSurface({ missionId, runId }: {
     [graph.data?.digitalTwin.nodes],
   );
   useEffect(() => {
-    if (selectedNodeId && !availableIds.has(selectedNodeId)) setSelectedNodeId("");
-  }, [availableIds, selectedNodeId]);
+    if (!graph.data || !selectedNodeId || availableIds.has(selectedNodeId)) return;
+    setSelectedNodeId("");
+    if (selectedNodeFromUrl === selectedNodeId) {
+      filters.set({ node: undefined, cve: undefined }, {
+        resetCursor: false,
+        replace: true,
+      });
+    }
+  }, [
+    availableIds,
+    filters,
+    graph.data,
+    selectedNodeFromUrl,
+    selectedNodeId,
+  ]);
   const selectedFromGraph = graph.data?.digitalTwin.nodes.find((node) => node.id === selectedNodeId);
   const selected = useQuery(
     `run-intelligence:topology-node:${missionId}:${selectedNodeId || "none"}:${runId ?? "mission"}`,
@@ -79,8 +99,9 @@ export function ReconDigitalTwinSurface({ missionId, runId }: {
     { staleTime: 5_000 },
   );
   const isCveService = Boolean(selectedNode && CVE_SERVICE_NODE_TYPES.has(selectedNode.nodeType));
+  const cveScope = isAsset ? "asset" : isCveService ? "service" : "pending";
   const cves = useQuery(
-    `run-intelligence:cves:${missionId}:${selectedNodeId || "none"}:${runId ?? "mission"}`,
+    `run-intelligence:cves:${missionId}:${selectedNodeId || "none"}:${cveScope}:${runId ?? "mission"}`,
     (signal) => selectedNodeId && (isAsset || isCveService)
       ? cveIntelligenceApi.list(missionId, {
         ...(runId ? { runId } : {}),
@@ -105,10 +126,22 @@ export function ReconDigitalTwinSurface({ missionId, runId }: {
       </div>
       <label>
         <span>Asset, service, identity, or zone</span>
-        <select value={selectedNodeId} onChange={(event) => setSelectedNodeId(event.target.value)}>
+        <TitaniumSelect value={selectedNodeId} onChange={(event) => {
+          const nextNodeId = event.target.value;
+          setSelectedNodeId(nextNodeId);
+          if (selectedNodeFromUrl || filters.values.cve) {
+            filters.set({
+              node: nextNodeId || undefined,
+              cve: undefined,
+            }, {
+              resetCursor: false,
+              replace: true,
+            });
+          }
+        }}>
           <option value="">No node selected</option>
           {nodes.map((node) => <option key={node.id} value={node.id}>{node.primaryLabel} · {node.nodeType.replaceAll("_", " ")}</option>)}
-        </select>
+        </TitaniumSelect>
       </label>
       <p className="os-muted">Selecting an asset loads its complete seven-layer projection. Unobserved layers remain explicitly unknown.</p>
       <Button variant="secondary" onClick={() => { graph.refresh(); if (selectedNodeId) selected.refresh(); if (isAsset) osi.refresh(); if (isAsset || isCveService) cves.refresh(); }}>Refresh topology</Button>
@@ -125,6 +158,24 @@ export function ReconDigitalTwinSurface({ missionId, runId }: {
     {selectedNode && (isAsset || isCveService) && <CveApplicabilityPanel
       records={cves.data?.items ?? []}
       targetLabel={selectedNode.primaryLabel}
+      missionId={missionId}
+      runId={runId}
+      currentStepId={currentStepId}
+      selectedReviewId={
+        selectedNodeFromUrl === selectedNodeId
+          ? filters.values.cve
+          : undefined
+      }
+      onReviewSelection={(recordId) => {
+        filters.set({
+          node: selectedNodeId || undefined,
+          cve: recordId,
+        }, {
+          resetCursor: false,
+          replace: false,
+        });
+      }}
+      onReviewed={cves.reconcile}
     />}
   </section>;
 }

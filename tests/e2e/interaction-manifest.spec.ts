@@ -90,12 +90,19 @@ test.describe("manifested shell interactions", () => {
 
 test.describe("manifested two-journey entry", () => {
   for (const id of ["overview.compose-autonomous-contract", "overview.create-guided-mission"] as const) {
-    test(`${OVERVIEW_JOURNEY_TEST_ID} ${id}`, async ({ page, browserAudit }) => {
+    test(`${OVERVIEW_JOURNEY_TEST_ID} ${id}`, async ({ page, browserAudit, interactionActivation }) => {
       const entry = manifest.entries.find((item) => item.id === id)!;
       await page.goto(entry.route);
       const link = page.getByRole("link", { name: nameMatcher(entry), exact: true });
       await expect(link).toBeVisible();
-      await link.click();
+      await interactionActivation.activate({
+        manifestEntryId: entry.id,
+        controlId: entry.controlId,
+        option: entry.options[0]!,
+        materialState: entry.requiredState,
+        modality: "pointer",
+        testId: OVERVIEW_JOURNEY_TEST_ID,
+      }, () => link.click());
       await expectPath(page, entry.expectedStateTransition);
       await expect(page.getByRole("heading", { level: 1 }).first()).toBeVisible();
       await browserAudit.waitForPageApiSettlement(page);
@@ -103,12 +110,19 @@ test.describe("manifested two-journey entry", () => {
   }
 
   for (const id of ["journey-selection.autonomous", "journey-selection.guided"] as const) {
-    test(`${SELECTION_TEST_ID} ${id}`, async ({ page, browserAudit }) => {
+    test(`${SELECTION_TEST_ID} ${id}`, async ({ page, browserAudit, interactionActivation }) => {
       const entry = manifest.entries.find((item) => item.id === id)!;
       await page.goto(entry.route);
       const link = page.getByRole("link", { name: nameMatcher(entry), exact: true });
       await link.focus();
-      await page.keyboard.press("Enter");
+      await interactionActivation.activate({
+        manifestEntryId: entry.id,
+        controlId: entry.controlId,
+        option: entry.options[0]!,
+        materialState: entry.requiredState,
+        modality: "keyboard",
+        testId: SELECTION_TEST_ID,
+      }, () => page.keyboard.press("Enter"));
       await expectPath(page, entry.expectedStateTransition);
       await expect(page.getByRole("heading", { level: 1 }).first()).toBeVisible();
       await browserAudit.waitForPageApiSettlement(page);

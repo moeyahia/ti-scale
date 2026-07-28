@@ -201,6 +201,11 @@ function requireState(record: PromotionRecord, expected: PromotionState): void {
 }
 
 export class PromotionService {
+  validate(record: PromotionRecord): PromotionRecord {
+    assertRecordIntegrity(record);
+    return record;
+  }
+
   create(strategyVersionId: string): PromotionRecord {
     if (strategyVersionId.trim().length === 0) throw new Error("Strategy version ID is required.");
     return deepFreeze({

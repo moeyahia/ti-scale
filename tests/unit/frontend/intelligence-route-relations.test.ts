@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { NavigationProvider } from "../../../src/app/router/navigation";
 import { parseArtifact, parseEvidence, parseFinding } from "../../../src/domain/schemas/operations";
 import {
+  ArtifactDetail,
   artifactDeliveryEvidenceLabel,
   artifactDetailHref,
   EvidenceRunExportControl,
@@ -119,6 +121,18 @@ describe("canonical Intelligence relationships", () => {
     });
     expect(artifact.run).toBeNull();
     expect(artifact.evidence).toEqual([]);
+
+    const markup = renderToStaticMarkup(createElement(
+      NavigationProvider,
+      null,
+      createElement(ArtifactDetail, {
+        item: artifact,
+        loading: false,
+        onRetry: () => undefined,
+      }),
+    ));
+    expect(markup).toContain("Artifact ID");
+    expect(markup).toContain("artifact-one");
   });
 
   test("permits evidence export only for an agreeing repository-verified run projection", () => {

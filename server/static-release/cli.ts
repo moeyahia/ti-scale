@@ -1,12 +1,11 @@
 import { resolve } from "node:path";
 import { StaticArtifactReleaseStore, StaticReleaseError } from "./StaticArtifactReleaseStore";
 
-const STATIC_ONLY_WARNING =
-  "This operation changes only the isolated V2 static-artifact pointer; it does not cut over or roll back API, database, workers, runtime state, or the legacy application.";
+const READ_ONLY_NOTICE =
+  "Direct static-release mutation commands are disabled by the operator no-backup policy. Deployment is owned by the bounded forward-only controller.";
 
 interface CliOptions {
   readonly environment?: NodeJS.ProcessEnv;
-  readonly cwd?: string;
   readonly write?: (value: string) => void;
 }
 
@@ -32,41 +31,31 @@ function required(values: Map<string, string>, name: string, fallback?: string):
 
 export function runStaticReleaseCli(args: readonly string[], options: CliOptions = {}): number {
   const [command, ...rest] = args;
-  if (!command || !["stage", "verify", "activate", "pin", "rollback"].includes(command)) {
-    throw new TypeError("Static release command must be stage, verify, activate, pin, or rollback");
+  if (!command || !["verify", "pin"].includes(command)) {
+    throw new TypeError(
+      "Direct static release mutation is disabled; command must be verify or pin",
+    );
   }
   const values = parseOptions(rest);
-  const allowed = new Set(command === "stage"
-    ? ["--root", "--release-id", "--dist"]
-    : command === "verify" || command === "activate"
-      ? ["--root", "--release-id"]
-      : ["--root"]);
+  const allowed = new Set(command === "verify"
+    ? ["--root", "--release-id"]
+    : ["--root"]);
   for (const name of values.keys()) {
     if (!allowed.has(name)) throw new TypeError(`Unsupported ${command} option: ${name}`);
   }
   const environment = options.environment ?? process.env;
-  const cwd = options.cwd ?? process.cwd();
   const root = required(values, "--root", environment.TI_SCALE_STATIC_RELEASE_ROOT);
   const store = new StaticArtifactReleaseStore({ releaseRoot: resolve(root) });
   let result: unknown;
-  if (command === "stage") {
-    result = store.stageRelease({
-      releaseId: required(values, "--release-id", environment.TI_SCALE_STATIC_RELEASE_ID),
-      sourceDirectory: resolve(values.get("--dist") ?? environment.TI_SCALE_DIST_ROOT ?? resolve(cwd, "dist")),
-    });
-  } else if (command === "verify") {
+  if (command === "verify") {
     result = store.verifyRelease(required(values, "--release-id", environment.TI_SCALE_STATIC_RELEASE_ID));
-  } else if (command === "activate") {
-    result = store.activateRelease(required(values, "--release-id", environment.TI_SCALE_STATIC_RELEASE_ID));
-  } else if (command === "pin") {
-    result = store.pinActiveRelease();
   } else {
-    result = store.rollbackPointer();
+    result = store.pinActiveRelease();
   }
   (options.write ?? ((value) => process.stdout.write(value)))(`${JSON.stringify({
     operation: command,
     scope: "v2_static_artifact_pointer_only",
-    warning: STATIC_ONLY_WARNING,
+    notice: READ_ONLY_NOTICE,
     result,
   }, null, 2)}\n`);
   return 0;

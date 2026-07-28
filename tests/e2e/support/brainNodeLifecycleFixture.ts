@@ -7,6 +7,7 @@ import { E2E_DATABASE_PATH } from "./environment";
 import { normalizeFixtureNamespace } from "./fixtureNamespace";
 
 const FIXTURE_TIME = "2099-07-16T12:00:00.000Z";
+const CLI_RESULT_PREFIX = "TI_SCALE_BRAIN_NODE_FIXTURE=";
 
 export interface BrainNodeLifecycleFixture {
   readonly namespace: string;
@@ -257,5 +258,30 @@ export function advanceBrainNodeVersion(fixture: BrainNodeLifecycleFixture): num
     }).version;
   } finally {
     database.close();
+  }
+}
+
+function runCli(): void {
+  const operation = process.argv[2];
+  const input = JSON.parse(process.argv[3] ?? "null") as unknown;
+  let result: BrainNodeLifecycleFixture | BrainNodeLifecycleState | number;
+  if (operation === "create" && typeof input === "string") {
+    result = createBrainNodeLifecycleFixture(input);
+  } else if (operation === "read" && input && typeof input === "object") {
+    result = readBrainNodeLifecycleState(input as BrainNodeLifecycleFixture);
+  } else if (operation === "advance" && input && typeof input === "object") {
+    result = advanceBrainNodeVersion(input as BrainNodeLifecycleFixture);
+  } else {
+    throw new Error(`Unsupported Brain-node fixture operation: ${String(operation)}`);
+  }
+  process.stdout.write(`${CLI_RESULT_PREFIX}${JSON.stringify(result)}\n`);
+}
+
+if (import.meta.main) {
+  try {
+    runCli();
+  } catch (error) {
+    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    process.exitCode = 1;
   }
 }

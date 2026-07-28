@@ -1,9 +1,21 @@
-import type { ExecutionReadiness, RuntimeReadinessSnapshot } from "../types/runtimeReadiness";
+import type {
+  ExecutionReadiness,
+  GuidedExecutionReadiness,
+  RuntimeComponentHealth,
+  RuntimeReadinessSnapshot,
+} from "../types/runtimeReadiness";
 import { boolean, nonEmpty, number, object, schema } from "./common";
 
 function executionReadiness(value: unknown, label: string): ExecutionReadiness {
   if (value !== "ready" && value !== "unavailable") {
     throw new Error(`${label} must be ready or unavailable`);
+  }
+  return value;
+}
+
+function guidedExecutionReadiness(value: unknown): GuidedExecutionReadiness {
+  if (value !== "ready" && value !== "manual_only" && value !== "unavailable") {
+    throw new Error("Guided execution must be ready, manual_only, or unavailable");
   }
   return value;
 }
@@ -22,6 +34,13 @@ function mcpExecutionMode(value: unknown): "disabled" | "dry-run" | "enabled" {
   return value;
 }
 
+function componentHealth(value: unknown, label: string): RuntimeComponentHealth {
+  if (value !== "healthy" && value !== "degraded" && value !== "unhealthy" && value !== "unknown") {
+    throw new Error(`${label} must be healthy, degraded, unhealthy, or unknown`);
+  }
+  return value;
+}
+
 export function parseRuntimeReadiness(payload: unknown): RuntimeReadinessSnapshot {
   const root = object(payload, "runtime readiness");
   schema(root);
@@ -34,15 +53,24 @@ export function parseRuntimeReadiness(payload: unknown): RuntimeReadinessSnapsho
   const mcp = dependencies.mcp === undefined
     ? null
     : object(dependencies.mcp, "runtime readiness MCP");
+  const secondBrain = dependencies.secondBrain === undefined
+    ? null
+    : object(dependencies.secondBrain, "runtime readiness Second Brain");
   return {
     schemaVersion: "2.4",
     status: root.status,
     execution: {
       autonomous: executionReadiness(execution.autonomous, "autonomous execution"),
-      guided: executionReadiness(execution.guided, "Guided execution"),
+      guided: guidedExecutionReadiness(execution.guided),
       guidedToolExecution: execution.guidedToolExecution === undefined
         ? "unavailable"
         : executionReadiness(execution.guidedToolExecution, "Guided tool execution"),
+      localCommanderGuidance: execution.localCommanderGuidance === undefined
+        ? "unavailable"
+        : executionReadiness(
+            execution.localCommanderGuidance,
+            "Local Commander guidance",
+          ),
       actionBoundaryActive: boolean(execution.actionBoundaryActive, "actionBoundaryActive"),
       delegationEnforced: boolean(execution.delegationEnforced, "delegationEnforced"),
       noHandsCommanderEnforced: boolean(execution.noHandsCommanderEnforced, "noHandsCommanderEnforced"),
@@ -88,6 +116,22 @@ export function parseRuntimeReadiness(payload: unknown): RuntimeReadinessSnapsho
             configuredServers: number(mcp.configuredServers, "mcp.configuredServers"),
             runnableServers: number(mcp.runnableServers, "mcp.runnableServers"),
             executionMode: mcpExecutionMode(mcp.executionMode),
+          },
+      secondBrain: secondBrain === null
+        ? {
+            status: "unknown",
+            canonicalStoreAvailable: false,
+            reason: null,
+          }
+        : {
+            status: componentHealth(secondBrain.status, "Second Brain status"),
+            canonicalStoreAvailable: boolean(
+              secondBrain.canonicalStoreAvailable,
+              "secondBrain.canonicalStoreAvailable",
+            ),
+            reason: secondBrain.reason === undefined || secondBrain.reason === null
+              ? null
+              : nonEmpty(secondBrain.reason, "secondBrain.reason"),
           },
     },
     checkedAt: nonEmpty(root.checkedAt, "readiness checkedAt"),

@@ -153,4 +153,52 @@ describe("RuntimeRepository fenced idempotency", () => {
       1_000,
     ))).toThrow("runtime mutation claim belongs to another worker");
   });
+
+  test("abandons only the exact pending owner claim during ownership-transfer cleanup", () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    databases.push(database);
+    migrateDatabase(database);
+    const repository = new RuntimeRepository(database);
+    const request = {
+      operatorId: "operator:test",
+      params: { runId: "run-ownership-transfer" },
+      body: { reason: "Pause before transfer" },
+    };
+    const claim = repository.transaction(() => repository.claimIdempotent(
+      "run.pause",
+      "idempotency-transfer-key",
+      request,
+      "operator:test",
+      "2026-07-16T12:00:00.000Z",
+      30_000,
+    ));
+    if (claim.kind !== "claimed") throw new Error("Expected an owned pending claim");
+
+    expect(repository.transaction(() => repository.abandonIdempotentClaim(
+      "run.pause",
+      "idempotency-transfer-key",
+      request,
+      "another-owner-token",
+    ))).toBe(false);
+    expect(repository.transaction(() => repository.abandonIdempotentClaim(
+      "run.pause",
+      "idempotency-transfer-key",
+      request,
+      claim.ownerToken,
+    ))).toBe(true);
+    expect(repository.transaction(() => repository.abandonIdempotentClaim(
+      "run.pause",
+      "idempotency-transfer-key",
+      request,
+      claim.ownerToken,
+    ))).toBe(false);
+    expect(repository.transaction(() => repository.claimIdempotent(
+      "run.pause",
+      "idempotency-transfer-key",
+      request,
+      "operator:test",
+      "2026-07-16T12:00:00.100Z",
+      30_000,
+    )).kind).toBe("claimed");
+  });
 });

@@ -1,0 +1,199 @@
+.model-assignment {
+  display: grid;
+  gap: var(--os-space-5);
+  scroll-margin-top: calc(4rem + var(--os-space-4));
+}
+
+.model-assignment:focus-visible {
+  outline: 2px solid var(--os-focus);
+  outline-offset: 4px;
+}
+
+.agent-model-entry {
+  display: grid;
+  gap: var(--os-space-1);
+  width: fit-content;
+}
+
+.agent-model-entry small {
+  color: var(--os-text-muted);
+  font-size: 0.62rem;
+  font-weight: 500;
+}
+
+.model-assignment .os-card-heading {
+  align-items: flex-start;
+}
+
+.model-assignment .os-card-heading p:not(.os-eyebrow) {
+  max-width: 68ch;
+  margin: var(--os-space-2) 0 0;
+  color: var(--os-text-muted);
+}
+
+.model-assignment__authority-note {
+  margin: 0;
+  padding: var(--os-space-3) var(--os-space-4);
+  border-inline-start: 2px solid var(--os-line-strong);
+  background: color-mix(in srgb, var(--os-surface-2) 78%, transparent);
+  color: var(--os-text-muted);
+}
+
+.model-assignment__source {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--os-space-1) var(--os-space-3);
+  align-items: baseline;
+  padding: var(--os-space-3) var(--os-space-4);
+  border-block: 1px solid var(--os-line-soft);
+  background: color-mix(in srgb, var(--os-surface-2) 76%, transparent);
+}
+
+.model-assignment__source > span,
+.model-assignment__source > small {
+  color: var(--os-text-muted);
+}
+
+.model-assignment__source > small {
+  grid-column: 2;
+}
+
+.model-assignment__saved-reason > strong {
+  color: var(--os-text);
+}
+
+.model-assignment__source > .os-button {
+  grid-column: 2;
+  width: fit-content;
+}
+
+.model-assignment__semantics {
+  display: grid;
+  gap: var(--os-space-3);
+  padding: var(--os-space-4);
+  border: 1px solid var(--os-line-soft);
+  background: color-mix(in srgb, var(--os-surface-1) 88%, transparent);
+}
+
+.model-assignment__semantics .os-key-values,
+.model-assignment__semantics p {
+  margin: 0;
+}
+
+.model-assignment__form {
+  display: grid;
+  gap: var(--os-space-5);
+}
+
+.model-assignment__selectors {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--os-space-4);
+}
+
+.model-assignment__selectors > label,
+.model-assignment__reason {
+  display: grid;
+  gap: var(--os-space-2);
+  color: var(--os-text);
+  font-weight: 650;
+}
+
+.model-assignment__receipt {
+  position: relative;
+  display: grid;
+  gap: var(--os-space-4);
+  padding: var(--os-space-4);
+  border: 1px solid var(--os-line-strong);
+  clip-path: polygon(0 0, calc(100% - 1rem) 0, 100% 1rem, 100% 100%, 1rem 100%, 0 calc(100% - 1rem));
+  background:
+    linear-gradient(135deg, transparent 0 0.85rem, var(--os-surface-2) 0.9rem) bottom left / 1rem 1rem no-repeat,
+    linear-gradient(315deg, transparent 0 0.85rem, var(--os-surface-2) 0.9rem) top right / 1rem 1rem no-repeat,
+    var(--os-surface-2);
+}
+
+.model-assignment__receipt .os-key-values {
+  margin: 0;
+}
+
+.model-assignment__enforcement-note {
+  margin: 0;
+  color: var(--os-text-muted);
+}
+
+.model-assignment__enforcement-note strong {
+  color: var(--os-text);
+}
+
+.model-assignment__catalog {
+  display: grid;
+  gap: var(--os-space-3);
+}
+
+.model-assignment__catalog h3,
+.model-assignment__catalog p {
+  margin: 0;
+}
+
+.model-assignment__catalog p {
+  max-width: 76ch;
+  color: var(--os-text-muted);
+}
+
+.model-assignment__catalog td small,
+.model-assignment__catalog th small {
+  display: block;
+  margin-top: var(--os-space-1);
+  color: var(--os-text-muted);
+  font-weight: 450;
+}
+
+.model-assignment__reason textarea {
+  min-height: 5.5rem;
+}
+
+.model-assignment__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--os-space-4);
+  padding-top: var(--os-space-4);
+  border-top: 1px solid var(--os-line-soft);
+}
+
+.model-assignment__actions p {
+  max-width: 68ch;
+  margin: 0;
+  color: var(--os-text-muted);
+}
+
+@media (max-width: 760px) {
+  .model-assignment__selectors {
+    grid-template-columns: 1fr;
+  }
+
+  .model-assignment__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .model-assignment__source {
+    grid-template-columns: 1fr;
+  }
+
+  .model-assignment__source > small {
+    grid-column: 1;
+  }
+
+  .model-assignment__source > .os-button {
+    grid-column: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-assignment *,
+  .model-assignment *::before,
+  .model-assignment *::after {
+    scroll-behavior: auto;
+  }
+}

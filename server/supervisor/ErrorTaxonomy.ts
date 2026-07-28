@@ -49,8 +49,8 @@ export function classifyFailure(signal: Readonly<FailureSignal>): FailureCategor
   if (signal.httpStatus === 403 || /authorization denied|not authorized/.test(text)) {
     return "authorization_denied";
   }
-  if (/policy (denied|violation)|outside policy/.test(text)) return "policy_denied";
-  if (/outside scope|scope conflict|target.*not allowed/.test(text)) return "scope_conflict";
+  if (/policy[_ -](denied|violation)|outside[_ -]policy/.test(text)) return "policy_denied";
+  if (/outside[_ -]scope|scope[_ -]conflict|target.*not[_ -]allowed/.test(text)) return "scope_conflict";
   if (/operator rejected|user rejected/.test(text) || signal.source === "operator") return "operator_rejection";
   if (/invalid (argument|input|parameter)|validation failed/.test(text)) return "invalid_input";
   if (/dependency.*(missing|not found)|command not found|enoent|missing grok|not a trusted executable|must be root-owned|must have mode 0?600|parent.*root-controlled/.test(text)) {

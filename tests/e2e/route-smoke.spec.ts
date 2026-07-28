@@ -1,7 +1,12 @@
 import { expect, test, type Page, type Request } from "./support/playwright";
 import { BrowserAudit } from "./support/browserAudit";
 import { isResolvedDocumentNavigationStatus } from "./support/browserAuditPolicy";
-import { recognizedInternalPath, STATIC_ROUTE_CASES } from "./support/routes";
+import {
+  classifyGeneratedHrefNavigation,
+  recognizedInternalPath,
+  STATIC_ROUTE_CASES,
+  type GeneratedHrefNavigationKind,
+} from "./support/routes";
 
 const TEST_ID = "e2e.route.smoke";
 
@@ -107,7 +112,20 @@ class RequiredApiTracker {
       ).toEqual({ documentActivated: true, pending: [], missingShellPaths: [] });
       const revision = this.activityRevisionByGeneration.get(generation) ?? 0;
       await this.page.evaluate(() => new Promise<void>((resolve) => {
-        requestAnimationFrame(() => requestAnimationFrame(() => window.setTimeout(resolve, 0)));
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(fallback);
+          window.setTimeout(resolve, 0);
+        };
+        // Headless Firefox can suppress requestAnimationFrame even while the
+        // document is fully rendered. Preserve the two-paint fence when the
+        // engine supplies frames, but never let that browser policy consume
+        // the entire test timeout. The revision check below still rejects any
+        // API activity scheduled before or during this bounded task fence.
+        const fallback = window.setTimeout(finish, 250);
+        requestAnimationFrame(() => requestAnimationFrame(finish));
       }));
       const stateAfterFence = this.requiredState(generation);
       if (
@@ -129,9 +147,32 @@ class RequiredApiTracker {
   }
 }
 
+async function settleDeferredParticleRuntime(page: Page): Promise<void> {
+  const overviewField = page.locator("[data-ti-transformer-core='true']");
+  if (await overviewField.count() === 1) {
+    await expect.poll(
+      () => overviewField.getAttribute("data-ti-particle-status"),
+      { message: "The deferred Overview particle runtime must settle before document teardown", timeout: 20_000 },
+    ).not.toBe("loading");
+  }
+
+  const reviewField = page.locator("main.particle-core-review, main.particle-module-transition");
+  if (await reviewField.count() === 1) {
+    await expect(
+      reviewField.locator("canvas").or(reviewField.getByRole("alert")),
+      "A particle review must finish loading or expose its precise fallback before document teardown",
+    ).toBeVisible({ timeout: 20_000 });
+  }
+}
+
 test.describe(`${TEST_ID} static route, console, network, and layout contract`, () => {
   for (const route of STATIC_ROUTE_CASES) {
     test(`${route.id} renders at ${route.path}`, async ({ page }, testInfo) => {
+      // This suite owns route, API, console, link, and layout integrity. Keep
+      // its document startup deterministic under parallel browser load; the
+      // complete default-motion handoff is exercised independently by the
+      // boot and mechanical-transition suites (including Firefox repeats).
+      await page.emulateMedia({ reducedMotion: "reduce", colorScheme: "light" });
       const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
       const requiredApi = new RequiredApiTracker(page);
       const generation = requiredApi.beginNavigation();
@@ -153,6 +194,13 @@ test.describe(`${TEST_ID} static route, console, network, and layout contract`, 
 
   test("every generated internal href belongs to the route contract", async ({ page }, testInfo) => {
     test.setTimeout(120_000);
+    // This is an exhaustive document-navigation and href-integrity crawl, not
+    // an animation test. Replaying the finite startup choreography for every
+    // document would consume the entire pre-crawl budget before the generated
+    // URL set is known. Reduced motion is a supported product state and makes
+    // the route contract deterministic; default-motion behavior is covered by
+    // the dedicated boot and mechanical-transition browser suites.
+    await page.emulateMedia({ reducedMotion: "reduce" });
     const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
     const requiredApi = new RequiredApiTracker(page);
     const hrefs = new Set<string>();
@@ -161,6 +209,7 @@ test.describe(`${TEST_ID} static route, console, network, and layout contract`, 
       await audit.withExpectedDocumentNavigationTeardown(page, () => page.goto(route.path, { waitUntil: "domcontentloaded" }));
       await page.locator("main#ti-scale-content h1").first().waitFor({ state: "visible" });
       await requiredApi.settle(route.path, generation);
+      await settleDeferredParticleRuntime(page);
       const current = await page.locator("a[href]").evaluateAll((links) => links.map((link) => link.getAttribute("href") ?? ""));
       current.forEach((href) => hrefs.add(href));
     }
@@ -195,23 +244,71 @@ test.describe(`${TEST_ID} static route, console, network, and layout contract`, 
       }, null, 2)),
       contentType: "application/json",
     });
-    const crawled: Array<{ href: string; pathname: string; status: number | null }> = [];
+    const crawled: Array<{
+      href: string;
+      navigationKind: GeneratedHrefNavigationKind;
+      pathname: string;
+      status: number | null;
+    }> = [];
     for (const href of crawlableHrefs) {
-      const target = new URL(href, "http://127.0.0.1");
-      const generation = requiredApi.beginNavigation();
-      const response = await audit.withExpectedDocumentNavigationTeardown(page, () => page.goto(
-        `${target.pathname}${target.search}${target.hash}`,
-        { waitUntil: "domcontentloaded" },
-      ));
-      const status = response?.status() ?? null;
-      crawled.push({ href, pathname: target.pathname, status });
-      expect(
-        isResolvedDocumentNavigationStatus(status),
-        `Generated route ${href} must resolve its document (received HTTP ${String(status)})`,
-      ).toBe(true);
+      const target = new URL(href, page.url());
+      const targetLocation = `${target.pathname}${target.search}${target.hash}`;
+      const navigationKind = classifyGeneratedHrefNavigation(page.url(), target.href);
+      let status: number | null = null;
+      if (navigationKind === "document") {
+        const generation = requiredApi.beginNavigation();
+        const response = await audit.withExpectedDocumentNavigationTeardown(page, () => page.goto(
+          targetLocation,
+          { waitUntil: "domcontentloaded" },
+        ));
+        status = response?.status() ?? null;
+        expect(
+          isResolvedDocumentNavigationStatus(status),
+          `Generated route ${href} must resolve its document (received HTTP ${String(status)})`,
+        ).toBe(true);
+        await requiredApi.settle(href, generation);
+      } else if (navigationKind === "same-document") {
+        let documentRequestUrl: string | undefined;
+        const observeRequest = (request: Request): void => {
+          if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+            documentRequestUrl = request.url();
+          }
+        };
+        page.on("request", observeRequest);
+        let response: Awaited<ReturnType<Page["goto"]>> | undefined;
+        try {
+          response = await page.goto(targetLocation, { waitUntil: "domcontentloaded" });
+          await page.waitForTimeout(0);
+        } finally {
+          page.off("request", observeRequest);
+        }
+        expect(
+          response,
+          `Generated route ${href} is a same-document fragment transition and must not issue an HTTP document request`,
+        ).toBeNull();
+        expect(
+          documentRequestUrl,
+          `Generated route ${href} unexpectedly replaced the current document`,
+        ).toBeUndefined();
+      }
+      crawled.push({ href, navigationKind, pathname: target.pathname, status });
+      await expect.poll(
+        () => {
+          const current = new URL(page.url());
+          return `${current.pathname}${current.search}${current.hash}`;
+        },
+        { message: `Generated route ${href} must preserve its exact path, query, and fragment` },
+      ).toBe(targetLocation);
       await expect(page.locator("main#ti-scale-content h1").first(), `Generated route ${href} must render a named surface`).toBeVisible();
       await expect(page.getByText("Command surface not found", { exact: true }), `Generated route ${href} must be recognized`).toHaveCount(0);
-      await requiredApi.settle(href, generation);
+      if (target.hash) {
+        const fragmentId = decodeURIComponent(target.hash.slice(1));
+        expect(
+          await page.evaluate((id) => document.getElementById(id) !== null, fragmentId),
+          `Generated route ${href} must point to an element in the rendered document`,
+        ).toBe(true);
+      }
+      await settleDeferredParticleRuntime(page);
     }
     await testInfo.attach("generated-internal-href-crawl.json", {
       body: Buffer.from(JSON.stringify(crawled, null, 2)),

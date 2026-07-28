@@ -4,12 +4,21 @@ import type {
   ReadinessCheckProvider,
   ReadinessContext,
 } from "../missions";
+import type { AutonomousRuntimeCompositionReadiness } from "./AutonomousRuntimeComposition";
 
 export type ComponentHealth = "healthy" | "degraded" | "unhealthy" | "unknown";
 
 export interface ProviderReadiness {
   readonly id: string;
   readonly health: ComponentHealth;
+  /**
+   * Identifies where execution authority is enforced. An omitted value keeps
+   * the established public-provider behavior; only an explicitly attested
+   * local deterministic route may use a model-free local tool.
+   */
+  readonly executionBoundary?: "public_provider" | "local_deterministic_policy";
+  /** False for a known provider adapter whose operator configuration is absent or invalid. */
+  readonly configured?: boolean;
   readonly authenticated: boolean;
   /** True only after a fresh live provider/ACP route attestation. */
   readonly callable: boolean;
@@ -20,6 +29,13 @@ export interface ProviderReadiness {
   readonly enforcesAutonomousBoundary: boolean;
   readonly reportsExactTokenUsage: boolean;
   readonly reportsExactCostUsage: boolean;
+  /** Immutable, secret-free binding used by readiness and provider turns. */
+  readonly requestedModel?: string;
+  /** Exact identifier returned by an audited completion, never inferred from the request. */
+  readonly returnedModel?: string;
+  readonly modelConfigurationHash?: string;
+  /** Opaque durable authorization receipt for the matching content-free probe. */
+  readonly completionProbeReceiptId?: string;
   readonly reason?: string;
 }
 
@@ -35,6 +51,22 @@ export interface McpReadiness {
   readonly missingSecrets: number;
 }
 
+/**
+ * A narrow, read-only dependency projection for the separately isolated NVD
+ * sidecar. This is deliberately not an execution-ready MCP projection: live
+ * capability attestation does not grant mission, specialist, or tool-call
+ * authority.
+ */
+export interface PublicNvdReadiness {
+  readonly status: "unavailable" | "probing" | "degraded" | "ready" | "stopped";
+  readonly credentialMounted: boolean;
+  readonly attested: boolean;
+  readonly lastCheckedAt?: string;
+  readonly attestedAt?: string;
+  readonly expiresAt?: string;
+  readonly reason: string;
+}
+
 export interface RuntimeReadinessSnapshot {
   readonly actionBoundaryActive: boolean;
   readonly delegationEnforced: boolean;
@@ -44,6 +76,44 @@ export interface RuntimeReadinessSnapshot {
   readonly specialistsConfigured: number;
   readonly providers: readonly ProviderReadiness[];
   readonly mcp: McpReadiness;
+  readonly publicNvd?: PublicNvdReadiness;
+  /**
+   * Exact object-and-manifest composition proof for the mounted Autonomous
+   * runtime. Legacy booleans and environment declarations cannot substitute
+   * for this report; absence therefore remains fail-closed.
+   */
+  readonly autonomousRuntime?: AutonomousRuntimeCompositionReadiness;
+  /**
+   * A local deterministic planner that can represent manual Guided work. It
+   * is not a provider, specialist executor, MCP route, or Autonomous path.
+   */
+  readonly guidedManualPlanning?: {
+    readonly status: "ready" | "unavailable";
+    readonly plannerId: string;
+    readonly executionMode: "manual_only";
+    readonly targetInteraction: "operator_only";
+    readonly providerContact: false;
+    readonly toolDispatch: false;
+    readonly reason: string;
+  };
+  /**
+   * Exact-step local specialist execution through reviewed argv bindings. It
+   * is deliberately separate from MCP/provider readiness: a direct local
+   * process must never be counted or displayed as an MCP server.
+   */
+  readonly guidedLocalToolExecution?: {
+    readonly status: "ready" | "unavailable";
+    readonly specialistId: string;
+    readonly executionBinding: "reviewed_local_process";
+    readonly readyToolIds: readonly string[];
+    readonly exactDecisionRequired: true;
+    readonly targetInteraction: "operator_approved_exact_step";
+    readonly providerContact: false;
+    readonly mcpTransport: false;
+    readonly checkedAt?: string;
+    readonly expiresAt?: string;
+    readonly reason: string;
+  };
   readonly eventStream: ComponentHealth;
   readonly secondBrain: ComponentHealth;
   /** True only during an explicit rollback window; production should keep this false. */
@@ -125,11 +195,25 @@ export function createRuntimeReadinessProviders(
       journeys: ["autonomous", "guided"],
       evaluate() {
         const value = snapshot();
+        const manualGuided = value.guidedManualPlanning?.status === "ready"
+          && value.guidedManualPlanning.executionMode === "manual_only"
+          && value.guidedManualPlanning.targetInteraction === "operator_only"
+          && value.guidedManualPlanning.providerContact === false
+          && value.guidedManualPlanning.toolDispatch === false;
+        const localGuided = value.guidedLocalToolExecution?.status === "ready"
+          && value.guidedLocalToolExecution.executionBinding === "reviewed_local_process"
+          && value.guidedLocalToolExecution.readyToolIds.length > 0
+          && value.guidedLocalToolExecution.exactDecisionRequired === true
+          && value.guidedLocalToolExecution.providerContact === false
+          && value.guidedLocalToolExecution.mcpTransport === false;
         const shared = value.delegationEnforced
           && value.noHandsCommanderEnforced
           && value.directCommanderToolsDenied
           && value.specialistAssignmentRequired;
-        const autonomousStrong = value.actionBoundaryActive && shared;
+        const autonomousStrong = value.actionBoundaryActive
+          && shared
+          && value.autonomousRuntime?.status === "ready";
+        const autonomousBlocker = value.autonomousRuntime?.blockers[0];
         return [
           autonomousStrong
             ? check(
@@ -144,16 +228,22 @@ export function createRuntimeReadinessProviders(
                 "Autonomous execution boundary",
                 "fail",
                 ["autonomous"],
-                "At least one required Autonomous action or delegation boundary is not enforceable by the active runtime.",
-                "Enable the durable MCP action boundary, specialist assignment, hard delegation, and no-hands commander policy.",
+                autonomousBlocker?.impact
+                  ?? "The active process has no exact proof that all required Autonomous adapters and action boundaries are mounted.",
+                autonomousBlocker?.remediation
+                  ?? "Mount the reviewed planner, evaluator, result-aware specialist executor, enforcing provider route, and exact execution-authorized tool manifests.",
               ),
-          shared
+          shared || localGuided || manualGuided
             ? check(
                 "execution_boundary_guided",
                 "Guided exact-step boundary",
                 "pass",
                 ["guided"],
-                "Consequential work is bound to one represented decision; manual steps cannot be dispatched and agent-run steps require the exact fingerprint.",
+                localGuided
+                  ? "Every local specialist action remains bound to one represented Guided decision, one reviewed executable/argv template, one exact target, and one workspace mapping. It does not use MCP or a public provider."
+                  : shared
+                  ? "Consequential work is bound to one represented decision; manual steps cannot be dispatched and agent-run steps require the exact fingerprint."
+                  : "The local Guided planner creates represented manual steps only. Target interaction remains operator-only, and its fail-closed execution port cannot dispatch a provider or tool action.",
               )
             : check(
                 "execution_boundary_guided",
@@ -172,6 +262,8 @@ export function createRuntimeReadinessProviders(
       journeys: ["autonomous", "guided"],
       evaluate() {
         const value = snapshot();
+        const manualGuided = value.guidedManualPlanning?.status === "ready";
+        const localGuided = value.guidedLocalToolExecution?.status === "ready";
         const autonomous = value.providers.filter(
           (provider) => provider.authenticated
             && provider.callable
@@ -209,7 +301,18 @@ export function createRuntimeReadinessProviders(
                 ["guided"],
                 `${guided.length} authenticated provider path${guided.length === 1 ? " is" : "s are"} available for Guided explanation and interpretation.`,
               )
-            : check(
+            : localGuided || manualGuided
+              ? check(
+                  "provider_execution_guided",
+                  "Guided provider connection",
+                  "warn",
+                  ["guided"],
+                  localGuided
+                    ? "No public provider is available. Guided can still run one reviewed local specialist action after the operator approves its exact parameters; provider-assisted explanation is unavailable."
+                    : "No public provider is available. Guided can still create deterministic represented manual steps; provider-assisted explanation and agent-run steps are unavailable.",
+                  "Configure and attest a Guided-capable provider only if provider-assisted explanation or interpretation is required.",
+                )
+              : check(
                 "provider_execution_guided",
                 "Guided provider connection",
                 "fail",
@@ -278,22 +381,84 @@ export function createRuntimeReadinessProviders(
       label: "Specialist fleet",
       journeys: ["autonomous", "guided"],
       evaluate() {
-        const count = snapshot().specialistsConfigured;
-        return count > 0
+        const value = snapshot();
+        const count = value.specialistsConfigured;
+        const manualGuided = value.guidedManualPlanning?.status === "ready";
+        const localGuided = value.guidedLocalToolExecution?.status === "ready";
+        return [
+          count > 0
+            ? check(
+                "specialist_fleet_autonomous",
+                "Autonomous specialist fleet",
+                "pass",
+                ["autonomous"],
+                `${count} specialist${count === 1 ? " has" : "s have"} a fresh enforcing provider and reviewed execution-binding attestation.`,
+              )
+            : check(
+                "specialist_fleet_autonomous",
+                "Autonomous specialist fleet",
+                "fail",
+                ["autonomous"],
+                "No specialist has both a fresh enforcing provider route and a live reviewed execution binding.",
+                "Restore the exact provider, specialist heartbeat, and reviewed local-process or MCP execution receipts before Autonomous launch.",
+              ),
+          localGuided || count > 0
+            ? check(
+                "specialist_fleet_guided",
+                "Guided specialist fleet",
+                "pass",
+                ["guided"],
+                localGuided
+                  ? `The reviewed local specialist can run ${value.guidedLocalToolExecution!.readyToolIds.length} exact tool binding${value.guidedLocalToolExecution!.readyToolIds.length === 1 ? "" : "s"} after a represented operator decision.`
+                  : `${count} specialist${count === 1 ? " is" : "s are"} available for exact represented Guided agent-run work.`,
+              )
+            : manualGuided
+              ? check(
+                  "specialist_fleet_guided",
+                  "Guided specialist fleet",
+                  "warn",
+                  ["guided"],
+                  "No executing specialist is available. The local planner can represent manual operator steps, but it is not advertised as a specialist executor.",
+                  "Configure an attested specialist route only if the operator needs single-step agent execution.",
+                )
+              : check(
+                  "specialist_fleet_guided",
+                  "Guided specialist fleet",
+                  "fail",
+                  ["guided"],
+                  "Neither an executing specialist nor the local represented-manual planner is available.",
+                  "Restore the local manual planner or an attested specialist route before mission creation.",
+                ),
+        ];
+      },
+    },
+    {
+      id: "guided_local_tool_execution",
+      label: "Guided local specialist execution",
+      journeys: ["guided"],
+      evaluate() {
+        const value = snapshot().guidedLocalToolExecution;
+        const ready = value?.status === "ready"
+          && value.executionBinding === "reviewed_local_process"
+          && value.readyToolIds.length > 0
+          && value.exactDecisionRequired === true
+          && value.providerContact === false
+          && value.mcpTransport === false;
+        return ready
           ? check(
-              "specialist_fleet",
-              "Specialist fleet",
+              "guided_local_tool_execution",
+              "Guided local specialist execution",
               "pass",
-              ["autonomous", "guided"],
-              `${count} specialist${count === 1 ? " has" : "s have"} a fresh provider and MCP route attestation.`,
+              ["guided"],
+              `${value.readyToolIds.length} reviewed local tool binding${value.readyToolIds.length === 1 ? " is" : "s are"} current for exact-step Guided execution. These are direct local processes, not MCP servers.`,
             )
           : check(
-              "specialist_fleet",
-              "Specialist fleet",
-              "fail",
-              ["autonomous", "guided"],
-              "No specialist has both a fresh live provider route and a live-attested MCP capability.",
-              "Restore provider authentication and the reviewed MCP tools/list routes before mission launch.",
+              "guided_local_tool_execution",
+              "Guided local specialist execution",
+              "warn",
+              ["guided"],
+              value?.reason ?? "No reviewed local specialist execution receipt is current; Guided remains available through represented manual steps.",
+              "Restore the pinned local tool manifest, isolated target-free probe, workspace mapping, direct argv adapter, result sink, and cancellation boundary.",
             );
       },
     },
@@ -302,7 +467,18 @@ export function createRuntimeReadinessProviders(
       label: "MCP and tool execution",
       journeys: ["autonomous", "guided"],
       evaluate(context) {
-        const value = snapshot().mcp;
+        const runtime = snapshot();
+        const value = runtime.mcp;
+        const request = autonomousRequest(context);
+        const localRuntime = runtime.autonomousRuntime;
+        const localReadyActionClassIds = localRuntime?.readyActionClassIds ?? [];
+        const localProcessUsable = localRuntime?.status === "ready"
+          && localRuntime.components.localProcessExecution === true
+          && localRuntime.components.mcpExecution === false
+          && localReadyActionClassIds.length > 0
+          && (request === undefined || request.contract.allowedActionClasses.every(
+            (actionClassId) => localReadyActionClassIds.includes(actionClassId),
+          ));
         const usable = value.enabled
           && value.executionMode === "enabled"
           && value.startPermitted
@@ -328,6 +504,27 @@ export function createRuntimeReadinessProviders(
             ),
           ];
         }
+        if (localProcessUsable) {
+          return [
+            check(
+              "mcp_execution_autonomous",
+              "Autonomous reviewed execution",
+              "pass",
+              ["autonomous"],
+              `${localReadyActionClassIds.length} requested action-class binding${localReadyActionClassIds.length === 1 ? " is" : "s are"} executable through the reviewed direct local-process boundary. MCP is neither required nor contacted for this route.`,
+            ),
+            check(
+              "mcp_execution_guided",
+              "Guided single-step execution",
+              "warn",
+              ["guided"],
+              runtime.guidedLocalToolExecution?.status === "ready"
+                ? "MCP execution is unavailable. Reviewed direct local specialist actions remain available as exact Guided steps and are not represented as MCP."
+                : "MCP agent-run steps are unavailable, but the operator can continue with explained manual steps.",
+              "Enable a reviewed MCP arsenal only for capabilities that actually use MCP transport.",
+            ),
+          ];
+        }
         const required = requiresExecutionTools(context);
         return [
           check(
@@ -345,8 +542,10 @@ export function createRuntimeReadinessProviders(
             "Guided single-step execution",
             "warn",
             ["guided"],
-            "Agent-run Guided steps are unavailable, but the operator can continue with explained manual steps.",
-            "Enable the reviewed MCP arsenal to allow exact single-step agent execution.",
+            runtime.guidedLocalToolExecution?.status === "ready"
+              ? "MCP execution is unavailable. Reviewed direct local specialist actions remain available as exact Guided steps and are not represented as MCP."
+              : "MCP agent-run steps are unavailable, but the operator can continue with explained manual steps.",
+            "Enable a reviewed MCP arsenal only for capabilities that actually use MCP transport.",
           ),
         ];
       },
@@ -397,7 +596,10 @@ export function createRuntimeReadinessProviders(
         const health = snapshot().secondBrain;
         const request = autonomousRequest(context);
         const requested = (request?.contract.memoryScopes.length ?? 0) > 0;
-        const unavailable = health === "unhealthy" || health === "unknown";
+        // A degraded lexical/index path cannot satisfy a signed Autonomous
+        // memory scope: proceeding would silently plan with incomplete
+        // context. Guided/no-memory work may continue with visible defaults.
+        const unavailable = health !== "healthy";
         return check(
           "memory_policy",
           "Second Brain policy",

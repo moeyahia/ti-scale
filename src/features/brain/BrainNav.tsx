@@ -5,6 +5,7 @@ import { assetUrl } from "../../lib/assetUrl";
 const items = [
   { href: "/brain", label: "Home" },
   { href: "/brain/graph", label: "Graph" },
+  { href: "/brain/preferences", label: "Operator Preferences" },
   { href: "/brain/inbox", label: "Memory Inbox" },
   { href: "/brain/control", label: "Controls" },
   { href: "/brain/vault", label: "Obsidian Vault" },

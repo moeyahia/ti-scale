@@ -12,9 +12,13 @@ export type AccessibleRole =
   | "option"
   | "tab"
   | "menuitem"
-  | "slider";
+  | "spinbutton"
+  | "slider"
+  | "region";
 
 export type NativeControlLocator = "native-date-input" | "native-summary";
+
+export type InteractionReceiptModality = "pointer" | "keyboard" | "assertion";
 
 export type InteractionAccessible = {
   readonly name: string;
@@ -32,6 +36,7 @@ export interface InteractionManifestEntry {
   readonly controlId: string;
   readonly accessible: InteractionAccessible;
   readonly controlType: string;
+  readonly requiredModalities?: readonly InteractionReceiptModality[];
   readonly options: readonly string[];
   readonly keyboardAction: string;
   readonly pointerAction: string;
@@ -59,11 +64,19 @@ export interface InteractionManifest {
 }
 
 const roles = new Set<AccessibleRole>([
-  "application", "button", "link", "checkbox", "radio", "combobox", "listbox", "textbox", "option", "tab", "menuitem", "slider",
+  "application", "button", "link", "checkbox", "radio", "combobox", "listbox", "textbox", "option", "tab", "menuitem", "spinbutton", "slider", "region",
 ]);
 const nativeControlLocators = new Set<NativeControlLocator>(["native-date-input", "native-summary"]);
 const classifications = new Set(["read-only", "reversible", "destructive"]);
 const matches = new Set(["exact", "regex"]);
+
+function requiredModalitiesAreValid(value: unknown): value is InteractionReceiptModality[] {
+  return Array.isArray(value)
+    && (
+      (value.length === 2 && value[0] === "pointer" && value[1] === "keyboard")
+      || (value.length === 1 && value[0] === "assertion")
+    );
+}
 
 function record(value: unknown, path: string, errors: string[]): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -97,7 +110,12 @@ export function validateInteractionManifest(value: unknown): InteractionManifest
   if (root.application !== "TI-SCALE // COMMAND INTELLIGENCE") errors.push("manifest.application is not the V2 product identity");
   if (root.namespace !== INTERACTION_MANIFEST_NAMESPACE) errors.push(`manifest.namespace must be ${INTERACTION_MANIFEST_NAMESPACE}`);
   nonEmpty(root.scope, "manifest.scope", errors);
-  stringArray(root.knownGaps, "manifest.knownGaps", errors, false);
+  if (stringArray(root.knownGaps, "manifest.knownGaps", errors)) {
+    const normalizedGaps = root.knownGaps.map((gap) => gap.trim());
+    if (new Set(normalizedGaps).size !== normalizedGaps.length) {
+      errors.push("manifest.knownGaps must not contain duplicate gaps");
+    }
+  }
   if (!Array.isArray(root.entries) || root.entries.length === 0) {
     errors.push("manifest.entries must be a non-empty array");
   } else {
@@ -120,6 +138,15 @@ export function validateInteractionManifest(value: unknown): InteractionManifest
       nonEmpty(entry.surface, `${path}.surface`, errors);
       nonEmpty(entry.requiredState, `${path}.requiredState`, errors);
       nonEmpty(entry.controlType, `${path}.controlType`, errors);
+      if (entry.requiredModalities !== undefined && !requiredModalitiesAreValid(entry.requiredModalities)) {
+        errors.push(`${path}.requiredModalities must be exactly ["pointer", "keyboard"] or ["assertion"]`);
+      }
+      if (
+        entry.controlType === "disabled-launch-guard"
+        && (!requiredModalitiesAreValid(entry.requiredModalities) || entry.requiredModalities[0] !== "assertion")
+      ) {
+        errors.push(`${path}.controlType disabled-launch-guard requires requiredModalities ["assertion"]`);
+      }
       nonEmpty(entry.keyboardAction, `${path}.keyboardAction`, errors);
       nonEmpty(entry.pointerAction, `${path}.pointerAction`, errors);
       nonEmpty(entry.expectedStateTransition, `${path}.expectedStateTransition`, errors);

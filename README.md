@@ -13,17 +13,19 @@ Ti-Scale is under active development and is not release-eligible yet.
 
 | Capability | Current state |
 | --- | --- |
-| Light-mode application shell and product routes | Implemented |
-| Mission intake registries and contract review | Implemented |
-| SQLite mission, event, intelligence, memory, and audit records | Implemented |
-| Resumable semantic event stream | Implemented |
-| Evidence semantics, failure diagnosis, run metrics, and topology records | Implemented |
-| Second Brain graph, memory controls, and context packs | Implemented |
-| Obsidian-compatible vault projection, import, conflicts, and portable export | Implemented |
-| Provider-backed planning and tool execution | **Not attached to the default server** |
+| Light-mode application shell and product routes | Implemented; release interaction coverage remains incomplete |
+| Mission intake registries and contract review | Implemented; Autonomous execution remains fail-closed |
+| SQLite mission, event, intelligence, memory, research, and audit records | Implemented through ordered forward-only migrations; the running installation must report the exact current schema before activation |
+| Resumable semantic event stream | Implemented and covered by module tests; release soak remains pending |
+| Evidence semantics, failure diagnosis, run metrics, and topology records | Implemented as canonical record and review surfaces |
+| Second Brain graph, memory controls, and Context Packs | Implemented; runtime use is valid only when a persisted Context Pack exists |
+| Obsidian-compatible vault connection, projection, import, conflicts, and portable export | Implemented; no vault is bundled or automatically connected |
+| Guided exact-step runtime | Implemented behind represented operator decisions and fresh capability receipts; an unconfigured installation remains fail-closed |
+| Autonomous specialist and tool execution | Optional reviewed local executors are supported; an unconfigured installation remains unavailable and no assessment proof implies a complete engagement |
+| Research Lab | Human-owned policy and isolated synthetic execution are under active validation; no candidate can auto-promote or deploy |
 | Full cross-browser release gate, soak, and human approval | **Pending** |
 
-The default server fails closed when an execution adapter is unavailable. It returns a structured `503` response instead of simulating work or silently changing mission state.
+The default server fails closed when an execution adapter is unavailable. It returns a structured `503` response instead of simulating work or silently changing mission state. Optional OpenRouter readiness and the public NVD connector are narrow planning/read-only boundaries; neither grants Autonomous or generic tool execution.
 
 ## Quick start
 
@@ -33,18 +35,25 @@ Prerequisites:
 - Node.js 22 or newer for supported development tooling
 - A local filesystem location for the SQLite database, artifacts, and optional vault
 
+From the root of a Ti-Scale source checkout:
+
 ```bash
-git clone https://github.com/moeyahia/ti-scale.git
-cd ti-scale
 bun install --frozen-lockfile
 cp .env.example .env
 ```
 
-Generate a private local operator token and place it in `.env`:
+Create a private operator-token file outside the source checkout:
 
 ```bash
-openssl rand -hex 32
+TOKEN_DIRECTORY="${XDG_CONFIG_HOME:-$HOME/.config}/ti-scale"
+install -d -m 700 "$TOKEN_DIRECTORY"
+openssl rand -hex 32 > "$TOKEN_DIRECTORY/operator-token"
+chmod 600 "$TOKEN_DIRECTORY/operator-token"
+printf 'TI_SCALE_OPERATOR_TOKEN_FILE=%s\n' "$TOKEN_DIRECTORY/operator-token"
 ```
+
+Set `TI_SCALE_OPERATOR_TOKEN_FILE` in `.env` to the absolute path printed by
+the final command. Do not copy the token value into source-controlled files.
 
 Initialize the database, verify the repository, and start the product:
 
@@ -79,6 +88,7 @@ SQLite is the transactional source of truth. Obsidian Markdown is an optional, s
 
 ## Documentation
 
+- [Authoritative project goal](docs/project-goal.md)
 - [Getting started](docs/getting-started.md)
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
@@ -86,12 +96,17 @@ SQLite is the transactional source of truth. Obsidian Markdown is an optional, s
 - [API](docs/api.md)
 - [Event model](docs/events.md)
 - [Second Brain](docs/second-brain.md)
+- [Attack Knowledge Vault](docs/attack-knowledge-vault.md)
 - [Obsidian vault](docs/obsidian-vault.md)
 - [Security](docs/security.md)
 - [Testing](docs/testing.md)
+- [Continuous integration](docs/continuous-integration.md)
 - [Deployment](docs/deployment.md)
+- [Public NVD MCP connector](docs/public-nvd-mcp.md)
 - [Contributing](docs/contributing.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Tool readiness](docs/tool-readiness.md)
+- [Validation status](docs/validation-status.md)
 - [Release gates](docs/release-gates.md)
 
 ## Safety principles

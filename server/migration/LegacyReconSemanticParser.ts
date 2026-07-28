@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { extname } from "node:path";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from "node:fs";
+import { extname, relative, resolve, sep } from "node:path";
 import type { LegacyEngagementManifest } from "./LegacyEngagementDiscovery";
 
 export interface LegacyReconServiceObservation {
@@ -38,6 +38,44 @@ const MAX_LINES = 200_000;
 const MAX_HOSTS = 5_000;
 const MAX_SERVICES_PER_HOST = 4_096;
 const SAFE_OBSERVED_VALUE = /^[\p{L}\p{N}][\p{L}\p{N} .:_/@+()\[\]-]{0,499}$/u;
+
+class LegacyReconSourceChangedError extends Error {}
+
+function inside(root: string, candidate: string): boolean {
+  const value = relative(resolve(root), resolve(candidate));
+  return value === "" || (value !== ".." && !value.startsWith(`..${sep}`));
+}
+
+/** Read the discovered inode directly; a replacement symlink is never followed. */
+function readVerifiedReconSource(
+  manifest: LegacyEngagementManifest,
+  file: LegacyEngagementManifest["files"][number],
+): Buffer {
+  const rootReal = realpathSync(manifest.engagementDirectory);
+  if (!inside(rootReal, file.absolutePath)) throw new LegacyReconSourceChangedError("recon source escaped its engagement directory");
+  const descriptor = openSync(file.absolutePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const before = fstatSync(descriptor);
+    const pathState = lstatSync(file.absolutePath);
+    if (
+      !before.isFile() || !pathState.isFile() || pathState.isSymbolicLink()
+      || before.dev !== pathState.dev || before.ino !== pathState.ino
+      || before.size !== file.byteSize || before.mtime.toISOString() !== file.modifiedAt
+    ) throw new LegacyReconSourceChangedError("recon source no longer matches discovery provenance");
+    const bytes = readFileSync(descriptor);
+    const after = fstatSync(descriptor);
+    const finalPathState = lstatSync(file.absolutePath);
+    if (
+      before.dev !== after.dev || before.ino !== after.ino
+      || before.size !== after.size || before.mtimeMs !== after.mtimeMs
+      || after.dev !== finalPathState.dev || after.ino !== finalPathState.ino
+      || finalPathState.isSymbolicLink()
+    ) throw new LegacyReconSourceChangedError("recon source changed during bounded parsing");
+    return bytes;
+  } finally {
+    closeSync(descriptor);
+  }
+}
 
 function clean(value: string | undefined, maximum = 500): string | undefined {
   if (!value) return undefined;
@@ -196,9 +234,11 @@ export function parseLegacyReconSemantics(manifest: LegacyEngagementManifest): L
       continue;
     }
     let bytes: Buffer;
-    try { bytes = readFileSync(file.absolutePath); }
-    catch {
-      issues.push({ relativePath: file.relativePath, code: "read_failed", explanation: "Recon artifact could not be reread for semantic projection." });
+    try { bytes = readVerifiedReconSource(manifest, file); }
+    catch (error) {
+      issues.push(error instanceof LegacyReconSourceChangedError
+        ? { relativePath: file.relativePath, code: "source_changed", explanation: "Recon artifact changed after discovery and was not semantically projected." }
+        : { relativePath: file.relativePath, code: "read_failed", explanation: "Recon artifact could not be reread for semantic projection." });
       continue;
     }
     const hash = createHash("sha256").update(bytes).digest("hex");

@@ -7,7 +7,15 @@ import { autonomousContractHash, canonicalJson, hashCanonical, sha256 } from "./
 import { AutonomousReadinessError, IdempotencyConflictError, MissionApiError } from "./errors";
 import type { MissionService } from "./MissionService";
 import type { AutonomousMissionPreflight, AutonomousMissionRequest } from "./types";
-import { validateMissionCreateRequest } from "./validation";
+import {
+  validateLegacyAutonomousMissionRequest,
+  validateMissionCreateRequest,
+} from "./validation";
+import {
+  ModelConfigurationError,
+  resolveAutonomousPlanningSelection,
+  type ModelConfigurationService,
+} from "../model-config";
 
 type BranchMode = "unchanged_contract" | "contract_amendment";
 
@@ -211,6 +219,7 @@ export class AutonomousBranchService {
     private readonly database: SqliteDatabase,
     private readonly missions: MissionService,
     private readonly clock: () => Date = () => new Date(),
+    private readonly modelConfigurations?: ModelConfigurationService,
   ) {
     this.events = new EventRepository(database);
   }
@@ -304,7 +313,13 @@ export class AutonomousBranchService {
     const request = input.mode === "unchanged_contract"
       ? sourceRequest
       : withoutReview(input.request ?? sourceRequest);
-    const hash = autonomousContractHash(request);
+    // An unchanged branch inherits the exact persisted contract authority.
+    // Legacy contracts may reconstruct omitted optional values as explicit
+    // empty arrays, which must not invent a new digest for an unchanged run.
+    // Amendments still hash their full newly reviewed request.
+    const hash = input.mode === "unchanged_contract"
+      ? source.contract_hash!
+      : autonomousContractHash(request);
     if (input.mode === "contract_amendment" && hash === source.contract_hash) {
       throw new MissionApiError(409, "amendment_has_no_changes", "The amendment matches the signed contract", {
         humanMessage: "No contract authority changed. Choose the unchanged-contract branch instead.",
@@ -531,16 +546,76 @@ export class AutonomousBranchService {
         : `New run created under unchanged confirmed Autonomous contract version ${currentTarget.version}.`;
       this.database.prepare(`
         INSERT INTO runs (
-          id, mission_id, journey, status, control_plane, contract_id, progress,
+          id, mission_id, journey, status, control_plane, contract_id,
+          contract_version_bound, contract_hash_bound, progress,
           status_reason, next_action_summary, budget_json, budget_usage_json,
           retry_count, replan_count, started_at, created_at, updated_at, version
-        ) VALUES (?, ?, 'autonomous', 'planning', 'ti_scale', ?, 0, ?,
+        ) VALUES (?, ?, 'autonomous', 'planning', 'ti_scale', ?, ?, ?, 0, ?,
           'Build and version a new plan inside the confirmed contract', ?, '{}',
           0, 0, ?, ?, ?, 1)
       `).run(
-        runId, missionId, currentTarget.id, statusReason,
+        runId, missionId, currentTarget.id,
+        currentTarget.version, currentTarget.contract_hash, statusReason,
         currentTarget.budgets_json, now, now, now,
       );
+      let pinnedModelAssignmentIds: string[];
+      if (!this.modelConfigurations) {
+        throw new MissionApiError(
+          503,
+          "branch_model_configuration_service_unavailable",
+          "Exact branch model assignment service is unavailable",
+          {
+            humanMessage:
+              "The new run was not created because Ti-Scale could not revalidate and pin its exact signed specialist models.",
+            category: "dependency_missing",
+            remediation:
+              "Restore the canonical model-configuration service, rerun branch preflight, and retry the unchanged reviewed contract.",
+          },
+        );
+      }
+      try {
+        pinnedModelAssignmentIds =
+          this.modelConfigurations.pinExactAutonomousAssignments({
+            assignments: currentRequest.contract.agentModelAssignments,
+            specialistAgentIds: currentRequest.contract.specialistAgentIds,
+            requiredActionClassIds:
+              currentRequest.contract.allowedActionClasses,
+            missionId,
+            runId,
+            resolutionReason: input.mode === "contract_amendment"
+              ? `Pinned transactionally from reviewed Autonomous contract amendment version ${currentTarget.version}`
+              : `Repinned transactionally from unchanged reviewed Autonomous contract version ${currentTarget.version}`,
+          }).map(({ id }) => id);
+        const planningSelection = resolveAutonomousPlanningSelection(
+          currentRequest.contract.planningSelection,
+        );
+        if (planningSelection.route === "provider_advisory") {
+          const planningPin =
+            this.modelConfigurations.pinExactAutonomousPlanningSelection({
+              selection: planningSelection,
+              missionId,
+              runId,
+              resolutionReason: input.mode === "contract_amendment"
+                ? `Pinned transactionally from reviewed provider-advisory planning selection in contract amendment version ${currentTarget.version}`
+                : `Repinned transactionally from unchanged provider-advisory planning selection in contract version ${currentTarget.version}`,
+            });
+          if (planningPin) pinnedModelAssignmentIds.push(planningPin.id);
+        }
+      } catch (error) {
+        if (!(error instanceof ModelConfigurationError)) throw error;
+        throw new MissionApiError(
+          error.status === 404 ? 409 : error.status,
+          "branch_model_configuration_unavailable",
+          error.message,
+          {
+            humanMessage:
+              "The new run was not created because an exact signed specialist model changed or became unavailable after review.",
+            category: error.category,
+            remediation:
+              "Refresh the live model catalog, amend and review the exact assignment if needed, then create a new branch.",
+          },
+        );
+      }
       const branchId = id("branch");
       this.database.prepare(`
         INSERT INTO run_branches (
@@ -573,6 +648,7 @@ export class AutonomousBranchService {
           contractChanged: input.mode === "contract_amendment",
           journeyChanged: false,
           status: "planning",
+          pinnedModelAssignmentIds: [...pinnedModelAssignmentIds],
         },
         occurredAt: now,
         sensitivity: "private",
@@ -588,6 +664,7 @@ export class AutonomousBranchService {
           targetContractId: currentTarget.id,
           contractVersion: currentTarget.version,
           contractHash: currentTarget.contract_hash,
+          pinnedModelAssignmentIds: [...pinnedModelAssignmentIds],
           eventId: event.id,
         },
         now,
@@ -660,12 +737,12 @@ export class AutonomousBranchService {
     const snapshot = this.database.prepare(`
       SELECT request_json FROM mission_contract_snapshots WHERE contract_id = ?
     `).get(source.contract_id) as { request_json: string } | undefined;
-    if (snapshot) return this.validRequest(JSON.parse(snapshot.request_json) as unknown);
+    if (snapshot) return this.validStoredRequest(JSON.parse(snapshot.request_json) as unknown);
     const authorization = parseObject(source.authorization_json);
     const policy = parseObject(source.action_policy_json);
     const budgets = parseObject(source.budgets_json);
     const safeStop = parseObject(source.safe_stop_json);
-    return this.validRequest({
+    return this.validStoredRequest({
       journey: "autonomous",
       launch: true,
       title: source.mission_name,
@@ -692,8 +769,10 @@ export class AutonomousBranchService {
         dataHandlingPolicy: policy.dataHandlingPolicy,
         retentionPolicy: policy.retentionPolicy,
         providerPolicy: policy.providerPolicy,
+        planningSelection: policy.planningSelection,
         toolPolicy: policy.toolPolicy,
         specialistAgentIds: policy.specialistAgentIds,
+        agentModelAssignments: policy.agentModelAssignments,
         memoryScopes: parseArray(source.memory_scopes_json),
         contextNodeIds: policy.contextNodeIds,
         safeStopConditions: safeStop.conditions,
@@ -720,6 +799,29 @@ export class AutonomousBranchService {
       });
     }
     return withoutReview(request);
+  }
+
+  private validStoredRequest(value: unknown): AutonomousMissionRequest {
+    const root = value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+    const contract = root.contract && typeof root.contract === "object"
+      && !Array.isArray(root.contract)
+      ? root.contract as Record<string, unknown>
+      : {};
+    const specialistAgentIds = Array.isArray(contract.specialistAgentIds)
+      ? contract.specialistAgentIds
+      : [];
+    const assignments = Array.isArray(contract.agentModelAssignments)
+      ? contract.agentModelAssignments
+      : null;
+    if (
+      assignments === null
+      || (specialistAgentIds.length > 0 && assignments.length === 0)
+    ) {
+      return withoutReview(validateLegacyAutonomousMissionRequest(value));
+    }
+    return this.validRequest(value);
   }
 
   private branchSafety(source: SourceRow): { readonly safe: boolean; readonly reason: string } {
@@ -871,8 +973,12 @@ export class AutonomousBranchService {
         dataHandlingPolicy: request.contract.dataHandlingPolicy,
         retentionPolicy: request.contract.retentionPolicy,
         providerPolicy: request.contract.providerPolicy,
+        planningSelection: resolveAutonomousPlanningSelection(
+          request.contract.planningSelection,
+        ),
         toolPolicy: request.contract.toolPolicy,
         specialistAgentIds: request.contract.specialistAgentIds,
+        agentModelAssignments: request.contract.agentModelAssignments,
         contextNodeIds: request.contract.contextNodeIds,
       }),
       canonicalJson(budget),
@@ -901,6 +1007,8 @@ export class AutonomousBranchService {
     const scope = {
       allowedTargets: request.authorization.allowedTargets,
       prohibitedTargets: request.authorization.prohibitedTargets,
+      environmentClassification:
+        request.authorization.environmentClassification ?? null,
       timeWindow: request.authorization.timeWindow ?? null,
       dataHandling: request.authorization.dataHandling ?? null,
     };
@@ -949,6 +1057,10 @@ export class AutonomousBranchService {
       destructivePolicy: request.contract.destructivePolicy,
       boundedDestructiveTargets: request.contract.boundedDestructiveTargets ?? [],
       specialistAgentIds: request.contract.specialistAgentIds,
+      planningSelection: resolveAutonomousPlanningSelection(
+        request.contract.planningSelection,
+      ),
+      agentModelAssignments: request.contract.agentModelAssignments,
     }), now);
     upsert.run(id("constraint"), missionId, "evidence_requirements", canonicalJson(request.contract.evidenceRequirements), now);
     upsert.run(id("constraint"), missionId, "data_retention", canonicalJson({

@@ -41,6 +41,32 @@ export interface PaletteRouteContext {
   readonly guided: boolean;
 }
 
+interface CommandMutationErrorDetails {
+  readonly humanMessage?: unknown;
+  readonly remediation?: unknown;
+  readonly traceId?: unknown;
+}
+
+/**
+ * Keeps reviewed command editors operator-readable after a rejected mutation.
+ * API errors retain their precise human explanation, remediation, and trace;
+ * local/transport errors fall back to the ordinary Error message.
+ */
+export function commandMutationErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) return "The command could not be completed.";
+  const details = error as Error & CommandMutationErrorDetails;
+  const message = typeof details.humanMessage === "string" && details.humanMessage.trim()
+    ? details.humanMessage.trim()
+    : error.message;
+  const remediation = typeof details.remediation === "string" && details.remediation.trim()
+    ? `Next: ${details.remediation.trim()}`
+    : undefined;
+  const traceId = typeof details.traceId === "string" && details.traceId.trim()
+    ? `Trace ${details.traceId.trim()}`
+    : undefined;
+  return [message, remediation, traceId].filter(Boolean).join(" ");
+}
+
 export const JOURNEY_COMMANDS: readonly PaletteCommand[] = [
   {
     id: "new-autonomous",

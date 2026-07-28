@@ -10,4 +10,5 @@ export * from "./ProgressEvaluator";
 export * from "./RecoveryPlanner";
 export * from "./RetryPolicy";
 export * from "./RunStateMachine";
+export * from "./RunNextAction";
 export * from "./RunSupervisor";

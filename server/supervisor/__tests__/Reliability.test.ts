@@ -28,6 +28,7 @@ describe("error taxonomy and retry policy", () => {
     expect(classifyFailure({ httpStatus: 401 })).toBe("authentication_missing");
     expect(classifyFailure({ httpStatus: 403 })).toBe("authorization_denied");
     expect(classifyFailure({ message: "policy denied this request" })).toBe("policy_denied");
+    expect(classifyFailure({ code: "action_local_tool_policy_denied" })).toBe("policy_denied");
     expect(classifyFailure({ message: "operator rejected action", source: "operator" })).toBe("operator_rejection");
     expect(classifyFailure({ message: "dependency missing" })).toBe("dependency_missing");
     expect(classifyFailure({ message: "insufficient evidence" })).toBe("evidence_insufficient");

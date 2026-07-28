@@ -1,6 +1,29 @@
-import { parseDecisionMutation, parseDecisions, parseMissionRuntime, parsePlans, parseRunMutation, parseRunPage, parseRunSnapshot } from "../../domain/schemas/runtimeV2";
-import type { DecisionMutationResult, DecisionsSnapshot, GuidedDecisionControl, MissionRuntimeSnapshot, PartialRunCollection, PlansSnapshot, ResumeRunBoundary, RunControlInput, RunPage, RunSnapshot, RuntimeRun } from "../../domain/types/runtimeV2";
-import { fetchOverview } from "./commandOs";
+import {
+  parseAutonomousActivationReceiptDetail,
+  parseAutonomousActivationReceiptHistory,
+  parseDecisionMutation,
+  parseDecisions,
+  parseMissionRuntime,
+  parsePlans,
+  parseRunMutation,
+  parseRunPage,
+  parseRunSnapshot,
+} from "../../domain/schemas/runtimeV2";
+import type {
+  AutonomousActivationReceiptDetail,
+  AutonomousActivationReceiptHistory,
+  DecisionMutationResult,
+  DecisionsSnapshot,
+  GuidedDecisionControl,
+  MissionRuntimeSnapshot,
+  PartialRunCollection,
+  PlansSnapshot,
+  ResumeRunBoundary,
+  RunControlInput,
+  RunPage,
+  RunSnapshot,
+  RuntimeRun,
+} from "../../domain/types/runtimeV2";
 import { apiRequest } from "./client";
 import { queryPath } from "./operations";
 
@@ -8,6 +31,10 @@ export const RUNTIME_ENDPOINTS = {
   mission: (id: string) => `/api/v2/missions/${encodeURIComponent(id)}/runtime`,
   run: (id: string) => `/api/v2/runs/${encodeURIComponent(id)}`,
   runs: "/api/v2/runs",
+  activationReceipts: (runId: string) =>
+    `/api/v2/runs/${encodeURIComponent(runId)}/autonomous-activation-receipts`,
+  activationReceipt: (runId: string, receiptId: string) =>
+    `/api/v2/runs/${encodeURIComponent(runId)}/autonomous-activation-receipts/${encodeURIComponent(receiptId)}`,
   plans: (id: string) => `/api/v2/runs/${encodeURIComponent(id)}/plans`,
   decisions: "/api/v2/decisions",
   decision: (id: string, action: GuidedDecisionControl) => `/api/v2/guided-decisions/${encodeURIComponent(id)}/${action}`,
@@ -20,7 +47,25 @@ function post<T>(path: string, body: unknown, parse: (payload: unknown) => T, ke
 export const runtimeV2Api = {
   mission: (id: string, signal?: AbortSignal): Promise<MissionRuntimeSnapshot> => get(RUNTIME_ENDPOINTS.mission(id), parseMissionRuntime, signal),
   run: (id: string, signal?: AbortSignal): Promise<RunSnapshot> => get(RUNTIME_ENDPOINTS.run(id), parseRunSnapshot, signal),
-  runs: (query: { query?: string; journey?: "autonomous" | "guided"; status?: string; limit?: number }, signal?: AbortSignal): Promise<RunPage> => get(queryPath(RUNTIME_ENDPOINTS.runs, query), parseRunPage, signal),
+  runs: (query: { query?: string; journey?: "autonomous" | "guided"; status?: RuntimeRun["status"]; view?: "operational"; limit?: number; cursor?: string }, signal?: AbortSignal): Promise<RunPage> => get(queryPath(RUNTIME_ENDPOINTS.runs, query), parseRunPage, signal),
+  activationReceipts: (
+    runId: string,
+    limit = 100,
+    signal?: AbortSignal,
+  ): Promise<AutonomousActivationReceiptHistory> => get(
+    queryPath(RUNTIME_ENDPOINTS.activationReceipts(runId), { limit }),
+    parseAutonomousActivationReceiptHistory,
+    signal,
+  ),
+  activationReceipt: (
+    runId: string,
+    receiptId: string,
+    signal?: AbortSignal,
+  ): Promise<AutonomousActivationReceiptDetail> => get(
+    RUNTIME_ENDPOINTS.activationReceipt(runId, receiptId),
+    parseAutonomousActivationReceiptDetail,
+    signal,
+  ),
   plans: (id: string, signal?: AbortSignal): Promise<PlansSnapshot> => get(RUNTIME_ENDPOINTS.plans(id), parsePlans, signal),
   decisions: (query: { status?: string; runId?: string; query?: string; limit?: number }, signal?: AbortSignal): Promise<DecisionsSnapshot> => get(queryPath(RUNTIME_ENDPOINTS.decisions, query), parseDecisions, signal),
   decision: (id: string, action: GuidedDecisionControl, body: unknown, key: string, signal?: AbortSignal): Promise<DecisionMutationResult> => post(RUNTIME_ENDPOINTS.decision(id, action), body, parseDecisionMutation, key, signal),
@@ -57,15 +102,22 @@ export function exactResumeBoundary(snapshot: RunSnapshot): ResumeRunBoundary | 
   };
 }
 
-export async function fetchJourneyRuns(journey: "autonomous" | "guided", signal?: AbortSignal): Promise<PartialRunCollection> {
-  const overview = await fetchOverview(signal);
-  const missions = overview.missions.filter((mission) => mission.journey === journey).slice(0, 30);
-  const settled = await Promise.allSettled(missions.map((mission) => runtimeV2Api.mission(mission.id, signal)));
-  const runs: RuntimeRun[] = [];
-  const failures: PartialRunCollection["failures"] = [];
-  settled.forEach((result, index) => {
-    if (result.status === "fulfilled") runs.push(...result.value.runs);
-    else failures.push({ missionId: missions[index].id, message: result.reason instanceof Error ? result.reason.message : "Mission runtime unavailable" });
-  });
-  return { runs: runs.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)), failures };
+export async function fetchJourneyRuns(
+  journey: "autonomous" | "guided",
+  options: {
+    readonly status?: RuntimeRun["status"];
+    readonly view?: "operational";
+    readonly cursor?: string;
+    readonly limit?: number;
+  } = {},
+  signal?: AbortSignal,
+): Promise<PartialRunCollection> {
+  const page = await runtimeV2Api.runs({
+    journey,
+    ...(options.status ? { status: options.status } : {}),
+    ...(options.view ? { view: options.view } : {}),
+    ...(options.cursor ? { cursor: options.cursor } : {}),
+    limit: options.limit ?? 50,
+  }, signal);
+  return { runs: page.items, failures: [], nextCursor: page.nextCursor };
 }

@@ -12,6 +12,7 @@ import {
 } from "..";
 
 const START = Date.parse("2026-07-17T08:00:00.000Z");
+const PROVIDER_CONFIGURATION_HASH = "7".repeat(64);
 const databases: SqliteDatabase[] = [];
 const temporaryDirectories: string[] = [];
 
@@ -94,6 +95,18 @@ function invalidPlanningInput(): CommandRuntimeError {
   });
 }
 
+function providerPlanner(plan: MissionPlannerPort["plan"]): MissionPlannerPort {
+  return {
+    providerBoundary: {
+      kind: "public_provider",
+      providerId: "xai-grok-oauth",
+      modelId: "grok-4.5",
+      modelConfigurationHash: PROVIDER_CONFIGURATION_HASH,
+    },
+    plan,
+  };
+}
+
 function runtime(input: {
   database: SqliteDatabase;
   planner: MissionPlannerPort;
@@ -135,25 +148,13 @@ describe("MissionRuntimeEngine durable planning retries", () => {
       clock,
       workerId: "planning-retry-first",
       random: () => 0,
-      planner: {
-        async plan() {
+      planner: providerPlanner(
+        async function plan() {
           calls += 1;
-          database.prepare(`
-            INSERT INTO provider_turns (
-              id, run_id, provider, model, status, error_category,
-              latency_ms, started_at, ended_at
-            ) VALUES (?, ?, 'xai-grok-oauth', 'grok-4.5', 'failed', ?, 125, ?, ?)
-          `).run(
-            `provider-turn-first-${calls}`,
-            fixture.runId,
-            calls === 1 ? "rate_limit" : "policy_denied",
-            clock.now().toISOString(),
-            clock.now().toISOString(),
-          );
           if (calls === 1) throw rateLimit(2_000);
           throw policyDenial();
         },
-      },
+      ),
     });
     try {
       await engine.processRunNow(fixture.runId);
@@ -213,9 +214,28 @@ describe("MissionRuntimeEngine durable planning retries", () => {
         preserved_refs_json: string;
       };
       expect(diagnosis).toMatchObject({ category: "rate_limit", retryable: 1, state: "active" });
+      const providerTurn = database.prepare(`
+        SELECT id, provider, model, status, error_category
+        FROM provider_turns
+        WHERE run_id = ?
+        ORDER BY started_at, id
+        LIMIT 1
+      `).get(fixture.runId) as {
+        id: string;
+        provider: string;
+        model: string;
+        status: string;
+        error_category: string;
+      };
+      expect(providerTurn).toMatchObject({
+        provider: "xai-grok-oauth",
+        model: "grok-4.5",
+        status: "failed",
+        error_category: "rate_limit",
+      });
       expect(JSON.parse(diagnosis.retry_history_json)).toEqual([
         expect.objectContaining({
-          providerTurnId: "provider-turn-first-1",
+          providerTurnId: providerTurn.id,
           provider: "xai-grok-oauth",
           model: "grok-4.5",
           providerTurnStatus: "failed",
@@ -265,7 +285,7 @@ describe("MissionRuntimeEngine durable planning retries", () => {
       clock,
       workerId: "planning-retry-response-metadata",
       random: () => 0,
-      planner: { async plan() { throw providerError; } },
+      planner: providerPlanner(async function plan() { throw providerError; }),
     });
     try {
       await engine.processRunNow(fixture.runId);
@@ -309,7 +329,10 @@ describe("MissionRuntimeEngine durable planning retries", () => {
       database,
       clock,
       workerId: "planning-retry-after-bound",
-      planner: { async plan() { calls += 1; throw rateLimit(requestedWaitMs); } },
+      planner: providerPlanner(async function plan() {
+        calls += 1;
+        throw rateLimit(requestedWaitMs);
+      }),
     });
     try {
       await expect(engine.processRunNow(fixture.runId)).rejects.toMatchObject({
@@ -367,7 +390,10 @@ describe("MissionRuntimeEngine durable planning retries", () => {
       clock,
       workerId: "planning-retry-exhaustion",
       random: () => 0.5,
-      planner: { async plan() { calls += 1; throw rateLimit(); } },
+      planner: providerPlanner(async function plan() {
+        calls += 1;
+        throw rateLimit();
+      }),
     });
     try {
       await engine.processRunNow(fixture.runId);
@@ -418,7 +444,7 @@ describe("MissionRuntimeEngine durable planning retries", () => {
       database: firstDatabase,
       clock: firstClock,
       workerId: "planning-retry-before-crash",
-      planner: { async plan() { throw rateLimit(2_000); } },
+      planner: providerPlanner(async function plan() { throw rateLimit(2_000); }),
       crashAfterCommit(point) {
         if (point === "planning_retry_started") throw new Error("simulated process loss");
       },
@@ -440,7 +466,10 @@ describe("MissionRuntimeEngine durable planning retries", () => {
       database: restartedDatabase,
       clock: restartedClock,
       workerId: "planning-retry-after-crash",
-      planner: { async plan() { restartedCalls += 1; throw policyDenial(); } },
+      planner: providerPlanner(async function plan() {
+        restartedCalls += 1;
+        throw policyDenial();
+      }),
     });
     try {
       await restarted.start();
@@ -464,7 +493,10 @@ describe("MissionRuntimeEngine durable planning retries", () => {
       database,
       clock,
       workerId: "planning-retry-denial",
-      planner: { async plan() { calls += 1; throw policyDenial(); } },
+      planner: providerPlanner(async function plan() {
+        calls += 1;
+        throw policyDenial();
+      }),
     });
     try {
       await expect(engine.processRunNow(fixture.runId)).rejects.toMatchObject({
@@ -491,7 +523,10 @@ describe("MissionRuntimeEngine durable planning retries", () => {
       database,
       clock,
       workerId: "planning-invalid-input",
-      planner: { async plan() { calls += 1; throw invalidPlanningInput(); } },
+      planner: providerPlanner(async function plan() {
+        calls += 1;
+        throw invalidPlanningInput();
+      }),
     });
     try {
       await expect(engine.processRunNow(fixture.runId)).rejects.toMatchObject({
@@ -526,7 +561,7 @@ describe("MissionRuntimeEngine durable planning retries", () => {
         clock,
         workerId: `planning-retry-${suffix}`,
         random,
-        planner: { async plan() { throw rateLimit(); } },
+        planner: providerPlanner(async function plan() { throw rateLimit(); }),
       });
       try {
         await engine.processRunNow(fixture.runId);
@@ -555,7 +590,10 @@ describe("MissionRuntimeEngine durable planning retries", () => {
       database,
       clock,
       workerId: "planning-retry-provider-budget",
-      planner: { async plan() { calls += 1; throw rateLimit(); } },
+      planner: providerPlanner(async function plan() {
+        calls += 1;
+        throw rateLimit();
+      }),
     });
     try {
       await expect(engine.processRunNow(fixture.runId)).rejects.toMatchObject({
@@ -598,7 +636,10 @@ describe("MissionRuntimeEngine durable planning retries", () => {
       database,
       clock,
       workerId: "planning-retry-guided",
-      planner: { async plan() { calls += 1; throw rateLimit(); } },
+      planner: providerPlanner(async function plan() {
+        calls += 1;
+        throw rateLimit();
+      }),
     });
     try {
       await expect(engine.processRunNow(fixture.runId)).rejects.toMatchObject({

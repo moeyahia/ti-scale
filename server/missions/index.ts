@@ -48,6 +48,7 @@ export type {
   MissionBulkExportResult,
   MissionBulkItemOutcome,
   MissionExportRecord,
+  MissionEnvironmentClassification,
   MissionPortfolioFilterState,
   MissionRecord,
   MissionSummary,

@@ -41,4 +41,53 @@ export class PlanChangeIdempotencyStore {
       return { response, replayed: false };
     });
   }
+
+  async executeAsync(
+    scope: string,
+    key: string,
+    actor: PlanChangeActor,
+    request: unknown,
+    operation: () => Promise<unknown>,
+  ): Promise<{ readonly response: PlanChangeJson; readonly replayed: boolean }> {
+    const requestHash = digest(JSON.stringify(canonical(request)));
+    const settingKey = `idempotency.plan_changes_v24.${digest(`${scope}\u0000${actor.type}\u0000${actor.id}\u0000${key}`)}`;
+    const replay = (): { readonly response: PlanChangeJson; readonly replayed: true } | undefined => {
+      const row = this.database.prepare(
+        "SELECT value_json FROM settings WHERE key = ?",
+      ).get(settingKey) as { readonly value_json: string } | undefined;
+      if (!row) return undefined;
+      const stored = JSON.parse(row.value_json) as {
+        readonly requestHash?: unknown;
+        readonly response?: unknown;
+      };
+      if (stored.requestHash !== requestHash) {
+        throw new PlanChangeError(
+          "plan_change_idempotency_conflict",
+          "Idempotency-Key was already used for a different plan mutation",
+          "state_conflict",
+          409,
+          "Use the original request body or a new Idempotency-Key.",
+        );
+      }
+      return { response: canonical(stored.response), replayed: true };
+    };
+    const stored = replay();
+    if (stored) return stored;
+    const response = canonical(await operation());
+    return inImmediateTransaction(this.database, () => {
+      const raced = replay();
+      if (raced) return raced;
+      this.database.prepare(`
+        INSERT INTO settings (
+          key, value_json, sensitivity, version, updated_by, updated_at
+        ) VALUES (?, ?, 'restricted', 1, ?, ?)
+      `).run(
+        settingKey,
+        JSON.stringify({ requestHash, response }),
+        actor.id,
+        this.clock().toISOString(),
+      );
+      return { response, replayed: false };
+    });
+  }
 }

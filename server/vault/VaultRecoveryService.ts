@@ -4,6 +4,10 @@ import type { Dirent } from "node:fs";
 import type { MemoryRepository } from "../memory/MemoryRepository";
 import { OBSIDIAN_V2_4_VAULT_FOLDERS } from "./ObsidianMarkdown";
 import {
+  OPERATOR_PROFILE_VAULT_FOLDER,
+  vaultScopeIncludesOperatorProfile,
+} from "./OperatorProfileVaultProjection";
+import {
   VaultManagedNoteInspectionError,
   type ObsidianVaultBridge,
 } from "./ObsidianVaultBridge";
@@ -76,12 +80,12 @@ function issueMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : "Managed note could not be processed";
   if (/symbolic link|symlink/iu.test(message)) return "Managed path is a symbolic link and was not followed or modified.";
   if (/reusable-memory|credential|secret|private key|token/iu.test(message)) {
-    return "Managed note failed reusable-memory safety validation; an exact-byte guarded private quarantine copy was retained, its recovery metadata is content-free, and the operator file was left in place.";
+    return "Managed note failed reusable-memory safety validation and was moved into private quarantine; no duplicate or restorable backup was created, and recovery metadata is content-free.";
   }
   if (error instanceof VaultDestinationChangedError) {
     return "Managed note changed during recovery. It was left untouched and must be inspected again before quarantine can be retried.";
   }
-  return "Managed note was malformed or inconsistent; an exact-byte guarded private quarantine copy was retained, its recovery metadata is content-free, and the operator file was left in place.";
+  return "Managed note was malformed or inconsistent and was moved into private quarantine; no duplicate or restorable backup was created, and recovery metadata is content-free.";
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -98,6 +102,7 @@ function discoverManagedMarkdown(
   policy: VaultPathPolicy,
   vaultRoot: string,
   maximum: number,
+  managedFolders: readonly string[] = OBSIDIAN_V2_4_VAULT_FOLDERS,
 ): DiscoveredFiles {
   const files: string[] = [];
   const unsafePaths = new Set<string>();
@@ -139,7 +144,7 @@ function discoverManagedMarkdown(
       else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) files.push(relativePath);
     }
   };
-  for (const folder of OBSIDIAN_V2_4_VAULT_FOLDERS) {
+  for (const folder of managedFolders) {
     if (folder === "Attachments") continue;
     visit(folder);
     if (truncated) break;
@@ -189,15 +194,18 @@ export class VaultRecoveryService {
     const startedAt = this.#clock().toISOString();
     const startMs = Date.parse(startedAt);
     this.#bridge.assertVaultSyncAllowed();
-    const connectionSnapshot = this.#repository.requireConnectionVersion(
+    this.#repository.requireConnectionVersion(
       input.connectionId,
       input.expectedUpdatedAt,
     );
+    // Enforce lifecycle state before the filesystem round trip below. That
+    // round trip writes, reads, renames, and deletes one temporary health file,
+    // so even that bounded proof is forbidden after metadata-only disconnect.
+    const connection = this.#bridge.requireConnection(input.connectionId);
     // Fail closed when a configured Vault is offline. Recovery must never
     // recreate a disappeared path and report it as healthy.
-    const vaultRoot = this.#paths.resolveExistingVault(connectionSnapshot.vaultPath);
+    const vaultRoot = this.#paths.resolveExistingVault(connection.vaultPath);
     const health = this.#bridge.verifyExistingVaultPath(vaultRoot);
-    const connection = this.#bridge.requireExistingConnection(input.connectionId);
     const intentRecovery = this.#bridge.recoverQuarantineIntents(input.connectionId);
     const states = this.#repository.listSyncStates(input.connectionId, this.#maximumManagedNotes + 1);
     const boundedStates = states.slice(0, this.#maximumManagedNotes);
@@ -208,13 +216,17 @@ export class VaultRecoveryService {
       this.#paths,
       vaultRoot,
       this.#maximumManagedNotes,
+      vaultScopeIncludesOperatorProfile(connection.syncScope)
+        ? [...OBSIDIAN_V2_4_VAULT_FOLDERS, OPERATOR_PROFILE_VAULT_FOLDER]
+        : OBSIDIAN_V2_4_VAULT_FOLDERS,
     );
     const issues: VaultRecoveryIssue[] = [...discovered.issues];
     const counts = emptyCounts();
+    counts.quarantined += intentRecovery.recovered;
     counts.errors += discovered.unsafePaths.size + discovered.errorCount + intentRecovery.unresolved;
     if (intentRecovery.unresolved > 0) issues.push({
       category: "quarantine_recovery",
-      message: `${intentRecovery.unresolved} durable quarantine intent(s) could not be reconciled. The source files remain untouched; verify the generated quarantine copies and retry.`,
+      message: `${intentRecovery.unresolved} durable quarantine move(s) could not be reconciled. Verify the quarantined note and retry.`,
     });
     for (const relativePath of discovered.unsafePaths) {
       this.#repository.recordPathError(

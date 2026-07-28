@@ -10,35 +10,72 @@ import {
 const E2E_ROOT = resolve(import.meta.dir, "../../e2e");
 const EXPECTED_BROWSER_SPECIFICATIONS = [
   "accessibility-axe.spec.ts",
+  "agent-model-settings.spec.ts",
   "artifact-delivery.spec.ts",
   "artifact-intelligence.spec.ts",
+  "attack-knowledge-promotion.spec.ts",
   "auth-session.spec.ts",
   "autonomous-branch-contract.spec.ts",
+  "autonomous-intake-agent-model-assignments.spec.ts",
+  "autonomous-intake-context.spec.ts",
+  "autonomous-intake-contract-normalization.spec.ts",
+  "autonomous-intake-launch.spec.ts",
+  "autonomous-intake-readiness.spec.ts",
+  "autonomous-intake-scope-outcome-navigation.spec.ts",
+  "autonomous-intake-team-readiness.spec.ts",
+  "boot-sequence.spec.ts",
   "brain-control.spec.ts",
   "brain-graph.spec.ts",
   "brain-home-inbox.spec.ts",
   "brain-node-lifecycle.spec.ts",
   "brain-node-vault.spec.ts",
+  "brain-operational-hazard.spec.ts",
+  "brain-readiness-isolation.spec.ts",
+  "brain-source-custody.spec.ts",
+  "brain-vault-attack-preset.spec.ts",
+  "brain-vault-disconnect.spec.ts",
+  "brain-vault-navigation.spec.ts",
   "brain-vault.spec.ts",
   "browser-audit-canary.spec.ts",
+  "command-palette-autonomous-search.spec.ts",
   "command-palette.spec.ts",
   "cve-applicability.spec.ts",
   "decisions-intelligence.spec.ts",
   "direct-plan-editor.spec.ts",
+  "early-auth-startup.spec.ts",
   "failure-diagnosis.spec.ts",
+  "guided-provider-free-capabilities.spec.ts",
   "interaction-manifest.spec.ts",
   "light-technology-theme.spec.ts",
+  "live-readonly-3132.spec.ts",
   "manifest-coverage-audit.spec.ts",
+  "mechanical-assembly.spec.ts",
+  "mechanical-route-transition.spec.ts",
+  "meshy-webgl.spec.ts",
   "mission-intake.spec.ts",
   "mission-portfolio.spec.ts",
+  "model-candidate-review.spec.ts",
+  "motion-lab-assembly.spec.ts",
+  "motion-lab.spec.ts",
   "namespace-isolation.spec.ts",
+  "openrouter-connection.spec.ts",
   "operational-lists.spec.ts",
   "operational-truth.spec.ts",
+  "operator-preferences.spec.ts",
+  "overview-journey-readiness.spec.ts",
+  "overview-particle-core.spec.ts",
+  "particle-core-review.spec.ts",
+  "particle-module-transition.spec.ts",
+  "performance-web-vitals.spec.ts",
   "plan-changes.spec.ts",
+  "report-generation.spec.ts",
+  "research-lab.spec.ts",
   "route-smoke.spec.ts",
   "run-intervention-recovery.spec.ts",
   "run-metrics.spec.ts",
+  "static-csp.spec.ts",
   "system.spec.ts",
+  "titanium-chassis.spec.ts",
   "zoom-accessibility.spec.ts",
 ] as const;
 
@@ -367,6 +404,17 @@ describe("automatic E2E browser-audit boundary", () => {
     const safeSource = "await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload()); await audit.withExpectedHistoryTraversal(page, () => page.goBack()); await audit.request(request, { method: 'GET', url: '/api/v2/health' });";
     const safeFile = ts.createSourceFile("safe.spec.ts", safeSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
     expect(auditBoundaryViolations("safe.spec.ts", safeFile)).toEqual([]);
+  });
+
+  test("permits only the controller-owned early page close used before a test dependency stops", () => {
+    const sourceFile = ts.createSourceFile(
+      "audited-dependency-shutdown.spec.ts",
+      "await browserAudit.closePageBeforeDependencyShutdown(page);",
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    expect(auditBoundaryViolations("audited-dependency-shutdown.spec.ts", sourceFile)).toEqual([]);
   });
 
   test("strict profiles are the default and relaxation requires explicit degraded mode", () => {

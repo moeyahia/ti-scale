@@ -1,0 +1,17 @@
+{
+  "pluginId": "brain-atlas",
+  "version": "0.2.1",
+  "repository": "https://github.com/colorpulse6/brain-atlas",
+  "commit": "477302c6a220d3e8ae00e3192b00cfd7508f25fd",
+  "license": "MIT",
+  "minimumObsidianVersion": "1.5.0",
+  "assets": {
+    "main.js": "bab94f5d9367724a8ae43ac120c03b25917267e2b2193d17765347a87ae37164",
+    "manifest.json": "ae1f454cd8ca6cb757114e8bfd8ba4bdd21be385f7b1adcb586f9b1cb043cdea",
+    "styles.css": "ab63af3bacb08a58159c9b0a91a7db3e16facad205eb94ff6b1b712b71908543"
+  },
+  "licenseFile": {
+    "name": "LICENSE",
+    "sha256": "cf42c8a7e34b667b96c7749591a5eeeb18a199aca0820b2fbca0b1de193aa017"
+  }
+}

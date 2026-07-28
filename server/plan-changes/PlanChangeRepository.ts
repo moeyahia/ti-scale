@@ -6,6 +6,9 @@ import type {
   PlanChangeDependencyImpact,
   PlanChangeDiffEntry,
   PlanChangeInflightImpact,
+  PlanChangeInflightResolution,
+  PlanChangeInflightResolutionMode,
+  PlanChangeInflightResolutionStatus,
   PlanChangePolicyValidation,
   PlanChangeReadinessImpact,
   PlanChangeRequest,
@@ -33,6 +36,34 @@ interface PlanChangeRow {
   readonly status: PlanChangeStatus;
   readonly result_plan_id: string | null;
   readonly created_at: string;
+  readonly resolved_at: string | null;
+  readonly version: number;
+}
+
+interface PlanChangeInflightResolutionRow {
+  readonly id: string;
+  readonly plan_change_request_id: string;
+  readonly mission_id: string;
+  readonly run_id: string;
+  readonly base_plan_id: string;
+  readonly mode: PlanChangeInflightResolutionMode;
+  readonly status: PlanChangeInflightResolutionStatus;
+  readonly affected_step_ids_json: string;
+  readonly affected_assignment_ids_json: string;
+  readonly affected_action_ids_json: string;
+  readonly affected_attack_attempt_ids_json: string;
+  readonly affected_decision_ids_json: string;
+  readonly source_checkpoint_id: string;
+  readonly source_checkpoint_state_hash: string;
+  readonly source_checkpoint_event_sequence: number;
+  readonly fresh_request_id: string | null;
+  readonly requested_by: string;
+  readonly reason: string;
+  readonly settle_deadline_at: string;
+  readonly last_heartbeat_at: string;
+  readonly failure_reason: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
   readonly resolved_at: string | null;
   readonly version: number;
 }
@@ -82,6 +113,47 @@ function map(row: PlanChangeRow): PlanChangeRequest {
   };
 }
 
+function mapResolution(
+  row: PlanChangeInflightResolutionRow,
+): PlanChangeInflightResolution {
+  return {
+    id: row.id,
+    planChangeRequestId: row.plan_change_request_id,
+    missionId: row.mission_id,
+    runId: row.run_id,
+    basePlanId: row.base_plan_id,
+    mode: row.mode,
+    status: row.status,
+    affectedStepIds: json(row.affected_step_ids_json, "affected resolution steps"),
+    affectedAssignmentIds: json(
+      row.affected_assignment_ids_json,
+      "affected resolution assignments",
+    ),
+    affectedActionIds: json(row.affected_action_ids_json, "affected resolution actions"),
+    affectedAttackAttemptIds: json(
+      row.affected_attack_attempt_ids_json,
+      "affected resolution attack attempts",
+    ),
+    affectedDecisionIds: json(
+      row.affected_decision_ids_json,
+      "affected resolution Guided decisions",
+    ),
+    sourceCheckpointId: row.source_checkpoint_id,
+    sourceCheckpointStateHash: row.source_checkpoint_state_hash,
+    sourceCheckpointEventSequence: row.source_checkpoint_event_sequence,
+    freshRequestId: row.fresh_request_id,
+    requestedBy: row.requested_by,
+    reason: row.reason,
+    settleDeadlineAt: row.settle_deadline_at,
+    lastHeartbeatAt: row.last_heartbeat_at,
+    failureReason: row.failure_reason,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    resolvedAt: row.resolved_at,
+    version: row.version,
+  };
+}
+
 /** Prepared-statement repository over the migration-010 plan-change tables. */
 export class PlanChangeRepository {
   constructor(
@@ -112,6 +184,159 @@ export class PlanChangeRepository {
       WHERE pcr.run_id = ?
       ORDER BY pcr.created_at DESC, pcr.id DESC
     `).all(runId) as PlanChangeRow[]).map(map);
+  }
+
+  getInflightResolution(
+    requestId: string,
+  ): PlanChangeInflightResolution | undefined {
+    const row = this.database.prepare(`
+      SELECT * FROM plan_change_inflight_resolutions
+      WHERE plan_change_request_id = ?
+    `).get(requestId) as PlanChangeInflightResolutionRow | undefined;
+    return row ? mapResolution(row) : undefined;
+  }
+
+  createInflightResolution(input: {
+    readonly requestId: string;
+    readonly missionId: string;
+    readonly runId: string;
+    readonly basePlanId: string;
+    readonly mode: PlanChangeInflightResolutionMode;
+    readonly status: PlanChangeInflightResolutionStatus;
+    readonly affectedStepIds: readonly string[];
+    readonly affectedAssignmentIds: readonly string[];
+    readonly affectedActionIds: readonly string[];
+    readonly affectedAttackAttemptIds: readonly string[];
+    readonly affectedDecisionIds: readonly string[];
+    readonly sourceCheckpointId: string;
+    readonly sourceCheckpointStateHash: string;
+    readonly sourceCheckpointEventSequence: number;
+    readonly requestedBy: string;
+    readonly reason: string;
+    readonly settleDeadlineAt: string;
+    readonly now: string;
+  }): PlanChangeInflightResolution {
+    const id = this.nextId("plan_change_resolution");
+    this.database.prepare(`
+      INSERT INTO plan_change_inflight_resolutions (
+        id, plan_change_request_id, mission_id, run_id, base_plan_id,
+        mode, status, affected_step_ids_json, affected_assignment_ids_json,
+        affected_action_ids_json, affected_attack_attempt_ids_json,
+        affected_decision_ids_json, source_checkpoint_id,
+        source_checkpoint_state_hash, source_checkpoint_event_sequence,
+        requested_by, reason, settle_deadline_at, last_heartbeat_at,
+        created_at, updated_at, version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `).run(
+      id,
+      input.requestId,
+      input.missionId,
+      input.runId,
+      input.basePlanId,
+      input.mode,
+      input.status,
+      JSON.stringify(input.affectedStepIds),
+      JSON.stringify(input.affectedAssignmentIds),
+      JSON.stringify(input.affectedActionIds),
+      JSON.stringify(input.affectedAttackAttemptIds),
+      JSON.stringify(input.affectedDecisionIds),
+      input.sourceCheckpointId,
+      input.sourceCheckpointStateHash,
+      input.sourceCheckpointEventSequence,
+      input.requestedBy,
+      input.reason,
+      input.settleDeadlineAt,
+      input.now,
+      input.now,
+      input.now,
+    );
+    return this.getInflightResolution(input.requestId)!;
+  }
+
+  heartbeatInflightResolution(input: {
+    readonly requestId: string;
+    readonly expectedVersion: number;
+    readonly now: string;
+  }): PlanChangeInflightResolution {
+    const result = this.database.prepare(`
+      UPDATE plan_change_inflight_resolutions
+      SET last_heartbeat_at = ?, updated_at = ?, version = version + 1
+      WHERE plan_change_request_id = ? AND version = ?
+        AND status = 'waiting_for_terminal_work'
+    `).run(input.now, input.now, input.requestId, input.expectedVersion);
+    if (result.changes !== 1) {
+      throw new PlanChangeError(
+        "plan_change_resolution_version_conflict",
+        "In-flight resolution changed before its heartbeat",
+        "state_conflict",
+        409,
+        "Reload the amendment boundary and its current settlement state.",
+      );
+    }
+    return this.getInflightResolution(input.requestId)!;
+  }
+
+  failInflightResolution(input: {
+    readonly requestId: string;
+    readonly expectedVersion: number;
+    readonly failureReason: string;
+    readonly now: string;
+  }): PlanChangeInflightResolution {
+    const result = this.database.prepare(`
+      UPDATE plan_change_inflight_resolutions
+      SET status = 'failed', failure_reason = ?, resolved_at = ?,
+        updated_at = ?, last_heartbeat_at = ?, version = version + 1
+      WHERE plan_change_request_id = ? AND version = ?
+        AND status = 'waiting_for_terminal_work'
+    `).run(
+      input.failureReason,
+      input.now,
+      input.now,
+      input.now,
+      input.requestId,
+      input.expectedVersion,
+    );
+    if (result.changes !== 1) {
+      throw new PlanChangeError(
+        "plan_change_resolution_version_conflict",
+        "In-flight resolution changed before timeout reconciliation",
+        "state_conflict",
+        409,
+        "Reload the amendment boundary and inspect its current state.",
+      );
+    }
+    return this.getInflightResolution(input.requestId)!;
+  }
+
+  resolveInflightResolution(input: {
+    readonly requestId: string;
+    readonly expectedVersion: number;
+    readonly freshRequestId: string;
+    readonly now: string;
+  }): PlanChangeInflightResolution {
+    const result = this.database.prepare(`
+      UPDATE plan_change_inflight_resolutions
+      SET status = 'ready_for_review', fresh_request_id = ?,
+        resolved_at = ?, updated_at = ?, version = version + 1
+      WHERE plan_change_request_id = ? AND version = ?
+        AND status = 'waiting_for_terminal_work'
+    `).run(
+      input.freshRequestId,
+      input.now,
+      input.now,
+      input.requestId,
+      input.expectedVersion,
+    );
+    if (result.changes !== 1) {
+      throw new PlanChangeError(
+        "plan_change_resolution_version_conflict",
+        "In-flight resolution changed before finalization",
+        "state_conflict",
+        409,
+        "Reload the amendment boundary before completing it.",
+      );
+    }
+    return this.getInflightResolution(input.requestId)!;
   }
 
   create(input: {
@@ -172,7 +397,7 @@ export class PlanChangeRepository {
   resolve(input: {
     readonly requestId: string;
     readonly expectedVersion: number;
-    readonly status: "rejected" | "applied";
+    readonly status: "rejected" | "applied" | "cancelled";
     readonly resultPlanId?: string;
     readonly resolvedAt: string;
   }): PlanChangeRequest {

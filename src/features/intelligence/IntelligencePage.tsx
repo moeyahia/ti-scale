@@ -1,9 +1,11 @@
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { AppLink } from "../../app/router/navigation";
 import { operationsApi } from "../../data/api/operations";
 import { useQuery } from "../../data/cache/QueryProvider";
 import type { ArtifactRecord, EvidenceRecord, FindingRecord } from "../../domain/types/operations";
 import { Button, Card, ErrorPanel, LoadingPanel, PageHeader, StatusPill } from "../../design-system/components/Primitives";
+import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
+import { findingReviewOptions } from "../../lib/completionReview";
 import { CursorControls, FilterForm, formatTime, JsonDetails, KeyValueGrid, QueryBoundary, SelectFilter, StreamState, SurfaceTabs, useActionState, useUrlFilters } from "../runs/OperationalSurface";
 
 type IntelligenceView = "evidence" | "findings" | "artifacts";
@@ -122,7 +124,7 @@ function EvidenceDetail({ item, loading, error, onRetry }: { item?: EvidenceReco
       { label: "Artifact", value: item.artifact
         ? <AppLink href={artifactDetailHref(item.artifact.id)}>{item.artifact.artifactType}</AppLink>
         : <span className="os-muted">{item.artifactId
-          ? "Referenced artifact is unavailable or outside the current scope."
+          ? "Referenced artifact is unavailable, deleted, or outside the current scope. Its stable ID is retained for reconciliation, but no link was generated."
           : "No artifact relation was retained."}</span> },
     ]} />
     <h3>Chain of custody</h3>{item.chainOfCustody?.length ? <ol className="os-timeline">{item.chainOfCustody.map((event) => <li key={event.id}><strong>{event.eventType}</strong><span>{event.actor} · {formatTime(event.occurredAt)}</span><JsonDetails value={event.details} /></li>)}</ol> : <p className="os-muted">No custody events returned.</p>}<JsonDetails label="Provenance" value={item.provenance} /></Card>;
@@ -133,22 +135,62 @@ function FindingView({ selectedId }: { selectedId?: string }) {
   const list = useQuery(`findings:${filters.key}`, (signal) => operationsApi.findings(filters.values, signal));
   const detail = useQuery(`finding-detail:${selectedId ?? "none"}`, (signal) => selectedId ? operationsApi.finding(selectedId, signal) : Promise.resolve(undefined), { staleTime: 0 });
   return <><FilterForm filters={filters}><SelectFilter filters={filters} name="severity" label="Severity" options={["informational", "low", "medium", "high", "critical"].map((value) => ({ value, label: value }))} /><SelectFilter filters={filters} name="reviewStatus" label="Review" options={["draft", "under_review", "verified", "rejected", "accepted_risk"].map((value) => ({ value, label: value }))} /></FilterForm>
-    <IntelligenceLayout list={<QueryBoundary data={list.data?.items} error={list.error} isLoading={list.isLoading} onRetry={list.refresh} emptyTitle="No findings recorded" emptyDescription="Evidence-linked conclusions will appear here for review.">{(items) => <><div className="os-table-wrap"><table className="os-data-table"><thead><tr><th>Finding</th><th>Severity</th><th>Evidence</th><th>Review</th><th>Updated</th></tr></thead><tbody>{items.map((item) => <tr key={item.id} className={item.id === selectedId ? "is-selected" : undefined}><th scope="row" className="os-finding-link-stack"><AppLink className="os-finding-primary-link" href={`/intelligence/findings/${encodeURIComponent(item.id)}`}>{item.title}</AppLink><small className="os-finding-secondary-link"><MissionRelation mission={item.mission} /></small></th><td><StatusPill status={item.severity} /></td><td>{item.verifiedEvidenceCount}/{item.evidenceCount} verified</td><td><StatusPill status={item.reviewStatus} /></td><td>{formatTime(item.updatedAt)}</td></tr>)}</tbody></table></div><CursorControls cursor={filters.values.cursor} nextCursor={list.data?.nextCursor ?? null} onChange={(cursor) => filters.set({ cursor }, { resetCursor: false, replace: false })} /></>}</QueryBoundary>} detail={<FindingDetail item={detail.data} loading={detail.isLoading && Boolean(selectedId)} error={detail.error} onRetry={detail.refresh} onChanged={() => { detail.refresh(); list.refresh(); }} />} />
+    <IntelligenceLayout list={<QueryBoundary data={list.data?.items} error={list.error} isLoading={list.isLoading} onRetry={list.refresh} emptyTitle="No findings recorded" emptyDescription="Evidence-linked conclusions will appear here for review.">{(items) => <><div className="os-table-wrap"><table className="os-data-table"><thead><tr><th>Finding</th><th>Severity</th><th>Evidence</th><th>Review</th><th>Updated</th></tr></thead><tbody>{items.map((item) => <tr key={item.id} className={item.id === selectedId ? "is-selected" : undefined}><th scope="row" className="os-finding-link-stack"><AppLink className="os-finding-primary-link" href={`/intelligence/findings/${encodeURIComponent(item.id)}`}>{item.title}</AppLink><small className="os-finding-secondary-link"><MissionRelation mission={item.mission} /></small></th><td><StatusPill status={item.severity} /></td><td>{item.verifiedEvidenceCount}/{item.evidenceCount} verified</td><td><StatusPill status={item.reviewStatus} /></td><td>{formatTime(item.updatedAt)}</td></tr>)}</tbody></table></div><CursorControls cursor={filters.values.cursor} nextCursor={list.data?.nextCursor ?? null} onChange={(cursor) => filters.set({ cursor }, { resetCursor: false, replace: false })} /></>}</QueryBoundary>} detail={<FindingDetail key={selectedId ?? "none"} item={detail.data} loading={detail.isLoading && Boolean(selectedId)} error={detail.error} onRetry={detail.refresh} onChanged={async () => { await Promise.all([detail.reconcile(), list.reconcile()]); }} />} />
   </>;
 }
 
-function FindingDetail({ item, loading, error, onRetry, onChanged }: { item?: FindingRecord; loading: boolean; error?: Error; onRetry: () => void; onChanged: () => void }) {
-  const [status, setStatus] = useState("under_review"); const [reason, setReason] = useState(""); const [override, setOverride] = useState(false); const action = useActionState();
+type FindingReviewStatus = "under_review" | "verified" | "rejected" | "accepted_risk";
+
+function FindingDetail({ item, loading, error, onRetry, onChanged }: { item?: FindingRecord; loading: boolean; error?: Error; onRetry: () => void; onChanged: () => Promise<void> }) {
   if (loading) return <LoadingPanel label="Loading finding evidence" />; if (error && !item) return <ErrorPanel error={error} onRetry={onRetry} />; if (!item) return <Card><p className="os-muted">Select a finding to inspect impact and linked evidence.</p></Card>;
-  const submit = (event: FormEvent) => { event.preventDefault(); void action.run(() => operationsApi.reviewFinding(item.id, { expectedVersion: item.version, status, reason, operatorOverride: override }, `finding-${crypto.randomUUID()}`).then(onChanged), "Finding review recorded."); };
-  return <Card><div className="os-card-heading"><h2>{item.title}</h2><StatusPill status={item.severity} /></div><p>{item.description}</p><h3>Impact</h3><p>{item.impact}</p>{item.remediation && <><h3>Remediation</h3><p>{item.remediation}</p></>}<KeyValueGrid items={[{ label: "Affected scope", value: item.affectedScope }, { label: "Confidence", value: item.confidence === null ? "Not scored" : `${Math.round(item.confidence * 100)}%` }, { label: "Evidence", value: `${item.verifiedEvidenceCount}/${item.evidenceCount} verified` }, { label: "Version", value: item.version }]} />
+  return <Card><div className="os-card-heading"><h2>{item.title}</h2><StatusPill status={item.severity} /></div><p>{item.description}</p><h3>Impact</h3><p>{item.impact}</p>{item.remediation && <><h3>Remediation</h3><p>{item.remediation}</p></>}<KeyValueGrid items={[{ label: "Affected scope", value: item.affectedScope }, { label: "Confidence", value: item.confidence === null ? "Not scored" : `${Math.round(item.confidence * 100)}%` }, { label: "Evidence", value: `${item.verifiedEvidenceCount}/${item.evidenceCount} verified` }, { label: "Review state", value: <StatusPill status={item.reviewStatus} /> }, { label: "Version", value: item.version }]} />
     <h3>Canonical relationships</h3><KeyValueGrid items={[
       { label: "Mission", value: <MissionRelation mission={item.mission} /> },
       { label: "Run", value: <RunRelation missionId={item.mission.id} rawRunId={item.runId} run={item.run} /> },
     ]} />
     {item.evidence?.length ? <ul className="os-compact-list">{item.evidence.map((evidence) => <li key={evidence.id}><AppLink href={evidenceDetailHref(evidence.id)}>{evidence.summary}</AppLink><StatusPill status={evidence.verificationState} /></li>)}</ul> : <p className="os-muted">No evidence links were returned. Verification remains evidence-gated.</p>}
-    <form className="os-review-form" onSubmit={submit}><h3>Record review decision</h3><label><span>Status</span><select value={status} onChange={(event) => setStatus(event.target.value)}>{["under_review", "verified", "rejected", "accepted_risk"].map((value) => <option key={value}>{value}</option>)}</select></label><label><span>Reason</span><textarea required value={reason} onChange={(event) => setReason(event.target.value)} /></label><label className="os-check"><input type="checkbox" checked={override} onChange={(event) => setOverride(event.target.checked)} /><span>Explicit evidence-gate override (audited)</span></label>{action.error && <ErrorPanel error={action.error} />}{action.message && <p role="status" className="os-success-note">{action.message}</p>}<Button disabled={action.pending || reason.trim().length < 3}>{action.pending ? "Recording…" : "Record decision"}</Button></form>
+    <FindingReviewForm item={item} onChanged={onChanged} />
   </Card>;
+}
+
+function FindingReviewForm({ item, onChanged }: { item: FindingRecord; onChanged: () => Promise<void> }) {
+  const options = findingReviewOptions(item.reviewStatus);
+  const [status, setStatus] = useState<FindingReviewStatus>(options[0] ?? "under_review");
+  const [reason, setReason] = useState("");
+  const [override, setOverride] = useState(false);
+  const action = useActionState();
+  useEffect(() => {
+    setStatus(findingReviewOptions(item.reviewStatus)[0] ?? "under_review");
+    setReason("");
+    setOverride(false);
+  }, [item.id, item.reviewStatus, item.version]);
+  if (options.length === 0) return <p className="os-muted">No in-place review transition is available from {item.reviewStatus.replaceAll("_", " ")}.</p>;
+  const trimmedReason = reason.trim();
+  const overrideRequired = status === "verified" && item.verifiedEvidenceCount === 0;
+  const minimumReasonLength = overrideRequired ? 12 : 1;
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (action.pending || trimmedReason.length < minimumReasonLength || (overrideRequired && !override)) return;
+    void action.run(async () => {
+      await operationsApi.reviewFinding(item.id, {
+        expectedVersion: item.version,
+        status,
+        reason: trimmedReason,
+        ...(status === "verified" ? { operatorOverride: overrideRequired && override } : {}),
+      }, `finding-${crypto.randomUUID()}`);
+      await onChanged();
+    }, "Finding review recorded.");
+  };
+  return <form className="os-review-form" aria-label={`Review finding ${item.title}`} onSubmit={submit}>
+    <h3>Record review decision</h3>
+    <p className="os-muted">Current state: <strong>{item.reviewStatus.replaceAll("_", " ")}</strong>. Only valid next states are available.</p>
+    <label><span>Status</span><TitaniumSelect value={status} onChange={(event) => { setStatus(event.target.value as FindingReviewStatus); setOverride(false); }}>{options.map((value) => <option key={value} value={value}>{value}</option>)}</TitaniumSelect></label>
+    <label><span>Reason</span><textarea aria-label="Reason" required minLength={minimumReasonLength} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+    {overrideRequired && <label className="os-check"><input type="checkbox" aria-label="Explicit evidence-gate override (audited)" checked={override} onChange={(event) => setOverride(event.target.checked)} /><span><strong>Explicit evidence-gate override (audited)</strong><small>A specific reason of at least 12 characters is required. The server also verifies that your identity has override permission.</small></span></label>}
+    {action.error && <ErrorPanel title="Finding review was not recorded" error={action.error} />}
+    {action.message && <p role="status" className="os-success-note">{action.message}</p>}
+    <Button disabled={action.pending || trimmedReason.length < minimumReasonLength || (overrideRequired && !override)}>{action.pending ? "Recording…" : "Record decision"}</Button>
+  </form>;
 }
 
 function ArtifactView({ selectedId }: { selectedId?: string }) {
@@ -184,7 +226,7 @@ export function ArtifactDetail({ item, loading, error, onRetry }: { item?: Artif
         : "Metadata only";
   return <Card>
     <div className="os-card-heading"><h2>{item.artifactType}</h2><StatusPill status={supportsDownload ? "verified_delivery" : item.delivery?.state ?? "metadata_only"}>{deliveryLabel}</StatusPill></div>
-    <KeyValueGrid items={[{ label: "Mission", value: <MissionRelation mission={item.mission} /> }, { label: "Run", value: <RunRelation missionId={item.mission.id} rawRunId={item.runId} run={item.run} /> }, { label: "Media type", value: item.mediaType }, { label: "Byte size", value: item.byteSize.toLocaleString() }, { label: "Storage scheme", value: item.storage.scheme }, { label: "Hash", value: <span className="os-mono">{item.contentHash}</span> }]} />
+    <KeyValueGrid items={[{ label: "Artifact ID", value: <span className="os-mono">{item.id}</span> }, { label: "Mission", value: <MissionRelation mission={item.mission} /> }, { label: "Run", value: <RunRelation missionId={item.mission.id} rawRunId={item.runId} run={item.run} /> }, { label: "Media type", value: item.mediaType }, { label: "Byte size", value: item.byteSize.toLocaleString() }, { label: "Storage scheme", value: item.storage.scheme }, { label: "Hash", value: <span className="os-mono">{item.contentHash}</span> }]} />
     <h3>Related evidence</h3>
     {item.evidence?.length ? <ul className="os-compact-list">{item.evidence.map((evidence) => <li key={evidence.id}><AppLink href={evidenceDetailHref(evidence.id)}>{evidence.summary}</AppLink><StatusPill status={evidence.verificationState} /></li>)}</ul> : <p className="os-muted">No evidence records reference this artifact.</p>}
     <JsonDetails label="Artifact metadata" value={item.metadata} />

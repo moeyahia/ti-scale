@@ -1,9 +1,9 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": ["node", "@playwright/test"],
+    "types": ["node", "bun", "@playwright/test"],
     "noEmit": true
   },
-  "include": ["playwright.config.ts", "tests/e2e", "tests/page-models"],
+  "include": ["playwright*.config.ts", "tests/e2e", "tests/page-models"],
   "exclude": ["server", "dist"]
 }

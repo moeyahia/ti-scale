@@ -14,6 +14,9 @@ export interface OperationalListsFixture {
   readonly missionId: string;
   readonly runId: string;
   readonly missionTitle: string;
+  readonly autonomousMissionId: string;
+  readonly autonomousRunId: string;
+  readonly autonomousMissionTitle: string;
   readonly agentIds: readonly string[];
   readonly agentNames: readonly string[];
   readonly traceIds: readonly string[];
@@ -41,6 +44,9 @@ export function createOperationalListsFixture(instanceId: string): OperationalLi
   const missionId = `mission-${token}`;
   const runId = `run-${token}`;
   const missionTitle = `${token} canonical operational records`;
+  const autonomousMissionId = `mission-${token}-autonomous`;
+  const autonomousRunId = `run-${token}-autonomous`;
+  const autonomousMissionTitle = `${token} autonomous operation`;
   const agentIds = Array.from({ length: AGENT_COUNT }, (_, index) => `agent-${token}-${String(index).padStart(2, "0")}`);
   const agentNames = Array.from({ length: AGENT_COUNT }, (_, index) => `${token} agent ${String(index).padStart(2, "0")}`);
   const traceIds = Array.from({ length: TRACE_COUNT }, (_, index) => `trace-${token}-${String(index).padStart(2, "0")}`);
@@ -58,8 +64,11 @@ export function createOperationalListsFixture(instanceId: string): OperationalLi
       // only this fixture's bounded graph in foreign-key-safe order.
       database.prepare("DELETE FROM artifacts WHERE id LIKE ?").run(`artifact-${token}-%`);
       database.prepare("DELETE FROM events WHERE run_id = ?").run(runId);
+      database.prepare("DELETE FROM events WHERE run_id = ?").run(autonomousRunId);
       database.prepare("DELETE FROM runs WHERE id = ?").run(runId);
+      database.prepare("DELETE FROM runs WHERE id = ?").run(autonomousRunId);
       database.prepare("DELETE FROM missions WHERE id = ?").run(missionId);
+      database.prepare("DELETE FROM missions WHERE id = ?").run(autonomousMissionId);
       database.prepare("DELETE FROM agents WHERE id LIKE ?").run(`agent-${token}-%`);
 
       database.prepare(`
@@ -86,6 +95,42 @@ export function createOperationalListsFixture(instanceId: string): OperationalLi
           'Inspect the attributable fixture records', '{}', '{}', ?, ?, ?, ?, 1)
       `).run(runId, missionId, fixtureTime(TRACE_COUNT + 1), fixtureTime(0), fixtureTime(TRACE_COUNT + 1), fixtureTime(0));
       database.prepare("INSERT INTO run_event_sequences (run_id, last_sequence) VALUES (?, ?)").run(runId, TRACE_COUNT);
+
+      // The Live Operations accessibility state must own its Autonomous data.
+      // Depending on an unrelated browser test to leave a run behind made the
+      // state order-dependent and produced genuine enterprise/mobile failures.
+      database.prepare(`
+        INSERT INTO missions (
+          id, name, objective, journey, status, authorization_status, engagement_id,
+          scope_json, success_criteria_json, retention_policy_json, memory_policy_json,
+          created_by, version, created_at, updated_at
+        ) VALUES (?, ?, ?, 'autonomous', 'active', 'verified', ?, ?, '[]', '{}', '{}',
+          'e2e-local-operator', 1, ?, ?)
+      `).run(
+        autonomousMissionId,
+        autonomousMissionTitle,
+        `${token} owns the Autonomous list state used by the release accessibility gate.`,
+        `engagement-${token}-autonomous`,
+        JSON.stringify({ allowedTargets: [`${token}-autonomous.example.test`] }),
+        fixtureTime(TRACE_COUNT + REPORT_COUNT + AGENT_COUNT + 3),
+        fixtureTime(1),
+      );
+      database.prepare(`
+        INSERT INTO runs (
+          id, mission_id, journey, status, progress, status_reason, next_action_summary,
+          budget_json, budget_usage_json, started_at, ended_at, created_at, updated_at, version
+        ) VALUES (?, ?, 'autonomous', 'running', 0.42,
+          'Executing the isolated accessibility fixture.',
+          'Continue the exact fixture plan', '{}', '{}', ?, NULL, ?, ?, 1)
+      `).run(
+        autonomousRunId,
+        autonomousMissionId,
+        fixtureTime(TRACE_COUNT + 2),
+        fixtureTime(TRACE_COUNT + 2),
+        fixtureTime(1),
+      );
+      database.prepare("INSERT INTO run_event_sequences (run_id, last_sequence) VALUES (?, 0)")
+        .run(autonomousRunId);
 
       const insertAgent = database.prepare(`
         INSERT INTO agents (
@@ -144,6 +189,9 @@ export function createOperationalListsFixture(instanceId: string): OperationalLi
       missionId,
       runId,
       missionTitle,
+      autonomousMissionId,
+      autonomousRunId,
+      autonomousMissionTitle,
       agentIds,
       agentNames,
       traceIds,

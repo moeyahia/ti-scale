@@ -1,0 +1,16 @@
+[Unit]
+Description=Ti-Scale exact-target exploit confinement broker socket
+
+[Socket]
+ListenStream=/run/ti-scale-exact-target-sandbox/broker.sock
+SocketUser=root
+SocketGroup=ti-scale
+SocketMode=0660
+DirectoryMode=0755
+Accept=yes
+MaxConnections=64
+Backlog=64
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

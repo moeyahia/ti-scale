@@ -1,11 +1,14 @@
 import { once } from "node:events";
+import { createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { afterEach, describe, expect, test } from "bun:test";
 import express from "express";
 import type { SqliteDatabase } from "../../../server/db";
+import { MemoryRepository, type MemoryNodeType } from "../../../server/memory";
 import { ControlPlaneLeaseService, type ControlPlaneLease } from "../../../server/control-plane";
 import {
+  AttackAttemptService,
   createRunIntelligenceRouter,
   type AttackAttempt,
   type AssetOsiStack,
@@ -49,6 +52,41 @@ const CONTROL_LEASE_OWNER = "run-intelligence-router-runtime";
 const CONTROL_LEASE_TOKEN = "run-intelligence-router-token-000000000";
 const TAKEOVER_LEASE_OWNER = "run-intelligence-router-takeover";
 const TAKEOVER_LEASE_TOKEN = "run-intelligence-router-takeover-token-0000";
+
+function opaqueMemoryId(label: string): string {
+  return `mem_${createHash("sha256").update(label).digest("hex")}`;
+}
+
+function addReviewedKnowledgeNode(
+  database: SqliteDatabase,
+  id: string,
+  nodeType: MemoryNodeType,
+): void {
+  new MemoryRepository(database, { clock: () => new Date("2026-07-16T12:20:00.000Z") }).createNode({
+    id,
+    nodeType,
+    title: `${nodeType.replaceAll("_", " ")} reviewed router fixture`,
+    summary: "Generalized reviewed attack knowledge with private target context kept outside reusable memory.",
+    body: "Use only through an exact typed attack-attempt binding.",
+    scope: { kind: "global" },
+    sensitivity: "internal",
+    confidence: 0.98,
+    lifecycleStatus: "verified",
+    confirmationState: "confirmed",
+    provenance: {
+      method: "derived",
+      explanation: "Reviewed locally evaluated fixture evidence.",
+      sources: [{
+        sourceType: "evaluation",
+        sourceId: `receipt-${id}`,
+        acquiredAt: "2026-07-16T12:20:00.000Z",
+      }],
+    },
+    authorType: "operator",
+    authorId: "operator-router",
+    retentionPolicy: { journeys: ["autonomous", "guided"] },
+  });
+}
 
 async function createHarness(config: { readonly includeLeaseResolver?: boolean } = {}): Promise<RouterHarness> {
   const database = createTestDatabase();
@@ -676,6 +714,113 @@ describe("RunIntelligenceRouter", () => {
     expect((list.body as { readonly items: AttackAttempt[] }).items).toHaveLength(1);
     const detail = await request(harness, `/api/v2/runs/${RUN_ID}/intelligence/attack-attempts/${attempt.id}`);
     expect((detail.body as { readonly attempt: AttackAttempt }).attempt.evidence[0]?.verificationState).toBe("verified");
+  });
+
+  test("creates the exact reviewed knowledge binding through the production attack-attempt route", async () => {
+    const harness = await createHarness();
+    insertEvidence(harness.database, { id: "evidence-asset-reviewed-binding" });
+    const asset = await createAssetThroughRouter(harness, "evidence-asset-reviewed-binding");
+    const ids = {
+      procedure: opaqueMemoryId("router-reviewed-procedure"),
+      procedureVersion: opaqueMemoryId("router-reviewed-procedure-version"),
+      saferProcedureVersion: opaqueMemoryId("router-reviewed-safer-procedure-version"),
+      product: opaqueMemoryId("router-reviewed-product"),
+      version: opaqueMemoryId("router-reviewed-version"),
+      stack: opaqueMemoryId("router-reviewed-stack"),
+    } as const;
+    addReviewedKnowledgeNode(harness.database, ids.procedure, "attack_procedure");
+    addReviewedKnowledgeNode(harness.database, ids.procedureVersion, "procedure_version");
+    addReviewedKnowledgeNode(harness.database, ids.saferProcedureVersion, "procedure_version");
+    addReviewedKnowledgeNode(harness.database, ids.product, "technology_product");
+    addReviewedKnowledgeNode(harness.database, ids.version, "exact_version_fingerprint");
+    addReviewedKnowledgeNode(harness.database, ids.stack, "runtime");
+
+    const attempts = new AttackAttemptService(
+      harness.database,
+      () => new Date("2026-07-16T12:20:00.000Z"),
+    );
+    const sourceCreated = attempts.create({
+      missionId: MISSION_ID,
+      runId: RUN_ID,
+      targetAssetId: asset.id,
+      objective: "Preserve the exact known-bad represented procedure",
+      techniqueName: "Reviewed bounded procedure",
+      actionClass: "exploit_validation",
+      normalizedParameters: { represented: true },
+      assignedAgentId: AGENT_ONE_ID,
+      reviewedKnowledgeBinding: {
+        procedureNodeId: ids.procedure,
+        procedureVersionNodeId: ids.procedureVersion,
+        productNodeIds: [ids.product],
+        versionNodeIds: [ids.version],
+        stackNodeIds: [ids.stack],
+        prerequisiteNodeIds: [],
+        observedStateNodeIds: [],
+        normalizedParameters: { payload_shape: "known-bad" },
+        load: 1,
+        concurrency: 1,
+        timingWindowMs: 2_000,
+      },
+    });
+    const sourceReady = attempts.transition({
+      attemptId: sourceCreated.id,
+      expectedVersion: sourceCreated.version,
+      status: "ready",
+    });
+    const source = attempts.transition({
+      attemptId: sourceReady.id,
+      expectedVersion: sourceReady.version,
+      status: "waiting_conditions",
+      reason: "Preserved for a represented recovery health gate",
+    });
+
+    const created = await request(harness, `/api/v2/runs/${RUN_ID}/intelligence/attack-attempts`, {
+      method: "POST",
+      idempotencyKey: "attempt-reviewed-binding-router-0001",
+      body: {
+        targetAssetId: asset.id,
+        recoverySourceAttackAttemptId: source.id,
+        objective: "Validate one exact represented procedure",
+        techniqueName: "Reviewed bounded procedure",
+        actionClass: "exploit_validation",
+        normalizedParameters: { represented: true },
+        assignedAgentId: AGENT_ONE_ID,
+        representedActionBinding: {
+          actionType: "bounded_safer_validation",
+          actionClass: "exploit_validation",
+          normalizedArguments: { probe: "bounded-reviewed" },
+          scopedTarget: "10.10.10.10",
+        },
+        reviewedKnowledgeBinding: {
+          procedureNodeId: ids.procedure,
+          procedureVersionNodeId: ids.saferProcedureVersion,
+          productNodeIds: [ids.product],
+          versionNodeIds: [ids.version],
+          stackNodeIds: [ids.stack],
+          prerequisiteNodeIds: [],
+          observedStateNodeIds: [],
+          normalizedParameters: { payload_shape: "bounded-reviewed" },
+          load: 1,
+          concurrency: 1,
+          timingWindowMs: 2_000,
+        },
+      },
+    });
+    expect(created.status).toBe(201);
+    const attempt = (created.body as { readonly attempt: AttackAttempt }).attempt;
+    expect(attempt.recoverySourceAttackAttemptId).toBe(source.id);
+    expect(harness.database.prepare(`
+      SELECT procedure_node_id, procedure_version_node_id,
+        normalized_parameters_json, load, concurrency, timing_window_ms
+      FROM attack_attempt_knowledge_contexts WHERE attack_attempt_id = ?
+    `).get(attempt.id)).toEqual({
+      procedure_node_id: ids.procedure,
+      procedure_version_node_id: ids.saferProcedureVersion,
+      normalized_parameters_json: '{"payload_shape":"bounded-reviewed"}',
+      load: 1,
+      concurrency: 1,
+      timing_window_ms: 2_000,
+    });
   });
 
   test("creates and reads evidence-backed topology nodes, edges, and complete seven-layer OSI projections", async () => {

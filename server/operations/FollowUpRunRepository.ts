@@ -22,6 +22,8 @@ interface SourceRunRow {
   readonly journey: "autonomous" | "guided";
   readonly status: string;
   readonly contract_id: string | null;
+  readonly contract_version: number | null;
+  readonly contract_hash: string | null;
   readonly budget_json: string;
   readonly memory_scopes_json: string | null;
   readonly contract_state: string | null;
@@ -107,6 +109,7 @@ export class FollowUpRunRepository {
       const source = this.database.prepare(`
         SELECT r.id, r.mission_id, m.name AS mission_name, m.engagement_id,
           r.journey, r.status, r.contract_id, r.budget_json,
+          mc.version AS contract_version, mc.contract_hash,
           mc.memory_scopes_json, mc.state AS contract_state
         FROM runs r
         JOIN missions m ON m.id = r.mission_id
@@ -141,6 +144,16 @@ export class FollowUpRunRepository {
           humanMessage: "This Autonomous run cannot be repeated because its confirmed contract is unavailable.",
           category: "contract",
           remediation: "Create a new Autonomous mission contract instead of bypassing the missing boundary.",
+        });
+      }
+      if (
+        source.journey === "autonomous"
+        && (source.contract_version === null || source.contract_hash === null)
+      ) {
+        throw new OperationsApiError(409, "follow_up_contract_unavailable", "The confirmed Autonomous contract binding is unavailable", {
+          humanMessage: "This Autonomous run cannot be repeated because its confirmed contract version or digest is unavailable.",
+          category: "contract",
+          remediation: "Create a new Autonomous mission contract instead of launching an unbound follow-up run.",
         });
       }
       const memoryScopes = parseStringArray(source.memory_scopes_json);
@@ -215,15 +228,18 @@ export class FollowUpRunRepository {
         : "Explain a new bounded plan and recommend the first deliberate Guided step";
       this.database.prepare(`
         INSERT INTO runs (
-          id, mission_id, journey, status, control_plane, contract_id, progress,
+          id, mission_id, journey, status, control_plane, contract_id,
+          contract_version_bound, contract_hash_bound, progress,
           status_reason, next_action_summary, budget_json, budget_usage_json,
           retry_count, replan_count, started_at, created_at, updated_at, version
-        ) VALUES (?, ?, ?, 'planning', 'ti_scale', ?, 0, ?, ?, ?, '{}', 0, 0, ?, ?, ?, 1)
+        ) VALUES (?, ?, ?, 'planning', 'ti_scale', ?, ?, ?, 0, ?, ?, ?, '{}', 0, 0, ?, ?, ?, 1)
       `).run(
         runId,
         source.mission_id,
         source.journey,
         source.contract_id,
+        source.contract_version,
+        source.contract_hash,
         statusReason,
         nextAction,
         source.budget_json,

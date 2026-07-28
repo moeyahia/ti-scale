@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import express from "express";
+import express, { type Request } from "express";
+import { createHash } from "node:crypto";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
@@ -10,9 +11,21 @@ import {
   type ResumeRunBoundary,
 } from "../../command-runtime";
 import { createDatabaseConnection, migrateDatabase, type SqliteDatabase } from "../../db";
-import type { DurableAction } from "../../orchestration";
+import {
+  MemoryRepository,
+  OperationalHazardProfileRepository,
+  operationalHazardRetryContractHash,
+  type MemoryNodeType,
+  type OperationalHazardContext,
+  type OperationalHazardReviewedRetryContract,
+} from "../../memory";
+import { ActionRepository, type DurableAction } from "../../orchestration";
 import { hashJson } from "../../orchestration/serialization";
-import { createMissionRunControlV2Router } from "../missionRuntimeV2Routes";
+import { AttackAttemptService } from "../../run-intelligence";
+import {
+  createMissionRunControlV2Router,
+  createMissionRuntimeV2Router,
+} from "../missionRuntimeV2Routes";
 
 const NOW = "2026-07-16T12:00:00.000Z";
 const servers: Server[] = [];
@@ -110,6 +123,299 @@ function seedGuidedRun(database: SqliteDatabase, suffix: string): {
   return { missionId, runId, planId, stepId, assignmentId };
 }
 
+function opaqueMemoryId(label: string): string {
+  return `mem_${createHash("sha256").update(label).digest("hex")}`;
+}
+
+function addReviewedKnowledgeNode(
+  repository: MemoryRepository,
+  id: string,
+  nodeType: MemoryNodeType,
+): void {
+  repository.createNode({
+    id,
+    nodeType,
+    title: `${nodeType.replaceAll("_", " ")} reviewed knowledge`,
+    summary: "Generalized reusable procedure knowledge with private operational sources retained separately.",
+    body: "Use only when the typed procedure, version, stack, parameters, and current state match.",
+    scope: { kind: "global" },
+    sensitivity: "internal",
+    confidence: 0.98,
+    lifecycleStatus: "verified",
+    confirmationState: "confirmed",
+    provenance: {
+      method: "derived",
+      explanation: "A trusted local evaluator and operator review established this reusable relationship.",
+      sources: [{ sourceType: "evaluation", sourceId: `receipt-${id}`, acquiredAt: NOW }],
+    },
+    authorType: "operator",
+    authorId: "operator:test",
+    retentionPolicy: { journeys: ["autonomous", "guided"] },
+  });
+}
+
+function seedHazardAuthorizationBoundary(
+  database: SqliteDatabase,
+  fixture: ReturnType<typeof seedGuidedRun>,
+  suffix: string,
+) {
+  const assetId = `asset-hazard-route-${suffix}`;
+  const sourceStepId = `step-hazard-source-${suffix}`;
+  const healthStepId = `step-hazard-health-${suffix}`;
+  const healthActionId = `action-hazard-health-${suffix}`;
+  const evidenceId = `evidence-hazard-health-${suffix}`;
+  const contextPackId = `pack-hazard-health-${suffix}`;
+  const target = `service-${suffix}.local`;
+
+  database.prepare(`
+    INSERT INTO mission_targets (
+      id, mission_id, target, target_type, disposition, normalized_target, created_at
+    ) VALUES (?, ?, ?, 'domain', 'allowed', ?, ?)
+  `).run(`target-hazard-route-${suffix}`, fixture.missionId, target, target, NOW);
+  database.prepare(`
+    INSERT INTO topology_nodes (
+      id, mission_id, run_id, node_type, primary_label, normalized_identity,
+      scope_status, lifecycle_state, properties_json, confidence,
+      verification_state, sensitivity, first_seen_at, last_seen_at,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 'asset', 'Authorized disposable service', ?, 'allowed',
+      'observed', '{"environment":"disposable"}', 1, 'verified', 'private', ?, ?, ?, ?)
+  `).run(assetId, fixture.missionId, fixture.runId, target, NOW, NOW, NOW, NOW);
+  database.prepare(`
+    UPDATE plan_steps SET action_class = 'exploit_validation', risk_class = 'high'
+    WHERE id = ?
+  `).run(fixture.stepId);
+  const insertStep = database.prepare(`
+    INSERT INTO plan_steps (
+      id, plan_id, run_id, ordinal, phase, title, objective, status,
+      action_class, risk_class, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'Validation', ?, 'Prove the local safety boundary',
+      'ready', ?, ?, ?, ?)
+  `);
+  insertStep.run(
+    sourceStepId, fixture.planId, fixture.runId, 1, "Preserved failed attempt",
+    "exploit_validation", "high", NOW, NOW,
+  );
+  insertStep.run(
+    healthStepId, fixture.planId, fixture.runId, 2, "Represented local health check",
+    "passive_intelligence_osint", "low", NOW, NOW,
+  );
+
+  const ids = {
+    hazard: opaqueMemoryId(`route-hazard-${suffix}`),
+    procedure: opaqueMemoryId(`route-procedure-${suffix}`),
+    procedureVersion: opaqueMemoryId(`route-procedure-version-known-bad-${suffix}`),
+    saferProcedureVersion: opaqueMemoryId(`route-procedure-version-safer-${suffix}`),
+    product: opaqueMemoryId(`route-product-${suffix}`),
+    version: opaqueMemoryId(`route-version-${suffix}`),
+    stack: opaqueMemoryId(`route-stack-${suffix}`),
+  } as const;
+  const memory = new MemoryRepository(database, { clock: () => new Date(NOW) });
+  addReviewedKnowledgeNode(memory, ids.hazard, "operational_hazard");
+  addReviewedKnowledgeNode(memory, ids.procedure, "attack_procedure");
+  addReviewedKnowledgeNode(memory, ids.procedureVersion, "procedure_version");
+  addReviewedKnowledgeNode(memory, ids.saferProcedureVersion, "procedure_version");
+  addReviewedKnowledgeNode(memory, ids.product, "technology_product");
+  addReviewedKnowledgeNode(memory, ids.version, "exact_version_fingerprint");
+  addReviewedKnowledgeNode(memory, ids.stack, "runtime");
+  const safeRetryStatement = "A trusted local health result proves the baseline is restored";
+  const reviewedRetryContract: OperationalHazardReviewedRetryContract = {
+    schema: "ti_scale.operational_hazard_retry_contract/v1",
+    alternativeKind: "structured_delta",
+    source: {
+      procedureNodeId: ids.procedure,
+      procedureVersionNodeId: ids.procedureVersion,
+      normalizedParameters: { payload_shape: "known-bad" },
+      load: 1,
+      concurrency: 1,
+      timingWindowMs: 2_000,
+    },
+    alternative: {
+      procedureNodeId: ids.procedure,
+      procedureVersionNodeId: ids.saferProcedureVersion,
+      normalizedParameters: { payload_shape: "bounded-safer" },
+      load: 1,
+      concurrency: 1,
+      timingWindowMs: 2_000,
+    },
+    retryValidConditions: [{
+      id: "baseline_restored",
+      statement: safeRetryStatement,
+      evidenceKey: "baselineRestored",
+    }],
+  };
+  new OperationalHazardProfileRepository(database, { clock: () => new Date(NOW) }).create({
+    hazardNodeId: ids.hazard,
+    procedureNodeId: ids.procedure,
+    procedureVersionNodeId: ids.procedureVersion,
+    productNodeIds: [ids.product],
+    versionNodeIds: [ids.version],
+    stackNodeIds: [ids.stack],
+    prerequisiteNodeIds: [],
+    observedStateNodeIds: [],
+    orderedSteps: ["Prove baseline health", "Use one bounded safer attempt"],
+    normalizedParameters: { payload_shape: "known-bad" },
+    loadMinimum: 1,
+    concurrencyMinimum: 1,
+    timingWindowMs: 5_000,
+    observedSymptom: "The application worker stopped returning responses",
+    affectedComponent: "Managed application worker",
+    stateBefore: "Healthy bounded-response state",
+    stateAfter: "Wedged response state",
+    reproducibilityCount: 2,
+    attemptCount: 2,
+    recoveryActionSummary: "Recycle the disposable worker and prove baseline health",
+    recoveryCost: {
+      resetCount: 2,
+      operatorReportedResetCountMinimum: 11,
+      serviceRecycleCount: 2,
+      requiresDisposableTargetReset: true,
+    },
+    unsafeRetryConditions: ["Baseline health check is failing"],
+    safeRetryGate: [safeRetryStatement],
+    alternativeSequence: ["Restore the baseline", "Use the safer variant once"],
+    reviewedRetryContract,
+    confidence: 0.98,
+    observedAt: NOW,
+    freshUntil: "2026-07-17T12:00:00.000Z",
+  });
+
+  const exactContext = (procedureVersionNodeId: string, payload: string): OperationalHazardContext => ({
+    procedureNodeId: ids.procedure,
+    procedureVersionNodeId,
+    productNodeIds: [ids.product],
+    versionNodeIds: [ids.version],
+    stackNodeIds: [ids.stack],
+    prerequisiteNodeIds: [],
+    observedStateNodeIds: [],
+    normalizedParameters: { payload_shape: payload },
+    load: 1,
+    concurrency: 1,
+    timingWindowMs: 2_000,
+  });
+  const attempts = new AttackAttemptService(database, () => new Date(NOW));
+  const sourceCreated = attempts.create({
+    missionId: fixture.missionId,
+    runId: fixture.runId,
+    planId: fixture.planId,
+    stepId: sourceStepId,
+    targetAssetId: assetId,
+    objective: "Preserve the exact failed procedure",
+    techniqueName: "Reviewed procedure",
+    actionClass: "exploit_validation",
+    normalizedParameters: { represented: true },
+    reviewedKnowledgeBinding: exactContext(ids.procedureVersion, "known-bad"),
+  });
+  const sourceReady = attempts.transition({
+    attemptId: sourceCreated.id,
+    expectedVersion: sourceCreated.version,
+    status: "ready",
+    actorId: "operator:test",
+    actorType: "operator",
+  });
+  const source = attempts.transition({
+    attemptId: sourceReady.id,
+    expectedVersion: sourceReady.version,
+    status: "waiting_conditions",
+    reason: "Exact verified operational hazard requires a represented health check",
+    actorId: "operational-hazard-gate",
+    actorType: "system",
+  });
+  const candidateCreated = attempts.create({
+    missionId: fixture.missionId,
+    runId: fixture.runId,
+    planId: fixture.planId,
+    stepId: fixture.stepId,
+    targetAssetId: assetId,
+    recoverySourceAttackAttemptId: source.id,
+    objective: "Run one explicitly distinct bounded recovery attempt",
+    techniqueName: "Reviewed safer procedure",
+    actionClass: "exploit_validation",
+    normalizedParameters: { represented: true },
+    representedActionBinding: {
+      actionType: "bounded_safer_validation",
+      actionClass: "exploit_validation",
+      normalizedArguments: { probe: "bounded" },
+      scopedTarget: target,
+    },
+    reviewedKnowledgeBinding: exactContext(ids.saferProcedureVersion, "bounded-safer"),
+  });
+  const candidate = attempts.transition({
+    attemptId: candidateCreated.id,
+    expectedVersion: candidateCreated.version,
+    status: "ready",
+    actorId: "operator:test",
+    actorType: "operator",
+  });
+
+  database.prepare(`
+    INSERT INTO actions (
+      id, mission_id, run_id, step_id, action_type, action_class, fingerprint,
+      normalized_arguments_json, scoped_target, status, intent_summary,
+      result_summary, retry_count, started_at, ended_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'operational_hazard_health_check',
+      'passive_intelligence_osint', ?, ?, ?, 'succeeded',
+      'Check the exact private target baseline', 'Baseline restored', 0, ?, ?, ?, ?)
+  `).run(
+    healthActionId, fixture.missionId, fixture.runId, healthStepId, "d".repeat(64),
+    JSON.stringify({
+      input: {
+        hazardNodeId: ids.hazard,
+        hazardProfileVersion: 1,
+        blockedAttackAttemptId: source.id,
+        contextPackId,
+      },
+      orchestration: { kind: "tool", idempotent: true, destructive: false },
+    }),
+    target, NOW, NOW, NOW, NOW,
+  );
+  database.prepare(`
+    INSERT INTO evidence (
+      id, mission_id, run_id, step_id, action_id, source, acquired_at, target,
+      evidence_type, content_hash, provenance_json, confidence, sensitivity,
+      verification_state, summary, created_by, created_at
+    ) VALUES (?, ?, ?, ?, ?, 'local_tool_health_verifier', ?, ?,
+      'health_check_result', ?, ?, 1, 'private', 'verified',
+      'Trusted local evaluator confirmed the baseline response',
+      'local-evidence-verifier', ?)
+  `).run(
+    evidenceId, fixture.missionId, fixture.runId, healthStepId, healthActionId,
+    NOW, target, "e".repeat(64), JSON.stringify({
+      method: "local_tool_verification",
+      boundary: "trusted_local",
+      healthAssessment: {
+        schema: "ti_scale.operational_health/v2",
+        baselineRestored: true,
+        retryContractHash: operationalHazardRetryContractHash(reviewedRetryContract),
+        retryConditionResults: { baselineRestored: true },
+      },
+    }), NOW,
+  );
+  database.prepare(`
+    INSERT INTO evidence_chain_events (
+      id, evidence_id, event_type, actor, details_json, occurred_at
+    ) VALUES (?, ?, 'verified', 'local-evidence-verifier', '{"method":"local_evaluator"}', ?)
+  `).run(`custody-hazard-health-${suffix}`, evidenceId, NOW);
+  database.prepare(`
+    INSERT INTO memory_context_packs (
+      id, mission_id, run_id, step_id, journey, purpose, query_redacted,
+      scope_policy_json, context_budget, retrieval_metrics_json, created_by, created_at
+    ) VALUES (?, ?, ?, ?, 'guided', 'Operational hazard health gate',
+      'Exact reviewed hazard health gate', '{}', 3000, '{}',
+      'local-operational-hazard-evaluator', ?)
+  `).run(contextPackId, fixture.missionId, fixture.runId, healthStepId, NOW);
+  const insertContextItem = database.prepare(`
+    INSERT INTO memory_context_items (
+      context_pack_id, node_id, rank, retrieval_score, used,
+      relevance_reason, influence_summary
+    ) VALUES (?, ?, ?, 1, 1, 'Exact reviewed gate input', 'Required the local health gate')
+  `);
+  [ids.hazard, ids.procedure, ids.procedureVersion]
+    .forEach((nodeId, rank) => insertContextItem.run(contextPackId, nodeId, rank));
+
+  return { candidate, source, healthActionId, contextPackId };
+}
+
 function seedLegacyAutonomousPlanningRateLimit(database: SqliteDatabase, suffix: string): {
   missionId: string;
   runId: string;
@@ -182,7 +488,9 @@ function seedLegacyAutonomousPlanningRateLimit(database: SqliteDatabase, suffix:
   return { missionId, runId };
 }
 
-function runtime(database: SqliteDatabase, workerId: string) {
+type RuntimeCrashHook = NonNullable<Parameters<typeof createMissionRuntime>[0]["crashAfterCommit"]>;
+
+function runtime(database: SqliteDatabase, workerId: string, crashAfterCommit?: RuntimeCrashHook) {
   return createMissionRuntime({
     database,
     planner,
@@ -191,14 +499,34 @@ function runtime(database: SqliteDatabase, workerId: string) {
     workerId,
     leaseTtlMs: 2_000,
     now: () => new Date(NOW),
+    ...(crashAfterCommit ? { crashAfterCommit } : {}),
   });
 }
 
-async function startApplication(database: SqliteDatabase, workerId: string) {
-  const engine = runtime(database, workerId);
+async function startApplication(
+  database: SqliteDatabase,
+  workerId: string,
+  crashAfterCommit?: RuntimeCrashHook,
+) {
+  const engine = runtime(database, workerId, crashAfterCommit);
   const app = express();
   app.use(express.json());
   app.use(createMissionRunControlV2Router({ runtime: engine, resolveActor: () => "operator:test" }));
+  const server = app.listen(0, "127.0.0.1");
+  servers.push(server);
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  return { engine, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
+}
+
+async function startRuntimeApplication(
+  database: SqliteDatabase,
+  workerId: string,
+  resolveActor: (request: Request) => string,
+) {
+  const engine = runtime(database, workerId);
+  const app = express();
+  app.use(express.json());
+  app.use(createMissionRuntimeV2Router({ runtime: engine, resolveActor }));
   const server = app.listen(0, "127.0.0.1");
   servers.push(server);
   await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -240,6 +568,136 @@ function activeControlLeaseCount(database: SqliteDatabase, runId: string): numbe
 }
 
 describe("mission run-control V2 boundary", () => {
+  test("operational-hazard retry authorization is authenticated, exact-run-bound, and control-plane fenced", async () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    databases.push(database);
+    migrateDatabase(database);
+    const fixture = seedGuidedRun(database, "hazard-route");
+    const otherRun = seedGuidedRun(database, "hazard-route-other-run");
+    const hazard = seedHazardAuthorizationBoundary(database, fixture, "hazard-route");
+    const { engine, base } = await startRuntimeApplication(
+      database,
+      "hazard-route-worker",
+      (request) => request.get("x-test-operator") ?? "",
+    );
+    const action = new ActionRepository(database).get(hazard.healthActionId);
+    const assessment = engine.operationalHazardHealthGate.recordAssessmentForCompletedAction(
+      action,
+      { id: "local-health-worker", type: "worker" },
+    );
+    if (!assessment) throw new Error("Expected the represented health action to create an assessment");
+    const body = {
+      healthAssessmentId: assessment.id,
+      attackAttemptId: hazard.candidate.id,
+      ttlMs: 60_000,
+    };
+    const authorize = (
+      runId: string,
+      key: string,
+      operator = "operator:test",
+      requestBody: Readonly<Record<string, unknown>> = body,
+    ) => fetch(`${base}/api/v2/runs/${runId}/operational-hazards/retry-authorizations`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": key,
+        ...(operator ? { "x-test-operator": operator } : {}),
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    const unauthenticated = await authorize(
+      fixture.runId,
+      "hazard-route-no-identity",
+      "",
+    );
+    expect(unauthenticated.status).toBe(401);
+    expect(await unauthenticated.json()).toMatchObject({
+      error: { code: "operator_identity_required", category: "authentication_missing" },
+    });
+
+    const invalid = await authorize(
+      fixture.runId,
+      "hazard-route-invalid-ttl",
+      "operator:test",
+      { ...body, ttlMs: 999 },
+    );
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({
+      error: { code: "invalid_hazard_authorization_expiry", category: "invalid_input" },
+    });
+
+    const crossRun = await authorize(
+      otherRun.runId,
+      "hazard-route-cross-run",
+    );
+    expect(crossRun.status).toBe(409);
+    expect(await crossRun.json()).toMatchObject({
+      error: { code: "hazard_retry_cross_run_denied", category: "scope_conflict" },
+    });
+
+    database.prepare("UPDATE runs SET control_plane = 'legacy' WHERE id = ?")
+      .run(fixture.runId);
+    const wrongControlPlane = await authorize(
+      fixture.runId,
+      "hazard-route-wrong-control-plane",
+    );
+    expect(wrongControlPlane.status).toBe(409);
+    expect(await wrongControlPlane.json()).toMatchObject({
+      error: { code: "control_plane_mismatch", category: "policy_denied" },
+    });
+    database.prepare("UPDATE runs SET control_plane = 'ti_scale' WHERE id = ?")
+      .run(fixture.runId);
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM operational_hazard_retry_authorizations").get())
+      .toEqual({ count: 0 });
+    const accepted = await authorize(
+      fixture.runId,
+      "hazard-route-exact-authorization",
+    );
+    expect(accepted.status).toBe(200);
+    const acceptedBody = await accepted.json() as Record<string, unknown>;
+    expect(acceptedBody).toMatchObject({
+      schemaVersion: "2.4",
+      authorization: {
+        missionId: fixture.missionId,
+        runId: fixture.runId,
+        healthAssessmentId: assessment.id,
+        sourceAttackAttemptId: hazard.source.id,
+        authorizedAttackAttemptId: hazard.candidate.id,
+        authorizationBasis: "distinct_procedure_version",
+        maxAttempts: 1,
+        automaticRetry: false,
+      },
+    });
+    expect(database.prepare(`
+      SELECT run_id, authorized_attack_attempt_id, max_attempts, automatic_retry
+      FROM operational_hazard_retry_authorizations
+    `).get()).toEqual({
+      run_id: fixture.runId,
+      authorized_attack_attempt_id: hazard.candidate.id,
+      max_attempts: 1,
+      automatic_retry: 0,
+    });
+    expect(database.prepare(`
+      SELECT actor_id, action FROM audit_records
+      WHERE action = 'operational_hazard.safer_attempt_authorized'
+    `).get()).toEqual({
+      actor_id: "operator:test",
+      action: "operational_hazard.safer_attempt_authorized",
+    });
+
+    const replay = await authorize(
+      fixture.runId,
+      "hazard-route-exact-authorization",
+    );
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(acceptedBody);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM operational_hazard_retry_authorizations").get())
+      .toEqual({ count: 1 });
+    await engine.stop();
+  });
+
   test("resume accepts the exact legacy zero-in-flight boundary for an Autonomous planning rate limit", async () => {
     const database = createDatabaseConnection({ filename: ":memory:" });
     databases.push(database);
@@ -291,7 +749,15 @@ describe("mission run-control V2 boundary", () => {
 
     const missing = await mutate(base, fixture.runId, "resume", "exact-resume-missing");
     expect(missing.status).toBe(400);
-    expect(await missing.json()).toMatchObject({ error: { code: "invalid_resume_boundary" } });
+    expect(await missing.json()).toMatchObject({
+      error: {
+        code: "invalid_resume_boundary",
+        humanMessage: "Resume is available only for the exact blocked run state shown in the Recovery Panel.",
+        retryable: false,
+        category: "invalid_input",
+        traceId: expect.any(String),
+      },
+    });
 
     const stale = await mutate(base, fixture.runId, "resume", "exact-resume-stale", {
       ...exact,
@@ -381,20 +847,25 @@ describe("mission run-control V2 boundary", () => {
       const accepted = await mutate(base, fixture.runId, command, key, boundary);
       expect(accepted.status).toBe(200);
       const acceptedBody = await accepted.json();
-      expect(activeControlLeaseCount(database, fixture.runId)).toBe(0);
+      expect(activeControlLeaseCount(database, fixture.runId)).toBe(command === "resume" ? 1 : 0);
 
       database.prepare("UPDATE runs SET control_plane = 'legacy' WHERE id = ?").run(fixture.runId);
       const rejectedReplay = await mutate(base, fixture.runId, command, key, boundary);
       expect(rejectedReplay.status).toBe(409);
       expect(await rejectedReplay.json()).toMatchObject({
-        error: { code: "control_plane_control_plane_mismatch" },
+        error: {
+          code: "control_plane_mismatch",
+          humanMessage: "This mission and run are controlled elsewhere, so Ti-Scale made no changes.",
+          retryable: false,
+          category: "policy_denied",
+        },
       });
 
       database.prepare("UPDATE runs SET control_plane = 'ti_scale' WHERE id = ?").run(fixture.runId);
       const acceptedReplay = await mutate(base, fixture.runId, command, key, boundary);
       expect(acceptedReplay.status).toBe(200);
       expect(await acceptedReplay.json()).toEqual(acceptedBody);
-      expect(activeControlLeaseCount(database, fixture.runId)).toBe(0);
+      expect(activeControlLeaseCount(database, fixture.runId)).toBe(command === "resume" ? 1 : 0);
     }
 
     expect(database.prepare("SELECT status FROM provider_turns WHERE run_id = ?").get(fixture.runId))
@@ -405,7 +876,132 @@ describe("mission run-control V2 boundary", () => {
       .toEqual({ lease_owner: null, lease_expires_at: null });
   });
 
-  test("pause commits a waiting child boundary and releases authority before another worker resumes", () => {
+  test("cancel repairs a stale event allocator instead of returning a generic 500", async () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    databases.push(database);
+    migrateDatabase(database);
+    const fixture = seedGuidedRun(database, "cancel-stale-event-sequence");
+    const { base } = await startApplication(database, "cancel-stale-event-sequence-worker");
+
+    // Reproduce the production boundary: an evidence verifier atomically
+    // committed semantic event 41 while the cached allocator still held 40.
+    database.prepare(`
+      INSERT INTO run_event_sequences (run_id, last_sequence) VALUES (?, 40)
+    `).run(fixture.runId);
+    database.prepare(`
+      INSERT INTO events (
+        id, mission_id, run_id, sequence, event_type, occurred_at,
+        actor_type, actor_id, summary, payload_json, schema_version, journey,
+        sensitivity, redaction_json, created_at
+      ) VALUES (
+        'event-cancel-stale-sequence-41', ?, ?, 41,
+        'autonomous_cve_applicability_completed', ?, 'agent',
+        'specialist:test', 'Domain evidence committed before runtime handoff',
+        '{}', 1, 'guided', 'internal', '{}', ?
+      )
+    `).run(fixture.missionId, fixture.runId, NOW, NOW);
+
+    const response = await mutate(
+      base,
+      fixture.runId,
+      "cancel",
+      "cancel-stale-event-sequence",
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      schemaVersion: "2.4",
+      run: {
+        id: fixture.runId,
+        status: "cancelled",
+        currentStepId: null,
+        currentOwnerId: null,
+      },
+    });
+    expect(database.prepare(`
+      SELECT sequence FROM events
+      WHERE run_id = ? AND event_type = 'run.cancellation_requested'
+    `).get(fixture.runId)).toEqual({ sequence: 42 });
+    expect(database.prepare(`
+      SELECT sequence FROM events
+      WHERE run_id = ? AND event_type = 'run.cancelled'
+    `).get(fixture.runId)).toEqual({ sequence: 43 });
+    const sequenceBoundary = database.prepare(`
+      SELECT allocator.last_sequence, MAX(events.sequence) AS max_sequence
+      FROM run_event_sequences AS allocator
+      JOIN events ON events.run_id = allocator.run_id
+      WHERE allocator.run_id = ?
+      GROUP BY allocator.run_id, allocator.last_sequence
+    `).get(fixture.runId) as { last_sequence: number; max_sequence: number };
+    expect(sequenceBoundary.last_sequence).toBe(sequenceBoundary.max_sequence);
+    expect(sequenceBoundary.last_sequence).toBeGreaterThanOrEqual(43);
+  });
+
+  test("ownership transfer after a route claim removes the pending Ti-Scale idempotency reservation", async () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    databases.push(database);
+    migrateDatabase(database);
+    const fixture = seedGuidedRun(database, "route-claim-transfer");
+    let transferred = false;
+    const { base } = await startApplication(
+      database,
+      "route-claim-transfer-worker",
+      (point, context) => {
+        if (point !== "pause_projection_committed" || transferred) return;
+        transferred = true;
+        database.prepare("UPDATE runs SET control_plane = 'legacy' WHERE id = ?")
+          .run(context.runId);
+      },
+    );
+
+    const response = await mutate(
+      base,
+      fixture.runId,
+      "pause",
+      "route-claim-transfer-pause",
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "control_plane_mismatch",
+        humanMessage: "This mission and run are controlled elsewhere, so Ti-Scale made no changes.",
+        retryable: false,
+        category: "policy_denied",
+      },
+    });
+    expect(transferred).toBe(true);
+    expect(database.prepare("SELECT status, control_plane FROM runs WHERE id = ?")
+      .get(fixture.runId)).toEqual({ status: "blocked", control_plane: "legacy" });
+    expect(database.prepare("SELECT status FROM missions WHERE id = ?")
+      .get(fixture.missionId)).toEqual({ status: "paused" });
+    expect(database.prepare(`
+      SELECT count(*) AS count FROM settings
+      WHERE key LIKE 'ti_scale.runtime.idempotency.run.pause.%'
+    `).get()).toEqual({ count: 0 });
+    expect(activeControlLeaseCount(database, fixture.runId)).toBe(0);
+
+    const eventsBefore = database.prepare("SELECT count(*) AS count FROM events WHERE run_id = ?")
+      .get(fixture.runId);
+    const auditsBefore = database.prepare("SELECT count(*) AS count FROM audit_records WHERE run_id = ?")
+      .get(fixture.runId);
+    const retry = await mutate(
+      base,
+      fixture.runId,
+      "pause",
+      "route-claim-transfer-pause",
+    );
+    expect(retry.status).toBe(409);
+    expect(database.prepare(`
+      SELECT count(*) AS count FROM settings
+      WHERE key LIKE 'ti_scale.runtime.idempotency.run.pause.%'
+    `).get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT count(*) AS count FROM events WHERE run_id = ?")
+      .get(fixture.runId)).toEqual(eventsBefore);
+    expect(database.prepare("SELECT count(*) AS count FROM audit_records WHERE run_id = ?")
+      .get(fixture.runId)).toEqual(auditsBefore);
+  });
+
+  test("pause releases authority and the resuming worker retains it for the waiting decision", () => {
     const database = createDatabaseConnection({ filename: ":memory:" });
     databases.push(database);
     migrateDatabase(database);
@@ -440,7 +1036,7 @@ describe("mission run-control V2 boundary", () => {
       .toEqual({ status: "waiting_guided_decision", lease_owner: null, lease_expires_at: null });
     expect(database.prepare("SELECT status, lease_owner FROM assignments WHERE id = ?").get(fixture.assignmentId))
       .toEqual({ status: "queued", lease_owner: null });
-    expect(activeControlLeaseCount(database, fixture.runId)).toBe(0);
+    expect(activeControlLeaseCount(database, fixture.runId)).toBe(1);
   });
 
   test("resume never re-enters a Guided wait on an expired pending decision", () => {

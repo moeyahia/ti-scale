@@ -163,7 +163,7 @@ describe("immutable local SecurityEvaluationHarness", () => {
   test("keeps hidden holdout identities, names, hashes, environments, and ground truth opaque", () => {
     const publicView = harness().publicBenchmarkView();
     const serialized = JSON.stringify(publicView);
-    expect(publicView.hiddenHoldout).toBe("present_but_opaque");
+    expect(publicView.hiddenHoldout).toBe("operator_descriptor_required");
     expect(serialized).not.toContain("holdout-secret-case-7");
     expect(serialized).not.toContain("SECRET HOLDOUT LOOP SHAPE");
     expect(serialized).not.toContain(HASH_C);
@@ -227,6 +227,11 @@ describe("HMAC experiment integrity", () => {
     evidenceHash: HASH_B,
     metricsHash: HASH_C,
     exposureReceiptIds: ["exposure-1"],
+    evaluationStage: "hidden_holdout",
+    evaluationAction: "hidden_holdout_pass",
+    evaluationResult: "pass",
+    evaluationAttemptId: "attempt-hidden-holdout-1",
+    hardGateFailures: [],
     signedAt: "2026-07-16T00:00:00.000Z",
   };
 
@@ -254,6 +259,11 @@ describe("HMAC experiment integrity", () => {
       evidenceHash: payload.evidenceHash,
       metricsHash: payload.metricsHash,
       exposureReceiptIds: payload.exposureReceiptIds,
+      evaluationStage: payload.evaluationStage,
+      evaluationAction: payload.evaluationAction,
+      evaluationResult: payload.evaluationResult,
+      evaluationAttemptId: payload.evaluationAttemptId,
+      hardGateFailures: payload.hardGateFailures,
     })).toEqual({ valid: true, reasons: [] });
   });
 
@@ -307,6 +317,11 @@ describe("HMAC experiment integrity", () => {
       { evidenceHash: HASH_A },
       { metricsHash: HASH_A },
       { exposureReceiptIds: ["other-exposure"] },
+      { evaluationStage: "validation" },
+      { evaluationAction: "hidden_holdout_fail" },
+      { evaluationResult: "fail" },
+      { evaluationAttemptId: "other-attempt" },
+      { hardGateFailures: ["scope_violation"] },
     ] as const;
     for (const expected of expectedMismatches) {
       expect(authority.verifyReceipt(receipt, expected).valid).toBe(false);

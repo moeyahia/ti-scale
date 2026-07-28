@@ -6,6 +6,11 @@ import type {
   RuntimeReadinessSnapshot,
 } from "./RuntimeReadiness";
 import type { RuntimeSourceManifests } from "../domain";
+import type { McpCapabilityAttestation } from "../mcp";
+import {
+  PRODUCT_AGENT_IDS,
+  projectProductAgentRoster,
+} from "../agents";
 
 export type FleetAgentStatus =
   | "available"
@@ -51,6 +56,14 @@ export interface McpServerProjection {
   readonly status: McpServerStatus;
   readonly capabilities: readonly string[];
   readonly policy: Readonly<Record<string, unknown>>;
+  /**
+   * Exact, expiring tools/list receipt. Health and policy booleans never
+   * substitute for this proof when an Autonomous aggregate receipt resolves
+   * an MCP-backed route.
+   */
+  readonly capabilityAttestation?: McpCapabilityAttestation;
+  /** Time of a real dependency check or live attestation, never projection time. */
+  readonly lastCheckedAt?: string | null;
 }
 
 export interface RuntimeProjectionInput {
@@ -140,7 +153,7 @@ export class RuntimeProjectionService {
     if (!this.timer) {
       this.timer = setInterval(() => {
         try {
-          this.projectNow();
+          this.projectScheduledRefresh();
         } catch {
           // Readiness remains fail-closed. The next interval can recover; the
           // operational logger records startup/runtime failures at the caller.
@@ -151,13 +164,52 @@ export class RuntimeProjectionService {
     return this.projectNow();
   }
 
+  /**
+   * A periodic materialization is low-priority reconciliation, not request
+   * admission. The canonical database can also be written by isolated
+   * workers, importers, and browser fixtures. In that case the connection's
+   * normal busy timeout would synchronously stop Bun's HTTP event loop while
+   * SQLite waits for the other writer.
+   *
+   * Fail this timer turn immediately under contention and let the next
+   * interval recover. Startup and explicit synchronizeRuntimeProjection calls
+   * continue to use the configured busy timeout because their callers require
+   * a definitive committed result.
+   */
+  private projectScheduledRefresh(): RuntimeProjectionResult {
+    const configuredBusyTimeout = Number(
+      this.database.pragma("busy_timeout", { simple: true }),
+    );
+    if (!Number.isSafeInteger(configuredBusyTimeout) || configuredBusyTimeout < 0) {
+      throw new Error("Runtime projection database busy timeout is invalid");
+    }
+    this.database.pragma("busy_timeout = 0");
+    try {
+      return this.projectNow();
+    } finally {
+      this.database.pragma(`busy_timeout = ${configuredBusyTimeout}`);
+    }
+  }
+
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
   }
 
-  projectNow(): RuntimeProjectionResult {
-    const input = this.read();
+  /**
+   * Materializes one exact runtime generation. Callers that already hold a
+   * lifecycle-owned immutable projection may pass it directly so the
+   * canonical intake inventory is committed before that generation is made
+   * publicly ready. Timer-driven refreshes continue to use the live reader.
+   */
+  projectNow(generation?: RuntimeProjectionInput): RuntimeProjectionResult {
+    const input = generation ?? this.read();
+    const projectedAgents = projectProductAgentRoster({
+      agents: input.agents,
+      ...(input.capabilityManifests
+        ? { capabilityManifests: input.capabilityManifests }
+        : {}),
+    });
     const now = this.clock();
     const projectedAt = now.toISOString();
     const agentIds = new Set<string>();
@@ -200,7 +252,22 @@ export class RuntimeProjectionService {
           metadata_json = excluded.metadata_json
       `);
 
-      for (const agent of input.agents) {
+      // Old adapter identities can survive a process upgrade in the durable
+      // database. Withdraw them from the default fleet before this generation
+      // is materialized; exact current adapters below remain available only
+      // through the authorized includeInternal view.
+      this.database.prepare(`
+        UPDATE agents
+        SET configuration_json = json_set(
+          CASE WHEN json_valid(configuration_json) THEN configuration_json ELSE '{}' END,
+          '$.userFacing',
+          json('false')
+        ),
+        updated_at = ?
+        WHERE id NOT IN (${[...PRODUCT_AGENT_IDS].map(() => "?").join(",")})
+      `).run(projectedAt, ...PRODUCT_AGENT_IDS);
+
+      for (const agent of projectedAgents) {
         const id = identifier(agent.id, "agent ID");
         if (agentIds.has(id)) throw new Error(`Duplicate projected agent: ${id}`);
         agentIds.add(id);
@@ -223,11 +290,18 @@ export class RuntimeProjectionService {
           projectedAt,
           projectedAt,
         );
-        const sources = new Set([
-          "live-route-attestation",
-          ...agent.capabilities.map((capability) => text(capability.source, "capability source", 100)),
-        ]);
-        for (const source of sources) removeCapabilities.run(id, source);
+        if (PRODUCT_AGENT_IDS.has(id)) {
+          // A product row aggregates changing runtime adapters. Delete its
+          // prior generation completely so withdrawn routes cannot remain
+          // enabled under an old source label.
+          this.database.prepare("DELETE FROM agent_capabilities WHERE agent_id = ?").run(id);
+        } else {
+          const sources = new Set([
+            "live-route-attestation",
+            ...agent.capabilities.map((capability) => text(capability.source, "capability source", 100)),
+          ]);
+          for (const source of sources) removeCapabilities.run(id, source);
+        }
         for (const capability of agent.capabilities) {
           insertCapability.run(
             id,
@@ -258,13 +332,19 @@ export class RuntimeProjectionService {
           status = excluded.status,
           capabilities_json = excluded.capabilities_json,
           policy_json = excluded.policy_json,
-          last_checked_at = excluded.last_checked_at,
+          last_checked_at = COALESCE(excluded.last_checked_at, mcp_servers.last_checked_at),
           updated_at = excluded.updated_at
       `);
       for (const server of input.mcpServers) {
         const id = identifier(server.id, "MCP server ID");
         if (mcpIds.has(id)) throw new Error(`Duplicate projected MCP server: ${id}`);
         mcpIds.add(id);
+        const lastCheckedAt = server.lastCheckedAt == null
+          ? null
+          : new Date(server.lastCheckedAt).toISOString();
+        if (server.lastCheckedAt != null && !Number.isFinite(Date.parse(server.lastCheckedAt))) {
+          throw new Error(`MCP last-checked timestamp is invalid: ${id}`);
+        }
         upsertMcp.run(
           id,
           text(server.name, "MCP server name"),
@@ -273,7 +353,7 @@ export class RuntimeProjectionService {
           server.status,
           json(server.capabilities),
           json(server.policy),
-          projectedAt,
+          lastCheckedAt,
           projectedAt,
           projectedAt,
         );
@@ -300,6 +380,8 @@ export class RuntimeProjectionService {
           id,
           provider.health,
           json({
+            configured: provider.configured ?? true,
+            executionBoundary: provider.executionBoundary ?? "public_provider",
             authenticated: provider.authenticated,
             callable: provider.callable,
             attestedAt: provider.attestedAt ?? null,
@@ -309,6 +391,10 @@ export class RuntimeProjectionService {
             enforcesAutonomousBoundary: provider.enforcesAutonomousBoundary,
             reportsExactTokenUsage: provider.reportsExactTokenUsage,
             reportsExactCostUsage: provider.reportsExactCostUsage,
+            requestedModel: provider.requestedModel ?? null,
+            returnedModel: provider.returnedModel ?? null,
+            modelConfigurationHash: provider.modelConfigurationHash ?? null,
+            completionProbeReceiptId: provider.completionProbeReceiptId ?? null,
           }),
           provider.reason ? text(provider.reason, "provider health reason", 1_000) : componentMessage(id, provider.health),
           projectedAt,

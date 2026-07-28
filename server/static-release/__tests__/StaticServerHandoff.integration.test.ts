@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createDatabaseConnection, migrateDatabase } from "../../db";
 import { StaticArtifactReleaseStore } from "../StaticArtifactReleaseStore";
 
 const applicationRoot = resolve(import.meta.dir, "../../..");
@@ -102,6 +103,7 @@ function spawnServer(input: {
   readonly releaseRoot: string;
   readonly vaultRoot: string;
   readonly scriptSourceRoot: string;
+  readonly slowStartupIntegrity?: boolean;
 }): RunningServer {
   const child = Bun.spawn([process.execPath, "run", "server/index.ts"], {
     cwd: applicationRoot,
@@ -122,6 +124,10 @@ function spawnServer(input: {
       TI_SCALE_OPERATOR_ID: "static-handoff-test-operator",
       TI_SCALE_UI_ORIGIN: `http://127.0.0.1:${input.port}`,
       TI_SCALE_PROJECTION_INTERVAL_MS: "300000",
+      ...(input.slowStartupIntegrity ? {
+        NODE_ENV: "test",
+        TI_SCALE_TEST_SLOW_STARTUP_INTEGRITY: "true",
+      } : {}),
       NO_COLOR: "1",
     },
     stdin: "ignore",
@@ -191,6 +197,125 @@ afterEach(async () => {
     makeWritable(root);
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the pinned authentication shell and session route remain available while database integrity is still running", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "ti-scale-static-server-integration-"));
+  fixtureRoots.push(workspace);
+  const sourceDirectory = join(workspace, "ti-scale-built-auth-shell");
+  const releaseRoot = join(workspace, "ti-scale-static-releases");
+  const dataRoot = join(workspace, "ti-scale-data");
+  const databasePath = join(dataRoot, "ti-scale-startup-auth-shell.sqlite");
+  const vaultRoot = join(workspace, "ti-scale-obsidian-vault");
+  const scriptSourceRoot = join(workspace, "ti-scale-artifacts", "script-sources");
+  mkdirSync(sourceDirectory, { recursive: true });
+  mkdirSync(vaultRoot, { recursive: true });
+  mkdirSync(dataRoot, { recursive: true });
+  writeFileSync(
+    join(sourceDirectory, "index.html"),
+    "<!doctype html><body><main id=\"root\">TI_SCALE_AUTH_SHELL_STARTUP</main></body>\n",
+  );
+  writeFileSync(join(sourceDirectory, "auth-shell.js"), "export const shell = 'ti-scale';\n");
+
+  const releases = new StaticArtifactReleaseStore({ releaseRoot });
+  const release = releases.stageRelease({ releaseId: "startup-auth-shell", sourceDirectory });
+  releases.activateRelease(release.releaseId);
+  const database = createDatabaseConnection({ filename: databasePath, verifyIntegrity: false });
+  try {
+    migrateDatabase(database);
+  } finally {
+    database.close();
+  }
+
+  const port = await availablePort();
+  const server = spawnServer({
+    port,
+    databasePath,
+    releaseRoot,
+    vaultRoot,
+    scriptSourceRoot,
+    slowStartupIntegrity: true,
+  });
+  const document = await waitForDocument(server, "TI_SCALE_AUTH_SHELL_STARTUP");
+  expect(document).toContain("id=\"root\"");
+
+  const documentResponse = await fetch(`${server.origin}/`, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(1_000),
+  });
+  expect(documentResponse.status).toBe(200);
+  expect(documentResponse.headers.get("cache-control")).toBe("no-store");
+  const assetResponse = await fetch(`${server.origin}/auth-shell.js`, {
+    signal: AbortSignal.timeout(1_000),
+  });
+  expect(assetResponse.status).toBe(200);
+  expect(await assetResponse.text()).toContain("ti-scale");
+
+  const sessionResponse = await fetch(`${server.origin}/api/v2/auth/session`, {
+    signal: AbortSignal.timeout(1_000),
+  });
+  expect(sessionResponse.status).toBe(200);
+  expect(await sessionResponse.json()).toEqual({
+    schemaVersion: "2.4",
+    configured: true,
+    authenticated: false,
+  });
+
+  const healthResponse = await fetch(`${server.origin}/api/v2/health`, {
+    signal: AbortSignal.timeout(1_000),
+  });
+  expect(healthResponse.status).toBe(200);
+  expect(await healthResponse.json()).toMatchObject({
+    schemaVersion: "2.4",
+    status: "degraded",
+    startup: {
+      status: "initializing",
+      phase: "database_integrity",
+      executionAdmission: "closed",
+    },
+  });
+
+  const mutationResponse = await fetch(`${server.origin}/api/v2/missions`, {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer isolated-static-handoff-test-token",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({}),
+    signal: AbortSignal.timeout(1_000),
+  });
+  expect(mutationResponse.status).toBe(503);
+  expect(await mutationResponse.json()).toMatchObject({
+    error: {
+      code: "ti_scale_startup_initializing",
+      retryable: true,
+      details: {
+        phase: "database_integrity",
+        executionAdmission: "closed",
+      },
+    },
+  });
+
+  const protectedReadResponse = await fetch(`${server.origin}/api/v2/brain/summary`, {
+    headers: {
+      Authorization: "Bearer isolated-static-handoff-test-token",
+    },
+    signal: AbortSignal.timeout(1_000),
+  });
+  expect(protectedReadResponse.status).toBe(503);
+  expect(await protectedReadResponse.json()).toMatchObject({
+    error: {
+      code: "ti_scale_startup_initializing",
+      retryable: true,
+      details: {
+        phase: "database_integrity",
+        executionAdmission: "closed",
+      },
+    },
+  });
+  expect(server.stdout.text()).toContain(`pinned static release ${release.releaseId}`);
+  expect(server.stdout.text()).not.toContain("operational admission ready");
+  await stopServer(server);
 });
 
 test("standalone V2 server pins an immutable static release across pointer changes and fails startup on tamper", async () => {

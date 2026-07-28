@@ -173,6 +173,25 @@ export class ReconDigitalTwinRepository {
     };
   }
 
+  findNodeByIdentity(input: {
+    readonly missionId: string;
+    readonly runId: string | null;
+    readonly nodeType: string;
+    readonly normalizedIdentity: string;
+  }): TopologyNode | undefined {
+    const row = this.database.prepare(`
+      SELECT id FROM topology_nodes
+      WHERE mission_id = ? AND run_id IS ? AND node_type = ? AND normalized_identity = ?
+      LIMIT 1
+    `).get(
+      input.missionId,
+      input.runId,
+      input.nodeType,
+      input.normalizedIdentity,
+    ) as { readonly id: string } | undefined;
+    return row ? this.getNode(row.id) : undefined;
+  }
+
   getEdge(edgeId: string): TopologyEdge {
     const row = this.database.prepare("SELECT * FROM topology_edges WHERE id = ?").get(edgeId) as EdgeRow | undefined;
     if (!row) throw new RunIntelligenceError("topology_edge_not_found", `Topology edge not found: ${edgeId}`);
@@ -192,6 +211,25 @@ export class ReconDigitalTwinRepository {
       lastSeenAt: row.last_seen_at,
       evidence: this.evidenceLinks("edge", row.id),
     };
+  }
+
+  findEdge(input: {
+    readonly missionId: string;
+    readonly sourceNodeId: string;
+    readonly targetNodeId: string;
+    readonly edgeType: string;
+  }): TopologyEdge | undefined {
+    const row = this.database.prepare(`
+      SELECT id FROM topology_edges
+      WHERE mission_id = ? AND source_node_id = ? AND target_node_id = ? AND edge_type = ?
+      LIMIT 1
+    `).get(
+      input.missionId,
+      input.sourceNodeId,
+      input.targetNodeId,
+      input.edgeType,
+    ) as { readonly id: string } | undefined;
+    return row ? this.getEdge(row.id) : undefined;
   }
 
   listNodes(missionId: string, runId?: string): TopologyNode[] {

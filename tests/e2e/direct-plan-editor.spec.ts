@@ -11,6 +11,7 @@ import {
   refreshPlanChangeFixtureAgents,
   type PlanChangeFixture,
 } from "./support/planChangeFixture";
+import { asTitaniumCombobox, selectTitaniumOption } from "./support/titaniumSelect";
 
 const TEST_ID = "e2e.plan-direct.proposals";
 const DIRECT_EDIT_TEST_ID = "e2e.plan-direct.edit-revalidate";
@@ -166,10 +167,11 @@ async function setReason(page: Page, value: string): Promise<void> {
 }
 
 async function selectMode(page: Page, mode: string): Promise<void> {
-  const control = directControl(page, "plan-direct-editor-mode");
+  const control = await asTitaniumCombobox(directControl(page, "plan-direct-editor-mode"));
   await control.focus();
   await expect(control).toBeFocused();
-  await control.selectOption(mode);
+  await selectTitaniumOption(control, mode, "keyboard");
+  await expect(control).toBeFocused();
 }
 
 async function createProposal(
@@ -242,13 +244,13 @@ test(`${TEST_ID} creates six exact graph proposals through the real service with
 
   await setReason(page, "Add one attributable application discovery step after the represented recon sequence.");
   await directControl(page, "plan-direct-add-id").fill("draft-http-metadata");
-  await directControl(page, "plan-direct-add-after").selectOption(fixture.stepThreeId);
+  await selectTitaniumOption(directControl(page, "plan-direct-add-after"), fixture.stepThreeId, "pointer");
   await directControl(page, "plan-direct-add-phase").fill("Application discovery");
   await directControl(page, "plan-direct-add-title").fill("Collect bounded HTTP metadata");
   await directControl(page, "plan-direct-add-objective").fill("Collect attributable response metadata from the exact authorized target.");
   await directControl(page, "plan-direct-add-criteria").fill("Response metadata is attributable\nNo target state is changed");
-  await directControl(page, "plan-direct-add-action-class").selectOption("passive_intelligence_osint");
-  await directControl(page, "plan-direct-add-agent").selectOption(fixture.agentId);
+  await selectTitaniumOption(directControl(page, "plan-direct-add-action-class"), "passive_intelligence_osint", "keyboard");
+  await selectTitaniumOption(directControl(page, "plan-direct-add-agent"), fixture.agentId, "pointer");
   for (const stepId of [fixture.stepOneId, fixture.stepTwoId]) {
     const dependency = directControl(page, `plan-direct-add-dependency-${stepId}`);
     await dependency.focus();
@@ -263,7 +265,7 @@ test(`${TEST_ID} creates six exact graph proposals through the real service with
   await page.keyboard.press("Space");
   await expect(defaultDependency).toBeChecked();
   await directControl(page, "plan-direct-add-action-action-type").fill("http_metadata_collection");
-  await directControl(page, "plan-direct-add-action-kind").selectOption("tool");
+  await selectTitaniumOption(directControl(page, "plan-direct-add-action-kind"), "tool", "keyboard");
   await directControl(page, "plan-direct-add-action-target").fill(target);
   await directControl(page, "plan-direct-add-action-arguments").fill('{"timeoutSeconds":15,"path":"/"}');
   await directControl(page, "plan-direct-add-action-intent").fill("Collect bounded response metadata from the authorized application.");
@@ -310,14 +312,14 @@ test(`${TEST_ID} creates six exact graph proposals through the real service with
     ...directEntries.filter((entry) => entry.id.startsWith("plan-direct.update.")).map((entry) => entry.id),
   ]);
   await setReason(page, "Refine the DNS step wording and assign the specialist best suited to the verified application context.");
-  await directControl(page, "plan-direct-step").selectOption(fixture.stepTwoId);
+  await selectTitaniumOption(directControl(page, "plan-direct-step"), fixture.stepTwoId, "pointer");
   await directControl(page, "plan-direct-update-phase").fill("Correlated discovery");
   await directControl(page, "plan-direct-update-title").fill("Correlate approved DNS records");
   await directControl(page, "plan-direct-update-objective").fill("Correlate only names attributable to the exact approved target.");
   await directControl(page, "plan-direct-update-criteria").fill("Approved names are attributable\nConflicts remain visible");
-  await directControl(page, "plan-direct-update-action-class").selectOption("web_crawling_page_capture");
-  await directControl(page, "plan-direct-update-action-class").selectOption("dns_domain_certificate_discovery");
-  await directControl(page, "plan-direct-update-agent").selectOption(fixture.alternateAgentId);
+  await selectTitaniumOption(directControl(page, "plan-direct-update-action-class"), "web_crawling_page_capture", "keyboard");
+  await selectTitaniumOption(directControl(page, "plan-direct-update-action-class"), "dns_domain_certificate_discovery", "pointer");
+  await selectTitaniumOption(directControl(page, "plan-direct-update-agent"), fixture.alternateAgentId, "keyboard");
   const updateOperation = {
     kind: "update_step",
     stepId: fixture.stepTwoId,
@@ -338,7 +340,7 @@ test(`${TEST_ID} creates six exact graph proposals through the real service with
     .filter((entry) => entry.id === "plan-direct.step" || entry.id.startsWith("plan-direct.dependencies."))
     .map((entry) => entry.id));
   await setReason(page, "Make target identity an explicit prerequisite for the independent application metadata step.");
-  await directControl(page, "plan-direct-step").selectOption(fixture.stepThreeId);
+  await selectTitaniumOption(directControl(page, "plan-direct-step"), fixture.stepThreeId, "pointer");
   const firstDependency = directControl(page, `plan-direct-dependency-${fixture.stepOneId}`);
   const secondDependency = directControl(page, `plan-direct-dependency-${fixture.stepTwoId}`);
   await secondDependency.focus();
@@ -386,7 +388,7 @@ test(`${TEST_ID} creates six exact graph proposals through the real service with
     .filter((entry) => entry.id === "plan-direct.step" || entry.id.startsWith("plan-direct.remove."))
     .map((entry) => entry.id));
   await setReason(page, "Remove the independent application metadata hypothesis because current evidence makes it unnecessary.");
-  await directControl(page, "plan-direct-step").selectOption(fixture.stepThreeId);
+  await selectTitaniumOption(directControl(page, "plan-direct-step"), fixture.stepThreeId, "keyboard");
   await directControl(page, "plan-direct-remove-reason").fill("The represented step is independent and no longer reduces uncertainty.");
   const removeOperation = {
     kind: "remove_step",
@@ -404,9 +406,9 @@ test(`${TEST_ID} creates six exact graph proposals through the real service with
     .filter((entry) => entry.id === "plan-direct.step" || entry.id.startsWith("plan-direct.action."))
     .map((entry) => entry.id));
   await setReason(page, "Make the first step's exact represented action and rollback language match the bounded observation method.");
-  await directControl(page, "plan-direct-step").selectOption(fixture.stepOneId);
+  await selectTitaniumOption(directControl(page, "plan-direct-step"), fixture.stepOneId, "pointer");
   await directControl(page, "plan-direct-existing-action-action-type").fill("passive_scope_revalidation");
-  await directControl(page, "plan-direct-existing-action-kind").selectOption("tool");
+  await selectTitaniumOption(directControl(page, "plan-direct-existing-action-kind"), "tool", "keyboard");
   await directControl(page, "plan-direct-existing-action-target").fill(target);
   await directControl(page, "plan-direct-existing-action-arguments").fill('{"sources":["registry","scope"]}');
   await directControl(page, "plan-direct-existing-action-intent").fill("Revalidate attributable target identity using bounded local sources.");
@@ -501,9 +503,9 @@ test(`${DIRECT_EDIT_TEST_ID} revises and revalidates one exact direct proposal w
   const reason = "Represent the exact bounded identity check before any plan version can be activated.";
   await selectMode(page, "represented_action");
   await setReason(page, reason);
-  await directControl(page, "plan-direct-step").selectOption(fixture.stepOneId);
+  await selectTitaniumOption(directControl(page, "plan-direct-step"), fixture.stepOneId, "keyboard");
   await directControl(page, "plan-direct-existing-action-action-type").fill("passive_scope_revalidation");
-  await directControl(page, "plan-direct-existing-action-kind").selectOption("tool");
+  await selectTitaniumOption(directControl(page, "plan-direct-existing-action-kind"), "tool", "pointer");
   await directControl(page, "plan-direct-existing-action-target").fill(target);
   await directControl(page, "plan-direct-existing-action-arguments").fill('{"sources":["registry","scope"]}');
   await directControl(page, "plan-direct-existing-action-intent").fill("Revalidate attributable target identity using bounded local sources.");

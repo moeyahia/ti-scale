@@ -8,14 +8,16 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createDatabaseConnection } from "../../../server/db";
 import { MemoryRepository } from "../../../server/memory/MemoryRepository";
 import { parseObsidianNote } from "../../../server/vault";
+import { activeVaultPathFingerprint } from "../../../server/vault/ActiveVaultComposition";
 import { E2E_DATABASE_PATH, E2E_VAULT_ROOT } from "./environment";
 import { normalizeFixtureNamespace } from "./fixtureNamespace";
 
 const FIXTURE_TIME = "2099-07-16T22:00:00.000Z";
+const CLI_RESULT_PREFIX = "TI_SCALE_BRAIN_VAULT_FIXTURE=";
 
 export interface BrainVaultFixture {
   readonly namespace: string;
@@ -26,6 +28,7 @@ export interface BrainVaultFixture {
 
 export interface BrainVaultOperationsFixture extends BrainVaultFixture {
   readonly engagementId: string;
+  readonly nodeType: "attack_procedure" | "strategy" | "recovery_pattern" | "research";
   readonly importNodeId: string;
   readonly databaseResolutionNodeId: string;
   readonly vaultResolutionNodeId: string;
@@ -60,11 +63,11 @@ export interface BrainVaultQuarantineState {
   readonly sourceContentHash?: string;
   readonly quarantineRelative?: string;
   readonly markerRelative?: string;
-  readonly sourceExists: boolean;
-  readonly copyExists: boolean;
+  readonly originalProjectionExists: boolean;
+  readonly quarantinedArtifactExists: boolean;
   readonly receiptExists: boolean;
-  readonly sourceHash?: string;
-  readonly copyHash?: string;
+  readonly originalProjectionHash?: string;
+  readonly quarantinedArtifactHash?: string;
   readonly receipt?: {
     readonly intentId: string;
     readonly sourceContentHash: string;
@@ -87,6 +90,17 @@ export interface BrainVaultOperationsState {
     sha256: string;
     byteSize: number;
   }[];
+}
+
+export interface BrainVaultProjectionState {
+  readonly relativePath: string;
+  readonly markdown: string;
+  readonly note: {
+    readonly id: string;
+    readonly lifecycleStatus: string;
+    readonly body: string;
+    readonly aliases: readonly string[];
+  };
 }
 
 export function createBrainVaultFixture(instanceId: string): BrainVaultFixture {
@@ -114,9 +128,23 @@ export function createBrainVaultFixture(instanceId: string): BrainVaultFixture {
 export function createBrainVaultOperationsFixture(instanceId: string): BrainVaultOperationsFixture {
   const base = createBrainVaultFixture(instanceId);
   const engagementId = `eng-vault-${base.namespace}`;
-  const importNodeId = `mem-vault-import-${base.namespace}`;
-  const databaseResolutionNodeId = `mem-vault-keep-db-${base.namespace}`;
-  const vaultResolutionNodeId = `mem-vault-keep-vault-${base.namespace}`;
+  const opaqueId = (purpose: string): string => `mem_${createHash("sha256")
+    .update(`${base.namespace}:${purpose}`, "utf8")
+    .digest("hex")}`;
+  const importNodeId = opaqueId("operator-import");
+  const databaseResolutionNodeId = opaqueId("keep-database");
+  const vaultResolutionNodeId = opaqueId("keep-vault");
+  const nodeType = instanceId.includes("-pointer-")
+    ? "strategy" as const
+    : instanceId.includes("-keyboard-")
+      ? "research" as const
+      : instanceId.includes("projection-lifecycle")
+    ? "attack_procedure" as const
+      : instanceId.includes("conflict")
+      ? "strategy" as const
+      : instanceId.includes("repair-reindex")
+        ? "recovery_pattern" as const
+        : "research" as const;
   const bodies = {
     importInitialBody: `Initial operator-import projection ${base.namespace}.`,
     importVaultBody: `Operator edited this note in Obsidian ${base.namespace}.`,
@@ -144,11 +172,11 @@ export function createBrainVaultOperationsFixture(instanceId: string): BrainVaul
     for (const definition of definitions) {
       repository.createNode({
         id: definition.id,
-        nodeType: "procedure",
+        nodeType,
         title: definition.title,
         summary: "Isolated canonical Vault browser fixture with explicit operator provenance.",
         body: definition.body,
-        scope: { kind: "engagement", engagementId },
+        scope: { kind: "global" },
         sensitivity: "internal",
         confidence: 1,
         lifecycleStatus: "confirmed",
@@ -160,7 +188,6 @@ export function createBrainVaultOperationsFixture(instanceId: string): BrainVaul
             sourceType: "e2e_fixture",
             sourceId: `vault-source-${definition.id}`,
             acquiredAt: FIXTURE_TIME,
-            excerptRedacted: "Sanitized Vault projection fixture.",
           }],
         },
         authorType: "operator",
@@ -174,6 +201,7 @@ export function createBrainVaultOperationsFixture(instanceId: string): BrainVaul
   return {
     ...base,
     engagementId,
+    nodeType,
     importNodeId,
     databaseResolutionNodeId,
     vaultResolutionNodeId,
@@ -208,7 +236,14 @@ export function scopeBrainVaultConnection(fixture: BrainVaultOperationsFixture):
       UPDATE vault_connections SET sync_scope_json = ?, updated_at = ? WHERE id = ?
     `).run(JSON.stringify({
       lifecycleStatuses: ["confirmed"],
-      engagementIds: [fixture.engagementId],
+      nodeTypes: [fixture.nodeType],
+      nodeIds: [
+        fixture.importNodeId,
+        fixture.databaseResolutionNodeId,
+        fixture.vaultResolutionNodeId,
+      ],
+      scopeKinds: ["global"],
+      sensitivities: ["internal"],
     }), new Date().toISOString(), connection.id);
     if (result.changes !== 1) throw new Error("Vault connection scope was not updated exactly once");
     return connection.id;
@@ -341,7 +376,9 @@ export function readBrainVaultOperationsState(
       quarantines: quarantineRows.map((item): BrainVaultQuarantineState => {
         const intent = quarantineIntents.find((candidate) => candidate.syncStateId === item.id);
         const sourcePath = join(connection.vault_path, item.relative_path);
-        const copyPath = intent ? join(connection.vault_path, intent.quarantineRelative) : undefined;
+        const quarantinedArtifactPath = intent
+          ? join(connection.vault_path, intent.quarantineRelative)
+          : undefined;
         const markerPath = intent ? join(connection.vault_path, intent.markerRelative) : undefined;
         const receipt = markerPath && existsSync(markerPath)
           ? JSON.parse(readFileSync(markerPath, "utf8")) as {
@@ -373,11 +410,17 @@ export function readBrainVaultOperationsState(
             quarantineRelative: intent.quarantineRelative,
             markerRelative: intent.markerRelative,
           } : item.vault_content_hash ? { sourceContentHash: item.vault_content_hash } : {}),
-          sourceExists: existsSync(sourcePath),
-          copyExists: Boolean(copyPath && existsSync(copyPath)),
+          originalProjectionExists: existsSync(sourcePath),
+          quarantinedArtifactExists: Boolean(
+            quarantinedArtifactPath && existsSync(quarantinedArtifactPath),
+          ),
           receiptExists: Boolean(markerPath && existsSync(markerPath)),
-          ...(hashFile(sourcePath) ? { sourceHash: hashFile(sourcePath) } : {}),
-          ...(copyPath && hashFile(copyPath) ? { copyHash: hashFile(copyPath) } : {}),
+          ...(hashFile(sourcePath)
+            ? { originalProjectionHash: hashFile(sourcePath) }
+            : {}),
+          ...(quarantinedArtifactPath && hashFile(quarantinedArtifactPath)
+            ? { quarantinedArtifactHash: hashFile(quarantinedArtifactPath) }
+            : {}),
           ...(parsedReceipt ? { receipt: parsedReceipt } : {}),
         };
       }),
@@ -396,6 +439,27 @@ export function readBrainVaultOperationsState(
   } finally {
     database.close();
   }
+}
+
+export function readBrainVaultProjection(
+  fixture: BrainVaultOperationsFixture,
+  nodeId: string,
+): BrainVaultProjectionState {
+  const state = readBrainVaultOperationsState(fixture);
+  const node = state.nodes.find((item) => item.id === nodeId);
+  if (!node?.relativePath) throw new Error(`Vault fixture projection is missing: ${nodeId}`);
+  const markdown = readFileSync(join(state.connection.vaultPath, node.relativePath), "utf8");
+  const parsed = parseObsidianNote(markdown);
+  return {
+    relativePath: node.relativePath,
+    markdown,
+    note: {
+      id: parsed.id,
+      lifecycleStatus: parsed.lifecycleStatus,
+      body: parsed.body,
+      aliases: parsed.aliases,
+    },
+  };
 }
 
 export function editBrainVaultProjection(
@@ -451,6 +515,37 @@ export function markBrainVaultConnectionDegraded(fixture: BrainVaultOperationsFi
   }
 }
 
+/**
+ * Places one isolated connection into the real persisted recovery-required
+ * state before filesystem damage is introduced. The strictly newer optimistic
+ * version forces the browser to reload canonical connection state before it
+ * can submit Repair/Reindex, while the production watcher refuses to capture
+ * stale events from the represented error window.
+ */
+export function markBrainVaultRecoveryRequired(
+  fixture: BrainVaultOperationsFixture,
+): { readonly status: "error"; readonly updatedAt: string } {
+  if (!E2E_DATABASE_PATH) throw new Error("Brain Vault E2E requires the isolated V2 database path");
+  const database = createDatabaseConnection({ filename: E2E_DATABASE_PATH, fileMustExist: true, busyTimeoutMs: 120_000 });
+  try {
+    const connection = requireConnection(database, fixture);
+    const current = database.prepare(`
+      SELECT updated_at FROM vault_connections WHERE id = ?
+    `).get(connection.id) as { updated_at: string };
+    const updatedAt = new Date(Math.max(Date.now(), Date.parse(current.updated_at) + 1)).toISOString();
+    const result = database.prepare(`
+      UPDATE vault_connections SET status = 'error', updated_at = ?
+      WHERE id = ? AND updated_at = ?
+    `).run(updatedAt, connection.id, current.updated_at);
+    if (result.changes !== 1) {
+      throw new Error("Vault recovery-required transition lost its optimistic connection version");
+    }
+    return { status: "error", updatedAt };
+  } finally {
+    database.close();
+  }
+}
+
 export function damageBrainVaultForRecovery(fixture: BrainVaultOperationsFixture): {
   readonly outsideTargetPath: string;
   readonly symlinkPath: string;
@@ -473,7 +568,7 @@ export function damageBrainVaultForRecovery(fixture: BrainVaultOperationsFixture
   );
   rmSync(join(state.connection.vaultPath, missing.relativePath));
   const outsideTargetPath = join(state.connection.vaultPath, ".ti-scale", "recovery-symlink-target.txt");
-  const symlinkPath = join(state.connection.vaultPath, "10 Operator", `recovery-link-${fixture.namespace}.md`);
+  const symlinkPath = join(dirname(malformedSourcePath), `recovery-link-${fixture.namespace}.md`);
   writeFileSync(outsideTargetPath, "outside symlink target must remain unchanged", { encoding: "utf8", mode: 0o600 });
   symlinkSync(outsideTargetPath, symlinkPath);
   return {
@@ -487,24 +582,27 @@ export function damageBrainVaultForRecovery(fixture: BrainVaultOperationsFixture
 
 export function takeBrainVaultOffline(fixture: BrainVaultFixture): {
   readonly vaultPath: string;
-  readonly backupPath: string;
+  readonly detachedPath: string;
 } {
   const vaultPath = join(E2E_VAULT_ROOT, fixture.relativePath);
-  const backupPath = join(E2E_VAULT_ROOT, `${fixture.relativePath}.offline-${fixture.namespace}`);
-  if (existsSync(backupPath)) rmSync(backupPath, { recursive: true, force: true });
-  renameSync(vaultPath, backupPath);
-  return { vaultPath, backupPath };
+  const detachedPath = join(E2E_VAULT_ROOT, `${fixture.relativePath}.offline-${fixture.namespace}`);
+  if (existsSync(detachedPath)) rmSync(detachedPath, { recursive: true, force: true });
+  renameSync(vaultPath, detachedPath);
+  return { vaultPath, detachedPath };
 }
 
-export function restoreBrainVaultOnline(paths: { readonly vaultPath: string; readonly backupPath: string }): void {
+export function restoreBrainVaultOnline(paths: {
+  readonly vaultPath: string;
+  readonly detachedPath: string;
+}): void {
   if (existsSync(paths.vaultPath)) rmSync(paths.vaultPath, { recursive: true, force: true });
-  renameSync(paths.backupPath, paths.vaultPath);
+  renameSync(paths.detachedPath, paths.vaultPath);
 }
 
 export function removeBrainVaultFixtureFiles(fixture: BrainVaultFixture): void {
   rmSync(join(E2E_VAULT_ROOT, fixture.relativePath), { recursive: true, force: true });
-  const backup = join(E2E_VAULT_ROOT, `${fixture.relativePath}.offline-${fixture.namespace}`);
-  if (existsSync(backup)) rmSync(backup, { recursive: true, force: true });
+  const detached = join(E2E_VAULT_ROOT, `${fixture.relativePath}.offline-${fixture.namespace}`);
+  if (existsSync(detached)) rmSync(detached, { recursive: true, force: true });
 }
 
 export function readBrainVaultFixture(fixture: BrainVaultFixture) {
@@ -514,22 +612,100 @@ export function readBrainVaultFixture(fixture: BrainVaultFixture) {
     const connection = database.prepare(`
       SELECT id, vault_path, status FROM vault_connections WHERE display_name = ?
     `).get(fixture.displayName) as { id: string; vault_path: string; status: string } | undefined;
-    const candidateFingerprint = createHash("sha256")
-      .update(`vault-path:${fixture.relativePath}`, "utf8")
-      .digest("hex");
+    const vaultDirectory = join(E2E_VAULT_ROOT, fixture.relativePath);
+    const candidateFingerprint = activeVaultPathFingerprint(vaultDirectory);
     const audits = database.prepare(`
-      SELECT action, resource_type, resource_id, details_json, previous_hash, record_hash
+      SELECT rowid, action, resource_type, resource_id, details_json, previous_hash, record_hash
       FROM audit_records WHERE rowid > ?
         AND action IN ('vault.health.verified', 'vault.connection.connected')
         AND resource_id IN (?, ?)
       ORDER BY rowid
     `).all(fixture.baselineAuditRowId, candidateFingerprint, connection?.id ?? "") as Array<Record<string, unknown>>;
-    const vaultDirectory = join(E2E_VAULT_ROOT, fixture.relativePath);
     const temporaryHealthEntries = existsSync(vaultDirectory)
       ? readdirSync(vaultDirectory).filter((entry) => entry.startsWith(".ti-scale-health-"))
       : [];
     return { connection, audits, vaultDirectory, temporaryHealthEntries };
   } finally {
     database.close();
+  }
+}
+
+function runCli(): void {
+  const operation = process.argv[2];
+  const input = JSON.parse(process.argv[3] ?? "null") as unknown;
+  const record = input && typeof input === "object" ? input as Record<string, unknown> : undefined;
+  let result: unknown;
+  switch (operation) {
+    case "create":
+      if (typeof input !== "string") throw new Error("create requires one fixture namespace");
+      result = createBrainVaultFixture(input);
+      break;
+    case "create-operations":
+      if (typeof input !== "string") throw new Error("create-operations requires one fixture namespace");
+      result = createBrainVaultOperationsFixture(input);
+      break;
+    case "scope":
+      result = scopeBrainVaultConnection(input as BrainVaultOperationsFixture);
+      break;
+    case "read-operations":
+      result = readBrainVaultOperationsState(input as BrainVaultOperationsFixture);
+      break;
+    case "read-projection":
+      result = readBrainVaultProjection(
+        record?.fixture as BrainVaultOperationsFixture,
+        String(record?.nodeId ?? ""),
+      );
+      break;
+    case "edit-projection":
+      result = editBrainVaultProjection(
+        record?.fixture as BrainVaultOperationsFixture,
+        String(record?.nodeId ?? ""),
+        String(record?.expectedBody ?? ""),
+        String(record?.nextBody ?? ""),
+      );
+      break;
+    case "correct-canonical":
+      result = correctBrainVaultCanonicalNode(
+        record?.fixture as BrainVaultOperationsFixture,
+        String(record?.nodeId ?? ""),
+        String(record?.nextBody ?? ""),
+      );
+      break;
+    case "mark-degraded":
+      markBrainVaultConnectionDegraded(input as BrainVaultOperationsFixture);
+      result = null;
+      break;
+    case "mark-recovery-required":
+      result = markBrainVaultRecoveryRequired(input as BrainVaultOperationsFixture);
+      break;
+    case "damage":
+      result = damageBrainVaultForRecovery(input as BrainVaultOperationsFixture);
+      break;
+    case "take-offline":
+      result = takeBrainVaultOffline(input as BrainVaultFixture);
+      break;
+    case "restore-online":
+      restoreBrainVaultOnline(input as { readonly vaultPath: string; readonly detachedPath: string });
+      result = null;
+      break;
+    case "remove-files":
+      removeBrainVaultFixtureFiles(input as BrainVaultFixture);
+      result = null;
+      break;
+    case "read":
+      result = readBrainVaultFixture(input as BrainVaultFixture);
+      break;
+    default:
+      throw new Error(`Unsupported Brain Vault fixture operation: ${String(operation)}`);
+  }
+  process.stdout.write(`${CLI_RESULT_PREFIX}${JSON.stringify(result)}\n`);
+}
+
+if (import.meta.main) {
+  try {
+    runCli();
+  } catch (error) {
+    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    process.exitCode = 1;
   }
 }

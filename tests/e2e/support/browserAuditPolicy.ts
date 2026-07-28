@@ -9,6 +9,33 @@ export interface BrowserIssueLike {
 
 export type HistoryTraversalReceipt = "missing" | "same-document" | "document-request";
 
+export interface WebKitCoopProvisionalDocumentReplacement {
+  readonly browserName: string;
+  readonly samePage: boolean;
+  readonly sameFrame: boolean;
+  readonly predecessor: {
+    readonly method: string;
+    readonly url: string;
+    readonly resourceType: string;
+    readonly navigationRequest: boolean;
+    readonly startingPageUrl: string;
+  };
+  readonly successor: {
+    readonly method: string;
+    readonly url: string;
+    readonly resourceType: string;
+    readonly navigationRequest: boolean;
+    readonly startingPageUrl: string;
+  };
+  readonly response: {
+    readonly status?: number;
+    readonly url?: string;
+    readonly crossOriginOpenerPolicy?: string;
+  };
+  readonly successorFinished: boolean;
+  readonly resolvedPageUrl: string;
+}
+
 /**
  * Classifies the independently observed browser receipts for a history
  * traversal. Engines may restore a same-URL history entry through a real
@@ -30,6 +57,51 @@ export function classifyHistoryTraversalReceipt(input: {
     && input.observedUrl !== input.startingUrl
   ) return "same-document";
   return "missing";
+}
+
+/**
+ * WebKit creates a second browsing-context document when a first navigation
+ * combines a fragment deep link with `Cross-Origin-Opener-Policy:
+ * same-origin`. Playwright exposes both document Request identities but
+ * WebKit emits neither `requestfinished` nor `requestfailed` for the
+ * superseded provisional identity.
+ *
+ * This predicate does not accept a timeout or a URL allowlist. The caller
+ * must prove an exact same-page/frame replacement, the real response,
+ * successful completion, the production COOP policy, and the resolved
+ * fragment deep link before retiring the predecessor.
+ */
+export function isExactWebKitCoopProvisionalDocumentReplacement(
+  input: WebKitCoopProvisionalDocumentReplacement,
+): boolean {
+  if (
+    input.browserName !== "webkit"
+    || !input.samePage
+    || !input.sameFrame
+    || !input.predecessor.navigationRequest
+    || !input.successor.navigationRequest
+    || input.predecessor.method !== "GET"
+    || input.successor.method !== "GET"
+    || input.predecessor.resourceType !== "document"
+    || input.successor.resourceType !== "document"
+    || input.predecessor.url !== input.successor.url
+    || input.predecessor.startingPageUrl !== "about:blank"
+    || input.successor.startingPageUrl !== "about:blank"
+    || input.response.url !== input.successor.url
+    || !isResolvedDocumentNavigationStatus(input.response.status ?? null)
+    || input.response.crossOriginOpenerPolicy !== "same-origin"
+    || !input.successorFinished
+  ) return false;
+  try {
+    const requested = new URL(input.successor.url);
+    const resolved = new URL(input.resolvedPageUrl);
+    return resolved.hash.length > 1
+      && resolved.origin === requested.origin
+      && resolved.pathname === requested.pathname
+      && resolved.search === requested.search;
+  } catch {
+    return false;
+  }
 }
 
 const EVENT_STREAM_PATH = "/api/v2/events/stream";

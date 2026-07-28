@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { resolveAutonomousPlanningSelection } from "../model-config";
 import type { AutonomousMissionRequest } from "./types";
 
 function normalized(value: unknown): unknown {
@@ -28,11 +29,28 @@ export function hashCanonical(value: unknown): string {
 
 /** Hash every field that defines Autonomous authority or promised outcome. */
 export function autonomousContractHash(request: AutonomousMissionRequest): string {
+  const specialistAgentIds = [...request.contract.specialistAgentIds]
+    .sort((left, right) => left.localeCompare(right));
+  const agentModelAssignments = [...(request.contract.agentModelAssignments ?? [])]
+    .map((selection) => ({
+      agentId: selection.agentId,
+      primaryConfigurationId: selection.primaryConfigurationId,
+      fallbackConfigurationId: selection.fallbackConfigurationId,
+      ...(selection.source ? { source: selection.source } : {}),
+    }))
+    .sort((left, right) => left.agentId.localeCompare(right.agentId));
   return hashCanonical({
     title: request.title,
     objective: request.objective,
     successCriteria: request.successCriteria,
     authorization: request.authorization,
-    contract: request.contract,
+    contract: {
+      ...request.contract,
+      specialistAgentIds,
+      planningSelection: resolveAutonomousPlanningSelection(
+        request.contract.planningSelection,
+      ),
+      agentModelAssignments,
+    },
   });
 }

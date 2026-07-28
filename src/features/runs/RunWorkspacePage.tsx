@@ -14,6 +14,9 @@ import { ActionActivity } from "./ActionActivity";
 import { ReconDigitalTwinSurface } from "../run-intelligence/RunIntelligenceSurface";
 import { FailureDiagnosisPanel } from "./FailureDiagnosisPanel";
 import { operatorText } from "../../lib/operatorLanguage";
+import { runStatusLabel } from "./runStatus";
+import { AutonomousActivationProofPanel } from "./AutonomousActivationProofPanel";
+import type { AutonomousActivationReceiptSummary } from "../../domain/types/runtimeV2";
 
 export default function RunWorkspacePage({ missionId, runId }: { missionId?: string; runId?: string; guided?: boolean }) {
   const mission = useQuery(`mission-runtime:${missionId ?? "none"}`, (signal) => missionId ? runtimeV2Api.mission(missionId, signal) : Promise.resolve(undefined), { staleTime: 0 });
@@ -46,7 +49,14 @@ function MissionRuntimeWorkspace({ snapshot, initialRun }: { snapshot: MissionRu
       {current.error && <DegradedNotice>Run refresh failed; the last validated projection remains visible.</DegradedNotice>}
       {!terminal && !["blocked", "recovering"].includes(run.status) && <RunControls run={run} onChanged={current.refresh} />}
     </>}
-    <MissionWorkspace snapshot={snapshot} run={run} liveContent={run ? <RunCockpit run={run} missionSuccessCriteria={snapshot.mission.successCriteria} showRunChrome={false} /> : undefined} />
+    <MissionWorkspace snapshot={snapshot} run={run} liveContent={run ? <RunCockpit
+      run={run}
+      missionSuccessCriteria={snapshot.mission.successCriteria}
+      showRunChrome={false}
+      initialActivationReceipt={
+        current.data?.currentAutonomousActivationReceipt
+      }
+    /> : undefined} />
   </>;
 }
 
@@ -55,20 +65,43 @@ function RunOnlyFrame({ runId }: { runId: string }) {
   if (snapshot.isLoading) return <div className="os-page"><LoadingPanel label="Loading live run checkpoint" /></div>;
   if (snapshot.error && !snapshot.data) return <div className="os-page"><ErrorPanel error={snapshot.error} onRetry={snapshot.refresh} /></div>;
   if (!snapshot.data) return null;
-  return <div className="os-page"><PageHeader eyebrow={`${snapshot.data.run.journey === "autonomous" ? "Autonomous" : "Guided"} run`} title={snapshot.data.run.missionName} description={snapshot.data.run.objective} actions={<StreamState />} /><RunCockpit run={snapshot.data.run} /></div>;
+  return <div className="os-page"><PageHeader eyebrow={`${snapshot.data.run.journey === "autonomous" ? "Autonomous" : "Guided"} run`} title={snapshot.data.run.missionName} description={snapshot.data.run.objective} actions={<StreamState />} /><RunCockpit
+    run={snapshot.data.run}
+    initialActivationReceipt={
+      snapshot.data.currentAutonomousActivationReceipt
+    }
+  /></div>;
 }
 
-export function RunCockpit({ run, missionSuccessCriteria = [], showRunChrome = true }: { run: RuntimeRun; missionSuccessCriteria?: readonly string[]; showRunChrome?: boolean }) {
+export function RunCockpit({
+  run,
+  missionSuccessCriteria = [],
+  showRunChrome = true,
+  initialActivationReceipt,
+}: {
+  run: RuntimeRun;
+  missionSuccessCriteria?: readonly string[];
+  showRunChrome?: boolean;
+  initialActivationReceipt?: AutonomousActivationReceiptSummary | null;
+}) {
   const current = useQuery(`run:${run.id}`, (signal) => runtimeV2Api.run(run.id, signal), { staleTime: 0 });
   const plans = useQuery(`run-plans:${run.id}`, (signal) => runtimeV2Api.plans(run.id, signal), { staleTime: 0 });
   const events = useQuery(`run-events:${run.id}`, (signal) => operationsApi.events({ runId: run.id, limit: 30 }, signal), { staleTime: 0 });
   const stream = useEventStream();
   useEffect(() => { if (stream.lastEvent?.runId === run.id) { current.refresh(); plans.refresh(); events.refresh(); } }, [stream.lastEvent?.id, run.id]);
   const authoritative = current.data?.run ?? run;
+  const activationReceipt = current.data
+    ? current.data.currentAutonomousActivationReceipt
+    : initialActivationReceipt;
   const activePlan = plans.data?.items.find((plan) => plan.id === authoritative.currentPlanId) ?? plans.data?.items[0];
   const terminal = ["completed", "failed", "cancelled"].includes(authoritative.status);
   return <>{showRunChrome && <RunStatusBand run={authoritative} />}
     {current.error && <DegradedNotice>Run refresh failed; the last validated projection remains visible.</DegradedNotice>}
+    {authoritative.journey === "autonomous" && <AutonomousActivationProofPanel
+      runId={authoritative.id}
+      current={activationReceipt}
+      onRefresh={current.refresh}
+    />}
     {showRunChrome && !terminal && !["blocked", "recovering"].includes(authoritative.status) && <RunControls run={authoritative} onChanged={() => { current.refresh(); events.refresh(); }} />}
     {terminal && <CompletionReview run={authoritative} plan={activePlan} missionSuccessCriteria={missionSuccessCriteria} />}
     {["blocked", "recovering", "failed"].includes(authoritative.status) &&
@@ -77,7 +110,7 @@ export function RunCockpit({ run, missionSuccessCriteria = [], showRunChrome = t
     {["blocked", "recovering", "failed", "waiting_guided_decision"].includes(authoritative.status) &&
       <RecoveryPanel runId={authoritative.id} onChanged={() => { current.refresh(); plans.refresh(); events.refresh(); }} />
     }
-    <ReconDigitalTwinSurface missionId={authoritative.missionId} runId={authoritative.id} />
+    <ReconDigitalTwinSurface missionId={authoritative.missionId} runId={authoritative.id} currentStepId={authoritative.currentStepId} />
     <div className="os-live-layout"><section><h2>Plan and agent ownership</h2>{plans.isLoading && <LoadingPanel label="Loading versioned plan" />}{plans.error && !plans.data && <ErrorPanel error={plans.error} onRetry={plans.refresh} />}{activePlan ? <><Card className="os-plan-summary"><div className="os-card-heading"><div><p className="os-eyebrow">Plan v{activePlan.version}</p><h3>{operatorText(activePlan.strategySummary, { kind: "plan" })}</h3></div><StatusPill status={activePlan.status} /></div>{activePlan.rationaleSummary && <p>{operatorText(activePlan.rationaleSummary, { kind: "plan" })}</p>}<JsonDetails label="Technical plan wording" value={{ strategySummary: activePlan.strategySummary, rationaleSummary: activePlan.rationaleSummary }} /></Card><ol className="os-step-rail">{activePlan.steps.map((step) => <li key={step.id} className={step.id === authoritative.currentStepId ? "is-current" : undefined}><div className="os-step-index">{step.ordinal + 1}</div><article><header><div><span>{step.phase}</span><h3>{operatorText(step.title, { kind: "plan", agent: step.assignedAgentId, target: step.action.target })}</h3></div><StatusPill status={step.status} /></header><p>{operatorText(step.explanation || step.objective, { kind: "plan", agent: step.assignedAgentId, target: step.action.target })}</p><KeyValueGrid items={[{ label: "Owner", value: step.assignedAgentId || "Unassigned" }, { label: "Risk", value: step.riskClass || "Not classified" }, { label: "Target", value: step.action.target }, { label: "Reversibility", value: operatorText(step.reversibility, { kind: "plan" }, "Not reported") }]} /><p className="os-intent"><strong>Intent:</strong> {operatorText(step.action.intentSummary, { kind: "action_intent", agent: step.assignedAgentId, target: step.action.target, destructive: step.action.destructive })}</p><JsonDetails label="Normalized action and original wording" value={{ action: step.action, narrative: { title: step.title, objective: step.objective, explanation: step.explanation, rationale: step.rationale, reversibility: step.reversibility } }} /></article></li>)}</ol></> : !plans.isLoading && <Card><EmptyState title="No plan available" description="The run has not persisted a versioned plan yet." /></Card>}</section>
       <aside><h2>Meaningful activity</h2><QueryBoundary data={events.data?.items} error={events.error} isLoading={events.isLoading} onRetry={events.refresh} emptyTitle="No semantic events" emptyDescription="The run has not emitted an authorized state change yet.">{(items) => <ol className="os-timeline">{items.map((event) => <li key={event.id}><strong>{operatorText(event.summary, { kind: "event" })}</strong><span>{event.eventType} · {formatTime(event.occurredAt)}</span>{event.correlation.contextPackId && <ContextUsedDisclosure packId={event.correlation.contextPackId} />}<JsonDetails label="Technical event detail" value={{ rawSummary: event.summary, payload: event.payload, correlation: event.correlation }} /></li>)}</ol>}</QueryBoundary></aside>
     </div><ActionActivity runId={authoritative.id} />
@@ -93,5 +126,3 @@ function RunControls({ run, onChanged }: { run: RuntimeRun; onChanged: () => voi
   const command = (value: "pause" | "cancel", event: FormEvent) => { event.preventDefault(); void action.run(() => runtimeV2Api.controlRun(run.id, { command: value, reason }, `run-${crypto.randomUUID()}`).then(() => onChanged()), `Run ${value} recorded.`); };
   return <Card className="os-run-controls"><form onSubmit={(event) => command("pause", event)}><label><span>Operator reason (audited)</span><input required value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why is this intervention necessary?" /></label><div><Button variant="secondary" disabled={terminal || action.pending || !reason.trim()}>Pause run</Button><Button type="button" variant="danger" disabled={terminal || action.pending || !reason.trim()} onClick={(event) => command("cancel", event as unknown as FormEvent)}>Cancel run</Button></div></form>{action.error && <ErrorPanel error={action.error} />}{action.message && <p role="status" className="os-success-note">{action.message}</p>}</Card>;
 }
-
-function runStatusLabel(run: RuntimeRun): string { if (run.journey === "autonomous") { if (run.status === "running") return "Executing autonomously"; if (run.status === "recovering") return "Recovering autonomously"; if (run.status === "completed") return "Completed autonomously"; if (run.status === "failed") return /contract/iu.test(run.statusReason ?? "") ? "Safe-stopped: outside contract" : "Failed safely"; } return run.status.replaceAll("_", " "); }

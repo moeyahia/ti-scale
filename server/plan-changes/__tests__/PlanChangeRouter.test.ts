@@ -14,8 +14,10 @@ import type { PlanChangeRequest } from "../types";
 const MISSION_ID = "mission-plan-change";
 const RUN_ID = "run-plan-change";
 const PLAN_ID = "plan-plan-change-v1";
+const PLAN_TWO_ID = "plan-plan-change-v2";
 const STEP_ONE = "step-plan-change-one";
 const STEP_TWO = "step-plan-change-two";
+const STEP_THREE = "step-plan-change-three";
 const AGENT_ID = "agent-plan-change";
 const NOW = "2026-07-16T15:00:00.000Z";
 const AUTONOMOUS_CONTRACT_ID = "contract-plan-change";
@@ -148,6 +150,36 @@ function fixture(database: SqliteDatabase, options: HarnessOptions = {}): void {
     INSERT INTO assignments (id, run_id, step_id, agent_id, status, created_at, updated_at)
     VALUES ('assignment-plan-change', ?, ?, ?, 'queued', ?, ?)
   `).run(RUN_ID, STEP_ONE, AGENT_ID, NOW, NOW);
+}
+
+function seedCurrentPlanV2(database: SqliteDatabase): void {
+  database.prepare("UPDATE plans SET status = 'superseded' WHERE id = ?").run(PLAN_ID);
+  database.prepare(`
+    INSERT INTO plans (
+      id, run_id, version, status, strategy_summary, rationale_summary,
+      plan_hash, created_by, created_at, activated_at
+    ) VALUES (?, ?, 2, 'active', 'Validate the narrowed current hypothesis', 'Version two follows newly reviewed evidence', ?, 'operator-plan', ?, ?)
+  `).run(PLAN_TWO_ID, RUN_ID, "c".repeat(64), NOW, NOW);
+  database.prepare(`
+    INSERT INTO plan_steps (
+      id, plan_id, run_id, ordinal, phase, title, objective, status,
+      success_criteria_json, dependencies_json, action_class, risk_class,
+      assigned_agent_id, created_at, updated_at
+    ) VALUES (?, ?, ?, 0, 'Analysis', 'Validate the current hypothesis', 'Review one bounded current hypothesis', 'ready',
+      '["Current hypothesis classified"]', '[]', 'passive_intelligence_osint', 'low', ?, ?, ?)
+  `).run(STEP_THREE, PLAN_TWO_ID, RUN_ID, AGENT_ID, NOW, NOW);
+  database.prepare(`
+    INSERT INTO mission_constraints (id, mission_id, constraint_type, value_json, source, created_at)
+    VALUES ('constraint-step-three', ?, 'represented_action', ?, ?, ?)
+  `).run(MISSION_ID, JSON.stringify({
+    action: { actionType: "passive_intelligence_osint", actionClass: "passive_intelligence_osint", target: "fixture.local", arguments: {}, intentSummary: "Review one attributable current hypothesis", kind: "manual", idempotent: true, destructive: false },
+    explanation: "Review one bounded current hypothesis.", rationale: "Keep the current branch attributable.", reversibility: "Read-only", dependencies: [],
+  }), STEP_THREE, NOW);
+  database.prepare(`
+    INSERT INTO assignments (id, run_id, step_id, agent_id, status, created_at, updated_at)
+    VALUES ('assignment-plan-change-v2', ?, ?, ?, 'queued', ?, ?)
+  `).run(RUN_ID, STEP_THREE, AGENT_ID, NOW, NOW);
+  database.prepare("UPDATE runs SET current_plan_id = ?, current_step_id = ? WHERE id = ?").run(PLAN_TWO_ID, STEP_THREE, RUN_ID);
 }
 
 async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -573,12 +605,28 @@ describe("PlanChangeRouter", () => {
     const proposal = blocked.body.request as PlanChangeRequest;
     expect(proposal.status).toBe("proposed");
     expect(proposal.policyValidation).toMatchObject({ valid: false, prohibitedActionClasses: ["destructive_modification"] });
-    expect(proposal.inflightImpact).toMatchObject({ safeToApply: false, requiresCancellation: true, leaseOwner: "worker-live" });
+    expect(proposal.inflightImpact).toMatchObject({
+      safeToApply: false,
+      requiresCancellation: false,
+      leaseOwner: "worker-live",
+      activeStepIds: [],
+      activeAssignmentIds: [],
+      unaffectedActiveStepIds: [STEP_ONE],
+      unaffectedActiveAssignmentIds: ["assignment-plan-change"],
+    });
+    expect(proposal.inflightImpact.resolutionOptions).toEqual([
+      expect.objectContaining({ mode: "checkpoint_finish_idempotent_work", enabled: false }),
+      expect.objectContaining({
+        mode: "checkpoint_cancel_affected_work",
+        enabled: false,
+        disabledReason: "No affected live child requires runtime cancellation.",
+      }),
+    ]);
     const apply = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes/${proposal.id}/apply`, {
       method: "POST", key: "plan-running-apply", body: { expectedRequestVersion: 1, expectedRunVersion: 2, expectedPlanVersion: 1 },
     });
     expect(apply.status).toBe(409);
-    expect((apply.body.error as { code: string }).code).toBe("plan_change_policy_denied");
+    expect((apply.body.error as { code: string }).code).toBe("plan_change_not_validated");
     expect(harness.database.prepare("SELECT lease_owner, status FROM runs WHERE id = ?").get(RUN_ID)).toEqual({ lease_owner: "worker-live", status: "running" });
     expect(harness.database.prepare("SELECT status FROM assignments WHERE id = 'assignment-plan-change'").get()).toEqual({ status: "active" });
     expect((harness.database.prepare("SELECT COUNT(*) AS count FROM actions").get() as { count: number }).count).toBe(0);
@@ -602,8 +650,48 @@ describe("PlanChangeRouter", () => {
       method: "POST", key: "plan-dependency-apply", body: { expectedRequestVersion: 1, expectedRunVersion: 1, expectedPlanVersion: 1 },
     });
     expect(apply.status).toBe(409);
-    expect((apply.body.error as { code: string }).code).toBe("plan_change_dependency_invalid");
+    expect((apply.body.error as { code: string }).code).toBe("plan_change_not_validated");
     expect(harness.database.prepare("SELECT status FROM plans WHERE id = ?").get(PLAN_ID)).toEqual({ status: "active" });
+  });
+
+  test("never applies an unreviewed proposed request even when its blocker later clears", async () => {
+    const harness = await createHarness();
+    harness.database.prepare("UPDATE agents SET status = 'offline' WHERE id = ?").run(AGENT_ID);
+    const created = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-proposed-readiness", body: summaryProposal("Use a narrower attributable path"),
+    });
+    expect(created.status).toBe(201);
+    const proposal = created.body.request as PlanChangeRequest;
+    expect(proposal).toMatchObject({ status: "proposed", readinessImpact: { valid: false } });
+
+    harness.database.prepare("UPDATE agents SET status = 'available' WHERE id = ?").run(AGENT_ID);
+    const applied = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes/${proposal.id}/apply`, {
+      method: "POST", key: "plan-proposed-readiness-apply", body: {
+        expectedRequestVersion: 1, expectedRunVersion: 1, expectedPlanVersion: 1,
+      },
+    });
+    expect(applied.status).toBe(409);
+    expect((applied.body.error as { readonly code: string }).code).toBe("plan_change_not_validated");
+    expect(harness.database.prepare("SELECT current_plan_id FROM runs WHERE id = ?").get(RUN_ID)).toEqual({ current_plan_id: PLAN_ID });
+  });
+
+  test("requires a fresh review when a still-safe impact changes before apply", async () => {
+    const harness = await createHarness();
+    const created = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-impact-drift-create", body: summaryProposal("Use the attributable evidence branch"),
+    });
+    const proposal = created.body.request as PlanChangeRequest;
+    expect(proposal).toMatchObject({ status: "validated", inflightImpact: { queuedAssignmentIdsToCancel: ["assignment-plan-change"] } });
+    harness.database.prepare("UPDATE assignments SET status = 'cancelled', ended_at = ?, updated_at = ? WHERE id = 'assignment-plan-change'").run(NOW, NOW);
+
+    const applied = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes/${proposal.id}/apply`, {
+      method: "POST", key: "plan-impact-drift-apply", body: {
+        expectedRequestVersion: 1, expectedRunVersion: 1, expectedPlanVersion: 1,
+      },
+    });
+    expect(applied.status).toBe(409);
+    expect((applied.body.error as { readonly code: string }).code).toBe("plan_change_review_drift");
+    expect(harness.database.prepare("SELECT current_plan_id FROM runs WHERE id = ?").get(RUN_ID)).toEqual({ current_plan_id: PLAN_ID });
   });
 
   test("adds a fully represented step and preserves its exact action in the diff and immutable version", async () => {
@@ -716,4 +804,296 @@ describe("PlanChangeRouter", () => {
     expect(proposal.policyValidation.reasons.join(" ")).toContain("action type unapproved_action_type is not pre-authorized");
     expect(proposal.policyValidation.reasons.join(" ")).toContain("destructive action outside the signed bounded-lab destructive policy");
   });
+
+  test("restores a historical snapshot only through a reviewed new immutable plan version", async () => {
+    const harness = await createHarness();
+    seedCurrentPlanV2(harness.database);
+    const historicalBefore = harness.database.prepare("SELECT status, strategy_summary FROM plans WHERE id = ?").get(PLAN_ID);
+
+    const created = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-create-0001", body: {
+        basePlanId: PLAN_TWO_ID,
+        expectedRunVersion: 1,
+        expectedPlanVersion: 2,
+        requestText: "Verified evidence disproved the current branch, so prepare the prior bounded plan for review.",
+        operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 1 }],
+      },
+    });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const proposal = created.body.request as PlanChangeRequest;
+    expect(proposal).toMatchObject({
+      status: "validated",
+      basePlanId: PLAN_TWO_ID,
+      basePlanVersion: 2,
+      normalizedChange: { operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 1 }] },
+      dependencyImpact: { valid: true, changed: true, reordered: true },
+    });
+    expect(proposal.normalizedChange.summary).toContain("Restore historical plan v1 as a new immutable version");
+    expect(proposal.structuredDiff.some((entry) => entry.kind === "remove" && entry.path === `steps[${STEP_THREE}]`)).toBe(true);
+    expect(proposal.structuredDiff.some((entry) => entry.kind === "add" && entry.path === `steps[${STEP_ONE}]`)).toBe(true);
+    expect(harness.database.prepare("SELECT current_plan_id FROM runs WHERE id = ?").get(RUN_ID)).toEqual({ current_plan_id: PLAN_TWO_ID });
+    expect(harness.database.prepare("SELECT COUNT(*) AS count FROM actions WHERE run_id = ?").get(RUN_ID)).toEqual({ count: 0 });
+
+    const applied = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes/${proposal.id}/apply`, {
+      method: "POST", key: "plan-restore-apply-0001", body: {
+        expectedRequestVersion: 1,
+        expectedRunVersion: 1,
+        expectedPlanVersion: 2,
+      },
+    });
+    expect(applied.status, JSON.stringify(applied.body)).toBe(200);
+    expect(applied.body.resultPlanVersion).toBe(3);
+    const resultPlanId = applied.body.resultPlanId as string;
+    const restored = new RuntimeRepository(harness.database).listPlans(RUN_ID).find((plan) => plan.id === resultPlanId);
+    expect(restored).toMatchObject({
+      version: 3,
+      status: "active",
+      strategySummary: "Map the authorized fixture",
+      rationaleSummary: "Start with attributable discovery",
+    });
+    expect(restored?.steps.map((step) => step.title)).toEqual(["Collect passive scope facts", "Validate DNS records"]);
+    expect(restored?.steps.map((step) => step.id)).not.toEqual([STEP_ONE, STEP_TWO]);
+    expect(harness.database.prepare("SELECT status, strategy_summary FROM plans WHERE id = ?").get(PLAN_ID)).toEqual(historicalBefore);
+    expect(harness.database.prepare("SELECT status FROM plans WHERE id = ?").get(PLAN_TWO_ID)).toEqual({ status: "superseded" });
+    expect(harness.database.prepare("SELECT current_plan_id, version FROM runs WHERE id = ?").get(RUN_ID)).toEqual({ current_plan_id: resultPlanId, version: 2 });
+    expect(harness.database.prepare("SELECT COUNT(*) AS count FROM actions WHERE run_id = ?").get(RUN_ID)).toEqual({ count: 0 });
+  });
+
+  test("rejects mixed, current, and cross-run restore targets before any plan changes", async () => {
+    const harness = await createHarness();
+    seedCurrentPlanV2(harness.database);
+    const mixed = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-mixed-0001", body: {
+        basePlanId: PLAN_TWO_ID, expectedRunVersion: 1, expectedPlanVersion: 2,
+        operations: [
+          { kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 1 },
+          { kind: "update_plan", strategySummary: "Ambiguous mixed rewrite" },
+        ],
+      },
+    });
+    expect(mixed.status).toBe(400);
+    expect((mixed.body.error as { readonly code: string }).code).toBe("invalid_plan_change_request");
+
+    const current = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-current-0001", body: {
+        basePlanId: PLAN_TWO_ID, expectedRunVersion: 1, expectedPlanVersion: 2,
+        requestText: "Reject restoring the current active version over itself.",
+        operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_TWO_ID, targetPlanVersion: 2 }],
+      },
+    });
+    expect(current.status).toBe(409);
+    expect((current.body.error as { readonly code: string }).code).toBe("plan_change_restore_target_invalid");
+
+    databaseSeedOtherRunPlan(harness.database);
+    const crossRun = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-cross-run-0001", body: {
+        basePlanId: PLAN_TWO_ID, expectedRunVersion: 1, expectedPlanVersion: 2,
+        requestText: "Reject a historical version that is not visible in this run.",
+        operations: [{ kind: "restore_plan_version", targetPlanId: "plan-other-run-v1", targetPlanVersion: 1 }],
+      },
+    });
+    expect(crossRun.status).toBe(404);
+    expect((crossRun.body.error as { readonly code: string }).code).toBe("plan_change_plan_not_found");
+
+    const staleVersion = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-stale-version", body: {
+        basePlanId: PLAN_TWO_ID, expectedRunVersion: 1, expectedPlanVersion: 2,
+        requestText: "Reject cached plan history whose visible version no longer matches the selected immutable record.",
+        operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 99 }],
+      },
+    });
+    expect(staleVersion.status).toBe(409);
+    expect((staleVersion.body.error as { readonly code: string }).code).toBe("plan_change_restore_history_stale");
+    expect(harness.database.prepare("SELECT COUNT(*) AS count FROM plan_change_requests").get()).toEqual({ count: 0 });
+    expect(harness.database.prepare("SELECT current_plan_id FROM runs WHERE id = ?").get(RUN_ID)).toEqual({ current_plan_id: PLAN_TWO_ID });
+  });
+
+  test("revalidates a historical rollback against current scope before apply", async () => {
+    const harness = await createHarness();
+    seedCurrentPlanV2(harness.database);
+    const created = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-revalidate-0001", body: {
+        basePlanId: PLAN_TWO_ID, expectedRunVersion: 1, expectedPlanVersion: 2,
+        requestText: "Recheck the earlier bounded strategy under the current scope before applying it.",
+        operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 1 }],
+      },
+    });
+    expect(created.status).toBe(201);
+    const proposal = created.body.request as PlanChangeRequest;
+    harness.database.prepare("UPDATE mission_targets SET target = 'different.fixture', normalized_target = 'different.fixture' WHERE mission_id = ? AND disposition = 'allowed'").run(MISSION_ID);
+
+    const applied = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes/${proposal.id}/apply`, {
+      method: "POST", key: "plan-restore-revalidate-apply", body: {
+        expectedRequestVersion: 1, expectedRunVersion: 1, expectedPlanVersion: 2,
+      },
+    });
+    expect(applied.status).toBe(409);
+    expect((applied.body.error as { readonly code: string }).code).toBe("plan_change_policy_denied");
+    expect(harness.database.prepare("SELECT current_plan_id FROM runs WHERE id = ?").get(RUN_ID)).toEqual({ current_plan_id: PLAN_TWO_ID });
+  });
+
+  test("requires a fresh review when a referenced historical snapshot changes after proposal", async () => {
+    const harness = await createHarness();
+    seedCurrentPlanV2(harness.database);
+    const created = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-drift-0001", body: {
+        basePlanId: PLAN_TWO_ID, expectedRunVersion: 1, expectedPlanVersion: 2,
+        requestText: "Review this exact historical snapshot and reject any later content drift.",
+        operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 1 }],
+      },
+    });
+    expect(created.status).toBe(201);
+    const proposal = created.body.request as PlanChangeRequest;
+    harness.database.prepare("UPDATE plans SET strategy_summary = 'Changed after the operator reviewed the comparison' WHERE id = ?").run(PLAN_ID);
+
+    const applied = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes/${proposal.id}/apply`, {
+      method: "POST", key: "plan-restore-drift-apply", body: {
+        expectedRequestVersion: 1, expectedRunVersion: 1, expectedPlanVersion: 2,
+      },
+    });
+    expect(applied.status).toBe(409);
+    expect(applied.body.error).toMatchObject({
+      code: "plan_change_review_drift",
+      humanMessage: "The reviewed plan comparison or impact changed before apply",
+      retryable: false,
+    });
+    expect(harness.database.prepare("SELECT current_plan_id FROM runs WHERE id = ?").get(RUN_ID)).toEqual({ current_plan_id: PLAN_TWO_ID });
+    expect(harness.database.prepare("SELECT COUNT(*) AS count FROM actions WHERE run_id = ?").get(RUN_ID)).toEqual({ count: 0 });
+  });
+
+  test("supports a later reviewed restoration of the same history without a plan-hash collision", async () => {
+    const harness = await createHarness();
+    seedCurrentPlanV2(harness.database);
+    const first = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-repeat-create-1", body: {
+        basePlanId: PLAN_TWO_ID, expectedRunVersion: 1, expectedPlanVersion: 2,
+        requestText: "Restore the earlier bounded strategy after reviewing the first failed branch.",
+        operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 1 }],
+      },
+    });
+    expect(first.status).toBe(201);
+    const firstApplied = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes/${(first.body.request as PlanChangeRequest).id}/apply`, {
+      method: "POST", key: "plan-restore-repeat-apply-1", body: {
+        expectedRequestVersion: 1, expectedRunVersion: 1, expectedPlanVersion: 2,
+      },
+    });
+    expect(firstApplied.status).toBe(200);
+    const planV3 = firstApplied.body.resultPlanId as string;
+
+    const amended = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-repeat-create-2", body: {
+        basePlanId: planV3, expectedRunVersion: 2, expectedPlanVersion: 3,
+        requestText: "Try a materially different reviewed strategy before reconsidering the historical version.",
+        operations: [{ kind: "update_plan", strategySummary: "Review a materially different bounded branch" }],
+      },
+    });
+    expect(amended.status).toBe(201);
+    const amendedApplied = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes/${(amended.body.request as PlanChangeRequest).id}/apply`, {
+      method: "POST", key: "plan-restore-repeat-apply-2", body: {
+        expectedRequestVersion: 1, expectedRunVersion: 2, expectedPlanVersion: 3,
+      },
+    });
+    expect(amendedApplied.status).toBe(200);
+    const planV4 = amendedApplied.body.resultPlanId as string;
+
+    const second = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-repeat-create-3", body: {
+        basePlanId: planV4, expectedRunVersion: 3, expectedPlanVersion: 4,
+        requestText: "New evidence now justifies a second explicit review of the same historical strategy.",
+        operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 1 }],
+      },
+    });
+    expect(second.status, JSON.stringify(second.body)).toBe(201);
+    const secondApplied = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes/${(second.body.request as PlanChangeRequest).id}/apply`, {
+      method: "POST", key: "plan-restore-repeat-apply-3", body: {
+        expectedRequestVersion: 1, expectedRunVersion: 3, expectedPlanVersion: 4,
+      },
+    });
+    expect(secondApplied.status, JSON.stringify(secondApplied.body)).toBe(200);
+    expect(secondApplied.body.resultPlanVersion).toBe(5);
+    const hashes = harness.database.prepare("SELECT version, plan_hash, content_hash, content_hash_version FROM plans WHERE version IN (3, 5) ORDER BY version").all() as Array<{ readonly version: number; readonly plan_hash: string; readonly content_hash: string; readonly content_hash_version: number }>;
+    expect(hashes).toHaveLength(2);
+    expect(hashes[0]?.plan_hash).not.toBe(hashes[1]?.plan_hash);
+    expect(hashes[0]?.content_hash).toBe(hashes[1]?.content_hash);
+    expect(hashes.every((entry) => entry.content_hash_version === 1)).toBe(true);
+    expect(hashes.every((entry) => /^[a-f0-9]{64}$/u.test(entry.plan_hash))).toBe(true);
+    expect(harness.database.prepare("SELECT COUNT(*) AS count FROM actions WHERE run_id = ?").get(RUN_ID)).toEqual({ count: 0 });
+  });
+
+  test("rejects empty or malformed historical plans before creating a rollback proposal", async () => {
+    const emptyHarness = await createHarness();
+    seedCurrentPlanV2(emptyHarness.database);
+    emptyHarness.database.prepare("DELETE FROM plan_steps WHERE plan_id = ?").run(PLAN_ID);
+    const empty = await request(emptyHarness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-empty-history", body: {
+        basePlanId: PLAN_TWO_ID, expectedRunVersion: 1, expectedPlanVersion: 2,
+        requestText: "Verify that an empty historical plan can never become active.",
+        operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 1 }],
+      },
+    });
+    expect(empty.status).toBe(409);
+    expect((empty.body.error as { readonly code: string }).code).toBe("plan_change_empty_plan");
+
+    const malformedHarness = await createHarness();
+    seedCurrentPlanV2(malformedHarness.database);
+    const stored = malformedHarness.database.prepare("SELECT value_json FROM mission_constraints WHERE source = ? AND constraint_type = 'represented_action'").get(STEP_ONE) as { readonly value_json: string };
+    const malformed = JSON.parse(stored.value_json) as { action: { destructive: unknown } };
+    malformed.action.destructive = "false";
+    malformedHarness.database.prepare("UPDATE mission_constraints SET value_json = ? WHERE source = ? AND constraint_type = 'represented_action'").run(JSON.stringify(malformed), STEP_ONE);
+    const corrupt = await request(malformedHarness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-corrupt-history", body: {
+        basePlanId: PLAN_TWO_ID, expectedRunVersion: 1, expectedPlanVersion: 2,
+        requestText: "Verify strict action types before a historical plan can be reviewed.",
+        operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 1 }],
+      },
+    });
+    expect(corrupt.status).toBe(409);
+    expect((corrupt.body.error as { readonly code: string }).code).toBe("plan_change_representation_corrupt");
+    expect(malformedHarness.database.prepare("SELECT COUNT(*) AS count FROM plan_change_requests").get()).toEqual({ count: 0 });
+
+    const dependencyHarness = await createHarness();
+    seedCurrentPlanV2(dependencyHarness.database);
+    const dependencyStored = dependencyHarness.database.prepare("SELECT value_json FROM mission_constraints WHERE source = ? AND constraint_type = 'represented_action'").get(STEP_TWO) as { readonly value_json: string };
+    const dependencyMismatch = JSON.parse(dependencyStored.value_json) as { dependencies: string[] };
+    dependencyMismatch.dependencies = [];
+    dependencyHarness.database.prepare("UPDATE mission_constraints SET value_json = ? WHERE source = ? AND constraint_type = 'represented_action'").run(JSON.stringify(dependencyMismatch), STEP_TWO);
+    const dependencyCorrupt = await request(dependencyHarness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-dependency-history", body: {
+        basePlanId: PLAN_TWO_ID, expectedRunVersion: 1, expectedPlanVersion: 2,
+        requestText: "Reject historical action dependencies that disagree with the canonical step graph.",
+        operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 1 }],
+      },
+    });
+    expect(dependencyCorrupt.status).toBe(409);
+    expect((dependencyCorrupt.body.error as { readonly code: string }).code).toBe("plan_change_representation_corrupt");
+    expect(dependencyHarness.database.prepare("SELECT COUNT(*) AS count FROM plan_change_requests").get()).toEqual({ count: 0 });
+  });
+
+  test("requires an audited operator reason for every historical rollback proposal", async () => {
+    const harness = await createHarness();
+    seedCurrentPlanV2(harness.database);
+    const missingReason = await request(harness, `/api/v2/runs/${RUN_ID}/plan-changes`, {
+      method: "POST", key: "plan-restore-missing-reason", body: {
+        basePlanId: PLAN_TWO_ID, expectedRunVersion: 1, expectedPlanVersion: 2,
+        operations: [{ kind: "restore_plan_version", targetPlanId: PLAN_ID, targetPlanVersion: 1 }],
+      },
+    });
+    expect(missingReason.status).toBe(400);
+    expect(missingReason.body.error).toMatchObject({
+      code: "invalid_plan_change_request",
+      humanMessage: "A historical rollback requires an operator reason before its comparison can be reviewed",
+    });
+    expect(harness.database.prepare("SELECT COUNT(*) AS count FROM plan_change_requests").get()).toEqual({ count: 0 });
+  });
 });
+
+function databaseSeedOtherRunPlan(database: SqliteDatabase): void {
+  database.prepare(`
+    INSERT INTO runs (id, mission_id, journey, status, current_plan_id, created_at, updated_at, version)
+    VALUES ('run-other-plan-change', ?, 'guided', 'queued', 'plan-other-run-v1', ?, ?, 1)
+  `).run(MISSION_ID, NOW, NOW);
+  database.prepare(`
+    INSERT INTO plans (id, run_id, version, status, strategy_summary, rationale_summary, plan_hash, created_by, created_at)
+    VALUES ('plan-other-run-v1', 'run-other-plan-change', 1, 'superseded', 'Unrelated run plan', NULL, ?, 'planner', ?)
+  `).run("d".repeat(64), NOW);
+}

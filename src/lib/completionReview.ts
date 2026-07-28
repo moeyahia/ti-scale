@@ -1,4 +1,4 @@
-import type { EvaluationBudgetMetric, EvaluationComparisonMetric, EventRecord, FindingRecord } from "../domain/types/operations";
+import type { EvaluationBudgetMetric, EvaluationComparisonMetric, EvaluationRecord, EventRecord, FindingRecord } from "../domain/types/operations";
 import type { PlanStep, RuntimeRun } from "../domain/types/runtimeV2";
 
 export interface CompletionEventSummary {
@@ -35,6 +35,64 @@ export function completionOutcomeLabel(run: Pick<RuntimeRun, "journey" | "status
       : "Failed safely";
   }
   return "Completion review unavailable";
+}
+
+export interface CompletionVerificationTruth {
+  readonly status: "verified" | "workflow_only" | "not_completed" | "not_evaluated";
+  readonly label: string;
+  readonly explanation: string;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+/**
+ * Keep terminal workflow completion distinct from evidence verification.
+ * In particular, an exact one-step Guided connectivity check can answer its
+ * bounded question while policy correctly retains stdout/stderr only as an
+ * Engagement Log record.
+ */
+export function completionVerificationTruth(
+  evaluation: Pick<EvaluationRecord, "scores" | "metrics" | "evidenceCoverage"> | null | undefined,
+): CompletionVerificationTruth {
+  if (!evaluation) {
+    return {
+      status: "not_evaluated",
+      label: "Not evaluated",
+      explanation: "No canonical terminal evaluation is available, so Ti-Scale does not claim objective completion or verification.",
+    };
+  }
+  const scores = record(evaluation.scores);
+  const metrics = record(evaluation.metrics);
+  const objectiveCompletion = scores.objectiveCompletion === 1;
+  const verifiedObjectiveCompletion = scores.verifiedObjectiveCompletion === 1;
+  const completionBasis = typeof metrics.completionBasis === "string" ? metrics.completionBasis : null;
+  if (!objectiveCompletion) {
+    return {
+      status: "not_completed",
+      label: "Objective not completed",
+      explanation: "The outcome evaluator did not record successful objective completion.",
+    };
+  }
+  if (
+    verifiedObjectiveCompletion
+    || completionBasis === "verified_evidence"
+    || (scores.verifiedObjectiveCompletion === undefined && evaluation.evidenceCoverage === 1)
+  ) {
+    return {
+      status: "verified",
+      label: "Evidence-verified completion",
+      explanation: "The completed objective is linked to the verified retained evidence required by its evaluated criteria.",
+    };
+  }
+  return {
+    status: "workflow_only",
+    label: "Workflow complete · not evidence-verified",
+    explanation: "The exact bounded workflow returned a canonical result, but no verified retained evidence supports a stronger claim. Engagement Logs are not evidence.",
+  };
 }
 
 export function unresolvedCompletionItems(

@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
+import { acquireTestRunMutationAuthority } from "../../../server/control-plane/TestRunMutationAuthority";
 import { createDatabaseConnection, inImmediateTransaction } from "../../../server/db";
+import { fingerprintAction } from "../../../server/supervisor";
 import { E2E_DATABASE_PATH } from "./environment";
 import { normalizeFixtureNamespace } from "./fixtureNamespace";
 
 const BASE_TIME = Date.parse("2099-07-16T23:59:59.000Z");
 const OPERATOR = "e2e-local-operator";
+const GUIDED_MODEL_CONFIGURATION_ID = "modelcfg_e2e_local_guided_reconscout";
 
 export interface DecisionsIntelligenceFixture {
   readonly namespace: string;
@@ -29,15 +32,28 @@ export interface DecisionsIntelligenceFixture {
   readonly missingRunEvidenceSummary: string;
   readonly crossMissionRunEvidenceId: string;
   readonly crossMissionRunEvidenceSummary: string;
+  readonly archivedMissionId: string;
+  readonly archivedMissionTitle: string;
+  readonly archivedRunId: string;
+  readonly archivedEvidenceId: string;
+  readonly archivedEvidenceSummary: string;
+  readonly deletedArtifactEvidenceId: string;
+  readonly deletedArtifactEvidenceSummary: string;
+  readonly deletedArtifactId: string;
+  readonly quarantinedArtifactId: string;
+  readonly quarantinedArtifactType: string;
   readonly relationlessFindingId: string;
   readonly relationlessFindingTitle: string;
   readonly relationlessArtifactId: string;
   readonly relationlessArtifactType: string;
   readonly toolMissionId: string;
   readonly toolRunId: string;
+  readonly toolStepId: string;
   readonly toolDecisionId: string;
+  readonly guidedModelConfigurationId: string;
   readonly manualMissionId: string;
   readonly manualRunId: string;
+  readonly manualStepId: string;
   readonly manualDecisionId: string;
   readonly autonomousTerminalMissionId: string;
   readonly autonomousTerminalRunId: string;
@@ -66,6 +82,19 @@ export interface DecisionsIntelligenceFixtureSnapshot {
   readonly activeApprovalStatus: string;
   readonly systemApprovalStatus: string;
   readonly fixtureAuditCount: number;
+  readonly primaryFindingReview: FindingReviewFixtureSnapshot;
+  readonly relationlessFindingReview: FindingReviewFixtureSnapshot;
+}
+
+export interface FindingReviewFixtureSnapshot {
+  readonly status: string;
+  readonly version: number;
+  readonly operatorOverride: boolean;
+  readonly audits: ReadonlyArray<{
+    readonly action: string;
+    readonly reason: string | null;
+    readonly details: Record<string, unknown>;
+  }>;
 }
 
 function database() {
@@ -92,7 +121,7 @@ function mission(
     readonly name: string;
     readonly objective: string;
     readonly journey: "autonomous" | "guided";
-    readonly status?: "active" | "failed";
+    readonly status?: "active" | "failed" | "archived";
     readonly engagementId: string;
     readonly createdAt: string;
   },
@@ -123,14 +152,14 @@ function run(
     readonly id: string;
     readonly missionId: string;
     readonly journey: "autonomous" | "guided";
-    readonly status: "waiting_guided_decision" | "running" | "failed";
+    readonly status: "waiting_guided_decision" | "running" | "completed" | "failed";
     readonly contractId?: string;
     readonly currentPlanId?: string;
     readonly currentStepId?: string;
     readonly createdAt: string;
   },
 ): void {
-  const terminal = input.status === "failed";
+  const terminal = input.status === "failed" || input.status === "completed";
   connection.prepare(`
     INSERT INTO runs (
       id, mission_id, journey, status, contract_id, current_plan_id, current_step_id,
@@ -144,13 +173,19 @@ function run(
     input.contractId ?? null,
     input.currentPlanId ?? null,
     input.currentStepId ?? null,
-    terminal ? 0.55 : 0.3,
-    terminal
+    input.status === "completed" ? 1 : terminal ? 0.55 : 0.3,
+    input.status === "completed"
+      ? "The authorized fixture completed and retained its immutable intelligence."
+      : terminal
       ? "The authorized fixture stopped safely and retained every canonical record."
       : input.status === "waiting_guided_decision"
         ? "The exact represented Guided step is waiting for a deliberate operator choice."
         : "The bounded Autonomous fixture is active.",
-    terminal ? "Review the immutable exception" : "Review the current bounded state",
+    input.status === "completed"
+      ? "Review the retained intelligence"
+      : terminal
+        ? "Review the immutable exception"
+        : "Review the current bounded state",
     input.createdAt,
     terminal ? input.createdAt : null,
     input.createdAt,
@@ -173,10 +208,12 @@ function guidedPlan(
     readonly createdAt: string;
   },
 ): void {
+  const agentId = `agent-${input.decisionId}`;
+  const assignmentId = `assignment-${input.decisionId}`;
   const represented = {
     action: {
-      actionType: input.kind === "manual" ? "manual_header_review" : "bounded_header_probe",
-      actionClass: "passive_intelligence_osint",
+      actionType: input.kind === "manual" ? "manual_dns_review" : "bounded_dns_context_review",
+      actionClass: "dns_domain_certificate_discovery",
       target: input.target,
       arguments: { target: input.target, readOnly: true, authorizationToken: "fixture-secret-must-redact" },
       intentSummary: "Inspect only the exact authorized fixture target.",
@@ -190,6 +227,93 @@ function guidedPlan(
     dependencies: [],
   };
   const representedJson = JSON.stringify(represented);
+  const representedIntent = {
+    missionId: input.missionId,
+    runId: input.runId,
+    stepId: input.stepId,
+    assignmentId,
+    planVersion: 1,
+    ...represented.action,
+  };
+  const actionFingerprint = fingerprintAction(representedIntent).hash;
+  connection.prepare(`
+    INSERT INTO mission_targets (
+      id, mission_id, target, target_type, disposition, normalized_target, created_at
+    ) VALUES (?, ?, ?, 'url', 'allowed', ?, ?)
+  `).run(
+    `target-${input.decisionId}`,
+    input.missionId,
+    input.target,
+    new URL(input.target).toString(),
+    input.createdAt,
+  );
+  connection.prepare(`
+    INSERT INTO agents (
+      id, role, display_name, status, version, created_at, updated_at
+    ) VALUES (?, 'recon', ?, 'available', 'e2e-fixture', ?, ?)
+  `).run(
+    agentId,
+    input.kind === "manual" ? "Fixture manual review specialist" : "Fixture reviewed local specialist",
+    input.createdAt,
+    input.createdAt,
+  );
+  connection.prepare(`
+    INSERT OR IGNORE INTO agents (
+      id, role, display_name, status, version, created_at, updated_at
+    ) VALUES (
+      'ReconScout',
+      'Reconnaissance and asset intelligence',
+      'ReconScout',
+      'available',
+      'e2e-model-binding',
+      ?,
+      ?
+    )
+  `).run(input.createdAt, input.createdAt);
+  connection.prepare(`
+    INSERT OR IGNORE INTO model_configurations (
+      id, provider_id, model_id, returned_model_id, reasoning_effort,
+      context_policy_json, capabilities_json, context_limit,
+      cost_class, latency_class, disclosure_class, enforcement_mode,
+      auth_state, health_state, catalog_source, catalog_retrieved_at,
+      configuration_source, prompt_template_hash,
+      created_at, updated_at, version
+    ) VALUES (
+      ?,
+      'provider:local-deterministic-safe-recon',
+      'policy:local-safe-recon-v2',
+      'policy:local-safe-recon-v2',
+      NULL,
+      '{}',
+      ?,
+      NULL,
+      'low',
+      'fast',
+      'local_only',
+      'enforced',
+      'healthy',
+      'healthy',
+      'isolated-e2e-runtime-binding',
+      ?,
+      'recommended',
+      NULL,
+      ?,
+      ?,
+      1
+    )
+  `).run(
+    GUIDED_MODEL_CONFIGURATION_ID,
+    JSON.stringify({
+      displayName: "Local deterministic Guided planner",
+      toolCalling: false,
+      structuredOutput: true,
+      compatibleActionClassIds: ["dns_domain_certificate_discovery"],
+      compatibleAgentIds: ["ReconScout"],
+    }),
+    input.createdAt,
+    input.createdAt,
+    input.createdAt,
+  );
   connection.prepare(`
     INSERT INTO plans (
       id, run_id, version, status, strategy_summary, rationale_summary,
@@ -201,16 +325,69 @@ function guidedPlan(
     INSERT INTO plan_steps (
       id, plan_id, run_id, ordinal, phase, title, objective, status,
       success_criteria_json, dependencies_json, action_class, risk_class,
-      created_at, updated_at
+      assigned_agent_id, created_at, updated_at
     ) VALUES (?, ?, ?, 0, 'reconnaissance', ?,
       'Retain one attributable bounded observation.', 'waiting_guided_decision',
       '["The represented observation is attributable"]', '[]',
-      'passive_intelligence_osint', 'low', ?, ?)
+      'dns_domain_certificate_discovery', 'low', ?, ?, ?)
   `).run(
     input.stepId,
     input.planId,
     input.runId,
     input.kind === "manual" ? "Review a retained response manually" : "Inspect the exact approved endpoint",
+    agentId,
+    input.createdAt,
+    input.createdAt,
+  );
+  connection.prepare(`
+    INSERT INTO assignments (
+      id, run_id, step_id, agent_id, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'queued', ?, ?)
+  `).run(
+    assignmentId,
+    input.runId,
+    input.stepId,
+    agentId,
+    input.createdAt,
+    input.createdAt,
+  );
+  connection.prepare(`
+    INSERT INTO model_assignment_preferences (
+      id, scope_type, scope_id, agent_id, mission_id, run_id, step_id,
+      primary_configuration_id, fallback_configuration_id,
+      version, active, is_current, supersedes_preference_id,
+      resolution_reason, created_by, created_at
+    ) VALUES (
+      ?, 'step', ?, 'ReconScout', ?, ?, ?, ?, NULL,
+      1, 1, 1, NULL, ?, ?, ?
+    )
+  `).run(
+    `model-preference-${input.decisionId}`,
+    input.stepId,
+    input.missionId,
+    input.runId,
+    input.stepId,
+    GUIDED_MODEL_CONFIGURATION_ID,
+    "Isolated E2E exact-step specialist configuration",
+    OPERATOR,
+    input.createdAt,
+  );
+  connection.prepare(`
+    INSERT INTO agent_model_assignments (
+      id, agent_id, mission_id, run_id, step_id,
+      primary_configuration_id, fallback_configuration_id,
+      inheritance_level, pinned, resolution_reason, resolved_at, created_at
+    ) VALUES (
+      ?, 'ReconScout', ?, ?, ?, ?, NULL,
+      'step', 1, ?, ?, ?
+    )
+  `).run(
+    `model-assignment-${input.decisionId}`,
+    input.missionId,
+    input.runId,
+    input.stepId,
+    GUIDED_MODEL_CONFIGURATION_ID,
+    "Pinned from the isolated exact-step model preference",
     input.createdAt,
     input.createdAt,
   );
@@ -231,8 +408,8 @@ function guidedPlan(
     input.missionId,
     input.runId,
     input.stepId,
-    digest(representedJson),
-    representedJson,
+    actionFingerprint,
+    JSON.stringify(representedIntent),
     input.kind === "manual"
       ? "Review the exact retained response manually before interpretation."
       : "Inspect the exact approved endpoint with the bounded read-only specialist.",
@@ -349,6 +526,16 @@ export function createDecisionsIntelligenceFixture(instanceId: string): Decision
   const missingRunEvidenceSummary = relationlessEvidenceSummary;
   const crossMissionRunEvidenceId = id("evidence-cross-mission-run-e2e");
   const crossMissionRunEvidenceSummary = `${searchToken} evidence with a cross-mission historical run reference`;
+  const archivedMissionId = id("mission-archived-intelligence-e2e");
+  const archivedMissionTitle = `${searchToken} archived intelligence mission`;
+  const archivedRunId = id("run-archived-intelligence-e2e");
+  const archivedEvidenceId = id("evidence-archived-run-e2e");
+  const archivedEvidenceSummary = `${searchToken} evidence retained after mission archival`;
+  const deletedArtifactEvidenceId = id("evidence-deleted-artifact-e2e");
+  const deletedArtifactEvidenceSummary = `${searchToken} evidence retaining a deleted artifact reference`;
+  const deletedArtifactId = id("artifact-deleted-e2e");
+  const quarantinedArtifactId = id("artifact-quarantined-e2e");
+  const quarantinedArtifactType = `quarantined_capture_${searchToken}`;
   const relationlessFindingId = id("finding-missing-relations-e2e");
   const relationlessFindingTitle = `${searchToken} finding without run or evidence relations`;
   const relationlessArtifactId = id("artifact-missing-relations-e2e");
@@ -765,6 +952,72 @@ export function createDecisionsIntelligenceFixture(instanceId: string): Decision
         OPERATOR,
         at(401),
       );
+      mission(connection, {
+        id: archivedMissionId,
+        name: archivedMissionTitle,
+        objective: "Prove archived canonical intelligence remains inspectable without reviving execution authority.",
+        journey: "guided",
+        status: "archived",
+        engagementId,
+        createdAt: at(402),
+      });
+      run(connection, {
+        id: archivedRunId,
+        missionId: archivedMissionId,
+        journey: "guided",
+        status: "completed",
+        createdAt: at(402),
+      });
+      evidence.run(
+        archivedEvidenceId,
+        archivedMissionId,
+        archivedRunId,
+        at(402),
+        `https://archived-${namespace}.fixture.test`,
+        "web_page_capture",
+        digest(archivedEvidenceId),
+        JSON.stringify({ method: "isolated_fixture", lifecycle: "archived_run" }),
+        0.9,
+        "verified",
+        archivedEvidenceSummary,
+        null,
+        quarantinedArtifactId,
+        OPERATOR,
+        at(402),
+      );
+      evidence.run(
+        deletedArtifactEvidenceId,
+        archivedMissionId,
+        archivedRunId,
+        at(403),
+        `https://archived-${namespace}.fixture.test`,
+        "file_artifact_with_hash",
+        digest(deletedArtifactEvidenceId),
+        JSON.stringify({ method: "isolated_fixture", lifecycle: "artifact_deleted_after_acquisition" }),
+        0.6,
+        "disputed",
+        deletedArtifactEvidenceSummary,
+        null,
+        deletedArtifactId,
+        OPERATOR,
+        at(403),
+      );
+      connection.prepare(`
+        INSERT INTO evidence_chain_events (
+          id, evidence_id, event_type, actor, details_json, occurred_at
+        ) VALUES (?, ?, 'verified', ?, ?, ?), (?, ?, 'disputed', ?, ?, ?)
+      `).run(
+        id("custody-verified-archived-e2e"),
+        archivedEvidenceId,
+        OPERATOR,
+        JSON.stringify({ outcome: "verified_before_quarantine", lifecycle: "archived_run" }),
+        at(401),
+        id("custody-disputed-deleted-artifact-e2e"),
+        deletedArtifactEvidenceId,
+        OPERATOR,
+        JSON.stringify({ outcome: "artifact_reference_unavailable", lifecycle: "reconciliation_required" }),
+        at(402),
+      );
       finding.run(
         relationlessFindingId,
         relationlessMissionId,
@@ -793,7 +1046,31 @@ export function createDecisionsIntelligenceFixture(instanceId: string): Decision
         JSON.stringify({ source: "isolated_fixture", imported: true }),
         at(402),
       );
+      artifact.run(
+        quarantinedArtifactId,
+        archivedMissionId,
+        archivedRunId,
+        quarantinedArtifactType,
+        `artifact-store://quarantine/${quarantinedArtifactId}`,
+        digest(quarantinedArtifactId),
+        768,
+        "image/png",
+        JSON.stringify({
+          source: "isolated_fixture",
+          lifecycleState: "quarantined",
+          quarantineReason: "fixture_integrity_review",
+        }),
+        at(403),
+      );
     });
+
+    // Local Commander guidance writes only a conversation exchange and Context
+    // Pack, but those durable writes still require the exact run control-plane
+    // lease. Keep the manual-only fixture under the isolated Commander lease.
+    // The tool-card fixture is deliberately left unleased so the mounted
+    // deterministic Guided runtime must acquire and prove its own authority
+    // when the browser rejects that exact step and requests a replan.
+    acquireTestRunMutationAuthority(connection, manualRunId);
 
     const decisionInboxCount = Number((connection.prepare(`
       SELECT
@@ -834,15 +1111,28 @@ export function createDecisionsIntelligenceFixture(instanceId: string): Decision
       missingRunEvidenceSummary,
       crossMissionRunEvidenceId,
       crossMissionRunEvidenceSummary,
+      archivedMissionId,
+      archivedMissionTitle,
+      archivedRunId,
+      archivedEvidenceId,
+      archivedEvidenceSummary,
+      deletedArtifactEvidenceId,
+      deletedArtifactEvidenceSummary,
+      deletedArtifactId,
+      quarantinedArtifactId,
+      quarantinedArtifactType,
       relationlessFindingId,
       relationlessFindingTitle,
       relationlessArtifactId,
       relationlessArtifactType,
       toolMissionId,
       toolRunId,
+      toolStepId,
       toolDecisionId,
+      guidedModelConfigurationId: GUIDED_MODEL_CONFIGURATION_ID,
       manualMissionId,
       manualRunId,
+      manualStepId,
       manualDecisionId,
       autonomousTerminalMissionId,
       autonomousTerminalRunId,
@@ -864,6 +1154,41 @@ export function createDecisionsIntelligenceFixture(instanceId: string): Decision
   }
 }
 
+export interface GuidedRuntimeBindingReceipt {
+  readonly provider: string;
+  readonly model: string | null;
+  readonly status: string;
+  readonly agentId: string | null;
+  readonly modelAssignmentId: string | null;
+  readonly modelConfigurationId: string | null;
+  readonly promptTemplateHash: string | null;
+  readonly contextPackId: string | null;
+}
+
+export function readGuidedRuntimeBindingReceipts(
+  fixture: DecisionsIntelligenceFixture,
+): readonly GuidedRuntimeBindingReceipt[] {
+  const connection = database();
+  try {
+    return connection.prepare(`
+      SELECT
+        provider,
+        model,
+        status,
+        agent_id AS agentId,
+        model_assignment_id AS modelAssignmentId,
+        model_configuration_id AS modelConfigurationId,
+        prompt_template_hash AS promptTemplateHash,
+        context_pack_id AS contextPackId
+      FROM provider_turns
+      WHERE run_id = ?
+      ORDER BY started_at, id
+    `).all(fixture.toolRunId) as GuidedRuntimeBindingReceipt[];
+  } finally {
+    connection.close();
+  }
+}
+
 export function readDecisionsIntelligenceFixtureSnapshot(
   fixture: DecisionsIntelligenceFixture,
 ): DecisionsIntelligenceFixtureSnapshot {
@@ -874,6 +1199,37 @@ export function readDecisionsIntelligenceFixtureSnapshot(
       const row = connection.prepare(`SELECT status FROM ${table} WHERE id = ?`).get(recordId) as { status: string } | undefined;
       if (!row) throw new Error(`Fixture record is missing: ${table}/${recordId}`);
       return row.status;
+    };
+    const findingReview = (findingId: string): FindingReviewFixtureSnapshot => {
+      const finding = connection.prepare(`
+        SELECT review_status, version, operator_override
+        FROM findings WHERE id = ?
+      `).get(findingId) as {
+        review_status: string;
+        version: number;
+        operator_override: number;
+      } | undefined;
+      if (!finding) throw new Error(`Fixture finding is missing: ${findingId}`);
+      const audits = connection.prepare(`
+        SELECT action, reason, details_json
+        FROM audit_records
+        WHERE resource_type = 'finding' AND resource_id = ?
+        ORDER BY occurred_at ASC, id ASC
+      `).all(findingId) as Array<{
+        action: string;
+        reason: string | null;
+        details_json: string;
+      }>;
+      return {
+        status: finding.review_status,
+        version: finding.version,
+        operatorOverride: Boolean(finding.operator_override),
+        audits: audits.map((audit) => ({
+          action: audit.action,
+          reason: audit.reason,
+          details: JSON.parse(audit.details_json) as Record<string, unknown>,
+        })),
+      };
     };
     return {
       evidenceCount: scalar(
@@ -892,6 +1248,8 @@ export function readDecisionsIntelligenceFixtureSnapshot(
         SELECT COUNT(*) AS count FROM audit_records
         WHERE resource_id IN (?, ?, ?, ?, ?)
       `, fixture.toolDecisionId, fixture.manualDecisionId, fixture.terminalApprovalId, fixture.activeApprovalId, fixture.systemApprovalId),
+      primaryFindingReview: findingReview(fixture.primaryFindingId),
+      relationlessFindingReview: findingReview(fixture.relationlessFindingId),
     };
   } finally {
     connection.close();

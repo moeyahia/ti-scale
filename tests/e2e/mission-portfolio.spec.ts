@@ -4,6 +4,7 @@ import {
   type Locator,
   type Page,
   type Response,
+  type Route,
   type TestInfo,
 } from "./support/playwright";
 import { createHash } from "node:crypto";
@@ -13,17 +14,23 @@ import { BrowserAudit } from "./support/browserAudit";
 import { E2E_RUN_ID } from "./support/environment";
 import { canonicalFixtureNamespace } from "./support/fixtureNamespace";
 import {
+  createLiveRunPaginationFixture,
   createMissionPortfolioFixture,
   readMissionPortfolioFixtureState,
+  removeLiveRunPaginationFixture,
   type MissionPortfolioFixture,
 } from "./support/missionPortfolioFixture";
+import { readTitaniumOptions, selectTitaniumOption } from "./support/titaniumSelect";
 
 const TEST_IDS = {
   overviewShortcuts: "e2e.overview.portfolio-shortcuts",
   overviewMissionRows: "e2e.overview.mission-row-links",
   journeyRows: "e2e.journey-portfolios.row-links",
+  livePagination: "e2e.live-operations.cursor-pagination",
   filtersAndSavedView: "e2e.mission-portfolio.filters-saved-view",
   paginationAndDeepLinks: "e2e.mission-portfolio.pagination-deep-links",
+  savedViewFailures: "e2e.mission-portfolio.saved-view-failures",
+  bulkFailures: "e2e.mission-portfolio.bulk-failures",
   bulkActions: "e2e.mission-portfolio.bulk-actions",
   retry: "e2e.mission-portfolio.retry",
 } as const;
@@ -46,6 +53,26 @@ function missionLinkName(title: string, missionId: string): string {
 
 function missionSelectionName(title: string, missionId: string): string {
   return `Select mission ${title} (${missionId})`;
+}
+
+function fixtureApiFailure(input: {
+  readonly code: string;
+  readonly humanMessage: string;
+  readonly remediation: string;
+  readonly traceId: string;
+}): string {
+  return JSON.stringify({
+    error: {
+      code: input.code,
+      message: input.humanMessage,
+      humanMessage: input.humanMessage,
+      retryable: true,
+      category: "dependency",
+      remediation: input.remediation,
+      traceId: input.traceId,
+      timestamp: "2099-07-16T23:59:59.000Z",
+    },
+  });
 }
 
 test.describe.configure({ mode: "serial" });
@@ -82,6 +109,31 @@ async function assertMissionListResponse(
     expect(payload.items.map((mission) => mission.id)).toContain(expectedMissionId);
   }
   return payload;
+}
+
+async function assertLiveRunListResponse(
+  response: Response,
+): Promise<{ readonly items: readonly { readonly id: string }[]; readonly nextCursor: string | null }> {
+  expect(response.status()).toBe(200);
+  return response.json() as Promise<{
+    readonly items: readonly { readonly id: string }[];
+    readonly nextCursor: string | null;
+  }>;
+}
+
+function liveRunListResponse(
+  page: Page,
+  predicate: (url: URL) => boolean = () => true,
+): Promise<Response> {
+  return page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname === "/api/v2/runs"
+      && url.searchParams.get("journey") === "autonomous"
+      && url.searchParams.get("view") === "operational"
+      && url.searchParams.get("limit") === "50"
+      && predicate(url);
+  });
 }
 
 async function strictAudit(audit: BrowserAudit, testInfo: TestInfo): Promise<void> {
@@ -121,9 +173,13 @@ async function settleLocalReads(page: Page): Promise<void> {
 }
 
 async function optionLabels(control: Locator): Promise<string[]> {
-  await expect(control).toBeVisible();
-  await expect(control.locator("option").first()).toBeAttached();
-  return control.locator("option").allTextContents();
+  return (await readTitaniumOptions(control)).map((option) => option.label);
+}
+
+async function expectSelectedTitaniumValue(control: Locator, value: string): Promise<void> {
+  const selected = (await readTitaniumOptions(control)).filter((option) => option.selected);
+  expect(selected).toHaveLength(1);
+  expect(selected[0]?.value).toBe(value);
 }
 
 interface SelectExerciseOptions {
@@ -137,6 +193,7 @@ async function selectOptionAndVerify(
   parameter: string,
   value: string,
   options: SelectExerciseOptions = {},
+  input: "keyboard" | "pointer" = "pointer",
 ): Promise<void> {
   const omittedValue = options.omittedValue ?? "";
   const apiCarriesParameter = options.apiCarriesParameter ?? true;
@@ -147,13 +204,12 @@ async function selectOptionAndVerify(
       ? url.searchParams.get(parameter) === expectedValue
       : !url.searchParams.has(parameter))
   ));
-  await control.selectOption(value);
+  await selectTitaniumOption(control, value, input);
   const response = await responsePromise;
   await assertMissionListResponse(response);
   const responseUrl = new URL(response.url());
   expect(responseUrl.searchParams.get("query")).toBe(fixture.primaryQuery);
   expect(responseUrl.searchParams.get(parameter)).toBe(apiCarriesParameter ? expectedValue : null);
-  await expect(control).toHaveValue(value);
   await expect.poll(() => new URL(page.url()).searchParams.get(parameter)).toBe(expectedValue);
 }
 
@@ -163,12 +219,11 @@ async function exerciseSelectOptions(
   parameter: string,
   options: SelectExerciseOptions = {},
 ): Promise<void> {
-  const initialValue = await control.inputValue();
-  const optionValues = await control.locator("option").evaluateAll((elements) => elements.map((element) => (
-    (element as HTMLOptionElement).value
-  )));
-  for (const value of optionValues.filter((optionValue) => optionValue !== initialValue)) {
-    await selectOptionAndVerify(page, control, parameter, value, options);
+  const entries = await readTitaniumOptions(control);
+  const initialValue = entries.find((entry) => entry.selected)?.value;
+  if (initialValue === undefined) throw new Error(`The ${parameter} selector must expose one selected application option`);
+  for (const [index, value] of entries.map((entry) => entry.value).filter((optionValue) => optionValue !== initialValue).entries()) {
+    await selectOptionAndVerify(page, control, parameter, value, options, index % 2 === 0 ? "pointer" : "keyboard");
   }
 
   // The page's primary-query response already proves the initial option's API
@@ -177,8 +232,7 @@ async function exerciseSelectOptions(
   // waiting for a duplicate network request that the client correctly omits.
   const omittedValue = options.omittedValue ?? "";
   const expectedValue = initialValue === omittedValue ? null : initialValue;
-  await control.selectOption(initialValue);
-  await expect(control).toHaveValue(initialValue);
+  await selectTitaniumOption(control, initialValue, "keyboard");
   await expect.poll(() => new URL(page.url()).searchParams.get(parameter)).toBe(expectedValue);
   await expect(page.getByRole("link", { name: missionLinkName(fixture.primaryTitle, fixture.primaryMissionId), exact: true })).toBeVisible();
 }
@@ -195,8 +249,7 @@ async function setImmediateFilter(
     // values to compose the saved view may be served entirely by QueryCache,
     // so synchronize on the canonical URL and rendered result instead of
     // requiring a redundant network response.
-    await control.selectOption(value);
-    await expect(control).toHaveValue(value);
+    await selectTitaniumOption(control, value, "pointer");
     await expect.poll(() => new URL(page.url()).searchParams.get(parameter)).toBe(value);
     await expect(page.getByRole("link", { name: missionLinkName(fixture.primaryTitle, fixture.primaryMissionId), exact: true })).toBeVisible();
     return;
@@ -311,12 +364,21 @@ test(`${TEST_IDS.overviewShortcuts} and ${TEST_IDS.overviewMissionRows} traverse
 });
 
 test(`${TEST_IDS.journeyRows} traverses the Guided mission and Autonomous run families`, async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
   const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
 
-  const guidedProjection = page.waitForResponse((response) => response.request().method() === "GET"
-    && pathname(response) === `/api/v2/missions/${fixture.primaryMissionId}/runtime`);
+  const guidedProjection = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname === "/api/v2/runs"
+      && url.searchParams.get("journey") === "guided"
+      && !url.searchParams.has("status");
+  });
   await page.goto("/guided", { waitUntil: "domcontentloaded" });
-  expect((await guidedProjection).status()).toBe(200);
+  const guidedResponse = await guidedProjection;
+  expect(guidedResponse.status()).toBe(200);
+  expect((await guidedResponse.json() as { readonly items: readonly { readonly missionId: string }[] }).items)
+    .toContainEqual(expect.objectContaining({ missionId: fixture.primaryMissionId }));
   await expectHeading(page, "Guided Workspace");
   const guidedLink = page.getByRole("link", {
     name: `Open Guided mission ${fixture.primaryTitle} (${fixture.primaryMissionId})`,
@@ -331,11 +393,71 @@ test(`${TEST_IDS.journeyRows} traverses the Guided mission and Autonomous run fa
   await expectHeading(page, fixture.primaryTitle);
   await settleLocalReads(page);
 
-  const liveProjection = page.waitForResponse((response) => response.request().method() === "GET"
-    && pathname(response) === `/api/v2/missions/${fixture.autonomousMissionId}/runtime`);
+  const liveProjection = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname === "/api/v2/runs"
+      && url.searchParams.get("journey") === "autonomous"
+      && url.searchParams.get("view") === "operational";
+  });
   await audit.withExpectedDocumentNavigationTeardown(page, () => page.goto("/live", { waitUntil: "domcontentloaded" }));
-  expect((await liveProjection).status()).toBe(200);
+  const liveResponse = await liveProjection;
+  expect(liveResponse.status(), await liveResponse.text()).toBe(200);
+  const livePayload = await liveResponse.json() as {
+    readonly items: readonly { readonly id: string; readonly journey: string }[];
+    readonly nextCursor: string | null;
+  };
+  expect(livePayload.items).toContainEqual(expect.objectContaining({
+    id: fixture.autonomousRunId,
+    journey: "autonomous",
+  }));
   await expectHeading(page, "Live Operations");
+  const runState = page.getByRole("combobox", { name: "Run state", exact: true });
+  const runStateOptions = await readTitaniumOptions(runState);
+  expect(runStateOptions.map((option) => [option.value, option.label])).toEqual([
+    ["", "All"],
+    ["queued", "Queued"],
+    ["planning", "Planning"],
+    ["awaiting_contract_confirmation", "Awaiting contract confirmation"],
+    ["running", "Executing"],
+    ["blocked", "Safe-stopped"],
+    ["recovering", "Recovering"],
+    ["completed", "Completed"],
+    ["failed", "Failed safely"],
+    ["cancelled", "Cancelled"],
+  ]);
+  for (const [index, option] of runStateOptions.filter((entry) => entry.value).entries()) {
+    const filteredResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "GET"
+        && url.pathname === "/api/v2/runs"
+        && url.searchParams.get("journey") === "autonomous"
+        && url.searchParams.get("status") === option.value
+        && !url.searchParams.has("view");
+    });
+    await selectTitaniumOption(runState, option.value, index % 2 === 0 ? "pointer" : "keyboard");
+    const response = await filteredResponse;
+    expect(response.status(), await response.text()).toBe(200);
+    const payload = await response.json() as {
+      readonly items: readonly { readonly journey: string; readonly status: string }[];
+      readonly nextCursor: string | null;
+    };
+    expect(payload.items.every((run) => run.journey === "autonomous" && run.status === option.value)).toBe(true);
+    await expect.poll(() => new URL(page.url()).searchParams.get("status")).toBe(option.value);
+    await expectSelectedTitaniumValue(runState, option.value);
+  }
+  const restoredProjection = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname === "/api/v2/runs"
+      && url.searchParams.get("journey") === "autonomous"
+      && url.searchParams.get("view") === "operational"
+      && !url.searchParams.has("status");
+  });
+  await selectTitaniumOption(runState, "", "keyboard");
+  expect((await restoredProjection).status()).toBe(200);
+  await expect.poll(() => new URL(page.url()).searchParams.has("status")).toBe(false);
+  await expectSelectedTitaniumValue(runState, "");
   const autonomousLink = page.getByRole("link", {
     name: `Open Autonomous run ${fixture.autonomousTitle} (${fixture.autonomousRunId})`,
     exact: true,
@@ -349,6 +471,56 @@ test(`${TEST_IDS.journeyRows} traverses the Guided mission and Autonomous run fa
   await expectHeading(page, fixture.autonomousTitle);
   await settleLocalReads(page);
   await strictAudit(audit, testInfo);
+});
+
+test(`${TEST_IDS.livePagination} preserves the Autonomous cursor boundary through Next, refresh, and First page`, async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  const paginationFixture = createLiveRunPaginationFixture(
+    canonicalFixtureNamespace(testInfo, "live-run-pagination"),
+  );
+  const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
+  try {
+    const firstResponse = liveRunListResponse(page, (url) => !url.searchParams.has("cursor"));
+    await page.goto("/live", { waitUntil: "domcontentloaded" });
+    const first = await assertLiveRunListResponse(await firstResponse);
+    const firstIds = first.items.map((run) => run.id);
+    expect(firstIds).toEqual(paginationFixture.firstPageRunIds);
+    expect(first.nextCursor).toBeTruthy();
+    expect(new Set(firstIds).size).toBe(firstIds.length);
+
+    const firstPage = page.getByRole("button", { name: "First page of Autonomous runs", exact: true });
+    const nextPage = page.getByRole("button", { name: "Next page of Autonomous runs", exact: true });
+    await expect(firstPage).toBeDisabled();
+    await expect(nextPage).toBeEnabled();
+
+    const secondResponse = liveRunListResponse(page, (url) => url.searchParams.get("cursor") === first.nextCursor);
+    await activate(nextPage, "keyboard");
+    const second = await assertLiveRunListResponse(await secondResponse);
+    const cursor = new URL(page.url()).searchParams.get("cursor");
+    expect(cursor).toBe(first.nextCursor);
+    expect(second.items[0]?.id).toBe(paginationFixture.boundaryRunId);
+    expect(firstIds).not.toContain(paginationFixture.boundaryRunId);
+    expect(second.items.filter((run) => paginationFixture.runIds.includes(run.id)).map((run) => run.id))
+      .toEqual([paginationFixture.boundaryRunId]);
+    expect(new Set([...firstIds, paginationFixture.boundaryRunId])).toEqual(new Set(paginationFixture.runIds));
+    await expect(firstPage).toBeEnabled();
+
+    const reloadResponse = liveRunListResponse(page, (url) => url.searchParams.get("cursor") === cursor);
+    await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload({ waitUntil: "domcontentloaded" }));
+    const reloaded = await assertLiveRunListResponse(await reloadResponse);
+    expect(reloaded.items.map((run) => run.id)).toEqual(second.items.map((run) => run.id));
+    expect(new URL(page.url()).searchParams.get("cursor")).toBe(cursor);
+
+    const returnedResponse = liveRunListResponse(page, (url) => !url.searchParams.has("cursor"));
+    await activate(page.getByRole("button", { name: "First page of Autonomous runs", exact: true }), "pointer");
+    const returned = await assertLiveRunListResponse(await returnedResponse);
+    expect(returned.items.map((run) => run.id)).toEqual(firstIds);
+    await expect.poll(() => new URL(page.url()).searchParams.has("cursor")).toBe(false);
+    await expect(page.getByRole("button", { name: "First page of Autonomous runs", exact: true })).toBeDisabled();
+    await strictAudit(audit, testInfo);
+  } finally {
+    removeLiveRunPaginationFixture(paginationFixture);
+  }
 });
 
 test(`${TEST_IDS.filtersAndSavedView} exercises every portfolio filter, board control, saved view, and empty-state entry`, async ({ page }, testInfo) => {
@@ -419,7 +591,7 @@ test(`${TEST_IDS.filtersAndSavedView} exercises every portfolio filter, board co
   await setImmediateFilter(page, recovery, "recovering", "recoveryState", "select");
 
   const boardResponse = missionListResponse(page);
-  await view.selectOption("board");
+  await selectTitaniumOption(view, "board", "keyboard");
   await assertMissionListResponse(await boardResponse, fixture.primaryMissionId);
   await expect(page.getByLabel("Mission board", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: fixture.primaryTitle, exact: true })).toBeVisible();
@@ -473,7 +645,7 @@ test(`${TEST_IDS.filtersAndSavedView} exercises every portfolio filter, board co
     const reloadResponse = missionListResponse(page, (url) => url.searchParams.get("query") === fixture.primaryQuery);
     await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload({ waitUntil: "domcontentloaded" }));
     await assertMissionListResponse(await reloadResponse, fixture.primaryMissionId);
-    await expect(page.getByRole("combobox", { name: "View", exact: true })).toHaveValue("board");
+    await expectSelectedTitaniumValue(page.getByRole("combobox", { name: "View", exact: true }), "board");
     await expect(page.getByLabel("Mission board", { exact: true })).toBeVisible();
 
     const resetResponse = missionListResponse(page, (url) => url.searchParams.size === 1 && url.searchParams.get("limit") === "50");
@@ -484,7 +656,7 @@ test(`${TEST_IDS.filtersAndSavedView} exercises every portfolio filter, board co
       && url.searchParams.get("recoveryState") === "recovering");
     await activate(applySaved, "pointer");
     await assertMissionListResponse(await appliedResponse, fixture.primaryMissionId);
-    await expect(page.getByRole("combobox", { name: "View", exact: true })).toHaveValue("board");
+    await expectSelectedTitaniumValue(page.getByRole("combobox", { name: "View", exact: true }), "board");
     await expect(page.getByLabel("Mission board", { exact: true })).toBeVisible();
 
     const boardLink = page.getByLabel("Mission board", { exact: true })
@@ -582,6 +754,340 @@ test(`${TEST_IDS.paginationAndDeepLinks} preserves signed cursor navigation, sel
   await assertMissionListResponse(await returnResponse, fixture.primaryMissionId);
   await expect.poll(() => new URL(page.url()).searchParams.has("cursor")).toBe(false);
   await expect(page.getByRole("button", { name: "First page", exact: true })).toBeDisabled();
+  await strictAudit(audit, testInfo);
+});
+
+test(`${TEST_IDS.savedViewFailures} retains exact saved-view state and idempotency across save and delete recovery`, async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
+  const releaseLock = await waitForOperatorPortfolioLock();
+  const viewName = `Failure-safe saved portfolio ${fixture.namespace}`;
+  try {
+    const listResponse = missionListResponse(page, (url) => url.searchParams.get("query") === fixture.primaryQuery);
+    await page.goto(`/missions?query=${encodeURIComponent(fixture.primaryQuery)}&view=board`, { waitUntil: "domcontentloaded" });
+    await assertMissionListResponse(await listResponse, fixture.primaryMissionId);
+    await expect(page.getByLabel("Mission board", { exact: true })).toBeVisible();
+
+    const savedName = page.getByRole("textbox", { name: "Saved view name", exact: true });
+    const saveButton = page.getByRole("button", { name: "Save view", exact: true });
+    await savedName.fill(viewName);
+    await expect(saveButton).toBeEnabled();
+
+    audit.expectHttpResponse({
+      id: "mission-portfolio.saved-view.save.initial-unavailable",
+      transport: "browser",
+      method: "POST",
+      pathname: "/api/v2/missions/saved-views",
+      query: {},
+      status: 503,
+      occurrences: 1,
+      reason: "Prove one failed saved-view write retains its exact local draft and idempotent retry boundary.",
+    });
+    let failedSaveKey: string | undefined;
+    let failedSaveBody: unknown;
+    const saveFailureRoute = async (route: Route) => {
+      if (route.request().method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      failedSaveKey = route.request().headers()["idempotency-key"];
+      failedSaveBody = route.request().postDataJSON();
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json; charset=utf-8",
+        headers: { "X-Request-Id": "trace-portfolio-saved-view-save" },
+        body: fixtureApiFailure({
+          code: "saved_view_fixture_temporarily_unavailable",
+          humanMessage: "The current portfolio view was not saved.",
+          remediation: "Keep this name and filter state, then retry Save view after the synchronized view store recovers.",
+          traceId: "trace-portfolio-saved-view-save",
+        }),
+      });
+    };
+    await page.route("**/api/v2/missions/saved-views", saveFailureRoute);
+    const failedSaveResponse = page.waitForResponse((response) => response.request().method() === "POST"
+      && pathname(response) === "/api/v2/missions/saved-views"
+      && response.status() === 503);
+    await activate(saveButton, "pointer");
+    expect((await failedSaveResponse).status()).toBe(503);
+    await page.unroute("**/api/v2/missions/saved-views", saveFailureRoute);
+
+    const saveAlert = page.getByRole("alert").filter({ hasText: "Saved view was not saved" });
+    await expect(saveAlert).toContainText("The current portfolio view was not saved.");
+    await expect(saveAlert).toContainText("Keep this name and filter state, then retry Save view after the synchronized view store recovers.");
+    await expect(saveAlert).toContainText("Trace trace-portfolio-saved-view-save");
+    await expect(savedName).toHaveValue(viewName);
+    await expect(page.getByLabel("Mission board", { exact: true })).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("query")).toBe(fixture.primaryQuery);
+    expect(new URL(page.url()).searchParams.get("view")).toBe("board");
+
+    const savedResponse = page.waitForResponse((response) => response.request().method() === "POST"
+      && pathname(response) === "/api/v2/missions/saved-views"
+      && response.status() === 200);
+    await activate(saveButton, "keyboard");
+    const savedResult = await savedResponse;
+    expect(savedResult.request().headers()["idempotency-key"]).toBe(failedSaveKey);
+    expect(savedResult.request().postDataJSON()).toEqual(failedSaveBody);
+    expect(savedResult.request().postDataJSON()).toMatchObject({
+      name: viewName,
+      state: { query: fixture.primaryQuery, view: "board" },
+    });
+    await expect(saveAlert).toHaveCount(0);
+    await expect(savedName).toHaveValue("");
+    await expect(page.getByRole("button", { name: viewName, exact: true })).toBeVisible();
+
+    audit.expectHttpResponse({
+      id: "mission-portfolio.saved-view.delete.initial-unavailable",
+      transport: "browser",
+      method: "DELETE",
+      pathname: `/api/v2/missions/saved-views/${encodeURIComponent((await savedResult.json() as { readonly items: readonly { readonly id: string; readonly name: string }[] }).items.find((item) => item.name === viewName)?.id ?? "missing")}`,
+      query: {},
+      status: 503,
+      occurrences: 1,
+      reason: "Prove one failed saved-view delete leaves the represented view intact for an exact idempotent retry.",
+    });
+    let failedDeleteKey: string | undefined;
+    let failedDeleteBody: unknown;
+    let failedDeletePath = "";
+    const deleteFailureRoute = async (route: Route) => {
+      if (route.request().method() !== "DELETE") {
+        await route.fallback();
+        return;
+      }
+      failedDeleteKey = route.request().headers()["idempotency-key"];
+      failedDeleteBody = route.request().postDataJSON();
+      failedDeletePath = new URL(route.request().url()).pathname;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json; charset=utf-8",
+        headers: { "X-Request-Id": "trace-portfolio-saved-view-delete" },
+        body: fixtureApiFailure({
+          code: "saved_view_delete_fixture_temporarily_unavailable",
+          humanMessage: "The selected saved view was not deleted.",
+          remediation: "Leave the saved view in place and retry its Delete saved view control after the synchronized view store recovers.",
+          traceId: "trace-portfolio-saved-view-delete",
+        }),
+      });
+    };
+    await page.route("**/api/v2/missions/saved-views/*", deleteFailureRoute);
+    const deleteButton = page.getByRole("button", { name: `Delete saved view ${viewName}`, exact: true });
+    const failedDeleteResponse = page.waitForResponse((response) => response.request().method() === "DELETE"
+      && new URL(response.url()).pathname.startsWith("/api/v2/missions/saved-views/")
+      && response.status() === 503);
+    await activate(deleteButton, "keyboard");
+    expect((await failedDeleteResponse).status()).toBe(503);
+    await page.unroute("**/api/v2/missions/saved-views/*", deleteFailureRoute);
+
+    const deleteAlert = page.getByRole("alert").filter({ hasText: `Saved view ${viewName} was not deleted` });
+    await expect(deleteAlert).toContainText("The selected saved view was not deleted.");
+    await expect(deleteAlert).toContainText("Leave the saved view in place and retry its Delete saved view control after the synchronized view store recovers.");
+    await expect(deleteAlert).toContainText("Trace trace-portfolio-saved-view-delete");
+    await expect(page.getByRole("button", { name: viewName, exact: true })).toBeVisible();
+    await expect(deleteButton).toBeEnabled();
+
+    const deletedResponse = page.waitForResponse((response) => response.request().method() === "DELETE"
+      && pathname(response) === failedDeletePath
+      && response.status() === 200);
+    await activate(deleteButton, "pointer");
+    const deletedResult = await deletedResponse;
+    expect(deletedResult.request().headers()["idempotency-key"]).toBe(failedDeleteKey);
+    expect(deletedResult.request().postDataJSON()).toEqual(failedDeleteBody);
+    await expect(deleteAlert).toHaveCount(0);
+    await expect(page.getByRole("button", { name: viewName, exact: true })).toHaveCount(0);
+    await strictAudit(audit, testInfo);
+  } finally {
+    releaseLock();
+  }
+});
+
+test(`${TEST_IDS.bulkFailures} retains the exact selection and idempotency through export and archive recovery`, async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
+  expect(readMissionPortfolioFixtureState(fixture)).toMatchObject({
+    failureTerminalMissionStatus: "completed",
+    failureTerminalRunStatus: "completed",
+    failureTerminalArchiveAuditCount: 0,
+    failureTerminalExportAuditCount: 0,
+  });
+  const listResponse = missionListResponse(page, (url) => url.searchParams.get("query") === fixture.failureTerminalMissionId);
+  await page.goto(`/missions?query=${encodeURIComponent(fixture.failureTerminalMissionId)}`, { waitUntil: "domcontentloaded" });
+  const terminalOnly = await assertMissionListResponse(await listResponse, fixture.failureTerminalMissionId);
+  expect(terminalOnly.items.map((item) => item.id)).toEqual([fixture.failureTerminalMissionId]);
+
+  const rowSelection = page.getByRole("checkbox", {
+    name: missionSelectionName(fixture.failureTerminalTitle, fixture.failureTerminalMissionId),
+    exact: true,
+  });
+  await toggleCheckbox(rowSelection, "pointer");
+  await expect(rowSelection).toBeChecked();
+
+  const exportButton = page.getByRole("button", { name: "Export redacted metadata", exact: true });
+  await activate(exportButton, "pointer");
+  let dialog = page.getByRole("dialog", { name: "Confirm redacted metadata export", exact: true });
+  await expect(dialog).toBeVisible();
+  audit.expectHttpResponse({
+    id: "mission-portfolio.bulk-export.initial-unavailable",
+    transport: "browser",
+    method: "POST",
+    pathname: "/api/v2/missions/bulk/export",
+    query: {},
+    status: 503,
+    occurrences: 1,
+    reason: "Prove an export failure retains the exact reviewed selection and idempotent retry boundary.",
+  });
+  let failedExportKey: string | undefined;
+  let failedExportBody: unknown;
+  const exportFailureRoute = async (route: Route) => {
+    failedExportKey = route.request().headers()["idempotency-key"];
+    failedExportBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json; charset=utf-8",
+      headers: { "X-Request-Id": "trace-portfolio-bulk-export" },
+      body: fixtureApiFailure({
+        code: "mission_export_fixture_temporarily_unavailable",
+        humanMessage: "No mission metadata was exported.",
+        remediation: "Keep this exact selection and retry export after the redaction pipeline recovers.",
+        traceId: "trace-portfolio-bulk-export",
+      }),
+    });
+  };
+  await page.route("**/api/v2/missions/bulk/export", exportFailureRoute);
+  const failedExportResponse = page.waitForResponse((response) => response.request().method() === "POST"
+    && pathname(response) === "/api/v2/missions/bulk/export"
+    && response.status() === 503);
+  await activate(dialog.getByRole("button", { name: "Confirm export", exact: true }), "pointer");
+  expect((await failedExportResponse).status()).toBe(503);
+  await page.unroute("**/api/v2/missions/bulk/export", exportFailureRoute);
+
+  const exportAlert = dialog.getByRole("alert");
+  await expect(exportAlert).toContainText("Mission metadata export did not complete");
+  await expect(exportAlert).toContainText("No mission metadata was exported.");
+  await expect(exportAlert).toContainText("Keep this exact selection and retry export after the redaction pipeline recovers.");
+  await expect(exportAlert).toContainText("Trace trace-portfolio-bulk-export");
+  await expect(rowSelection).toBeChecked();
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible();
+  const retryExport = dialog.getByRole("button", { name: "Retry export", exact: true });
+  await expect(retryExport).toBeFocused();
+
+  const expectedSelectionHash = createHash("sha256")
+    .update(JSON.stringify([fixture.failureTerminalMissionId]), "utf8")
+    .digest("hex");
+  const expectedExportFilename = `ti-scale-mission-metadata-${expectedSelectionHash.slice(0, 12)}.json`;
+  audit.expectGeneratedDownload(expectedExportFilename);
+  const exportResponse = page.waitForResponse((response) => response.request().method() === "POST"
+    && pathname(response) === "/api/v2/missions/bulk/export"
+    && response.status() === 200);
+  const downloadPromise = page.waitForEvent("download");
+  await activate(retryExport, "keyboard");
+  const exported = await exportResponse;
+  expect(exported.request().headers()["idempotency-key"]).toBe(failedExportKey);
+  expect(exported.request().postDataJSON()).toEqual(failedExportBody);
+  expect(exported.request().postDataJSON()).toEqual({
+    missionIds: [fixture.failureTerminalMissionId],
+    confirm: true,
+  });
+  const exportedPayload = await exported.json() as {
+    readonly selectionHash: string;
+    readonly outcomes: readonly { readonly missionId: string; readonly status: string }[];
+  };
+  expect(exportedPayload.selectionHash).toBe(expectedSelectionHash);
+  expect(exportedPayload.outcomes).toEqual([expect.objectContaining({
+    missionId: fixture.failureTerminalMissionId,
+    status: "exported",
+  })]);
+  await audit.verifyGeneratedDownload(await downloadPromise, expectedExportFilename);
+  await expect(dialog).toBeHidden();
+  await expect(rowSelection).toBeChecked();
+  expect(readMissionPortfolioFixtureState(fixture).failureTerminalExportAuditCount).toBe(1);
+
+  const archiveButton = page.getByRole("button", { name: "Archive terminal missions", exact: true });
+  await activate(archiveButton, "keyboard");
+  dialog = page.getByRole("dialog", { name: "Confirm terminal mission archive", exact: true });
+  await expect(dialog).toBeVisible();
+  audit.expectHttpResponse({
+    id: "mission-portfolio.bulk-archive.initial-unavailable",
+    transport: "browser",
+    method: "POST",
+    pathname: "/api/v2/missions/bulk/archive",
+    query: {},
+    status: 503,
+    occurrences: 1,
+    reason: "Prove an archive failure retains the exact reviewed terminal mission and idempotent retry boundary.",
+  });
+  let failedArchiveKey: string | undefined;
+  let failedArchiveBody: unknown;
+  const archiveFailureRoute = async (route: Route) => {
+    failedArchiveKey = route.request().headers()["idempotency-key"];
+    failedArchiveBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json; charset=utf-8",
+      headers: { "X-Request-Id": "trace-portfolio-bulk-archive" },
+      body: fixtureApiFailure({
+        code: "mission_archive_fixture_temporarily_unavailable",
+        humanMessage: "No selected mission was archived.",
+        remediation: "Keep this exact terminal selection and retry archive after the control-plane lease recovers.",
+        traceId: "trace-portfolio-bulk-archive",
+      }),
+    });
+  };
+  await page.route("**/api/v2/missions/bulk/archive", archiveFailureRoute);
+  const failedArchiveResponse = page.waitForResponse((response) => response.request().method() === "POST"
+    && pathname(response) === "/api/v2/missions/bulk/archive"
+    && response.status() === 503);
+  await activate(dialog.getByRole("button", { name: "Confirm archive", exact: true }), "keyboard");
+  expect((await failedArchiveResponse).status()).toBe(503);
+  await page.unroute("**/api/v2/missions/bulk/archive", archiveFailureRoute);
+
+  const archiveAlert = dialog.getByRole("alert");
+  await expect(archiveAlert).toContainText("Mission archive did not complete");
+  await expect(archiveAlert).toContainText("No selected mission was archived.");
+  await expect(archiveAlert).toContainText("Keep this exact terminal selection and retry archive after the control-plane lease recovers.");
+  await expect(archiveAlert).toContainText("Trace trace-portfolio-bulk-archive");
+  await expect(rowSelection).toBeChecked();
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible();
+  const retryArchive = dialog.getByRole("button", { name: "Retry archive", exact: true });
+  await expect(retryArchive).toBeFocused();
+
+  const archiveResponse = page.waitForResponse((response) => response.request().method() === "POST"
+    && pathname(response) === "/api/v2/missions/bulk/archive"
+    && response.status() === 200);
+  const refreshedList = missionListResponse(page, (url) => url.searchParams.get("query") === fixture.failureTerminalMissionId);
+  await activate(retryArchive, "pointer");
+  const archived = await archiveResponse;
+  expect(archived.request().headers()["idempotency-key"]).toBe(failedArchiveKey);
+  expect(archived.request().postDataJSON()).toEqual(failedArchiveBody);
+  const archivedPayload = await archived.json() as {
+    readonly archivedCount: number;
+    readonly outcomes: readonly { readonly missionId: string; readonly status: string; readonly reason: string }[];
+  };
+  expect(archivedPayload).toMatchObject({
+    archivedCount: 1,
+    outcomes: [{
+      missionId: fixture.failureTerminalMissionId,
+      status: "archived",
+      reason: "Durably terminal mission archived.",
+    }],
+  });
+  const refreshed = await assertMissionListResponse(await refreshedList);
+  expect(refreshed.items).toEqual([]);
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText("No missions match this view", { exact: true })).toBeVisible();
+  expect(readMissionPortfolioFixtureState(fixture)).toMatchObject({
+    failureTerminalMissionStatus: "archived",
+    failureTerminalRunStatus: "completed",
+    failureTerminalArchiveAuditCount: 1,
+    failureTerminalExportAuditCount: 1,
+    terminalMissionStatus: "completed",
+    terminalArchiveAuditCount: 0,
+    terminalExportAuditCount: 0,
+  });
+
+  const reloadResponse = missionListResponse(page, (url) => url.searchParams.get("query") === fixture.failureTerminalMissionId);
+  await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload({ waitUntil: "domcontentloaded" }));
+  expect((await assertMissionListResponse(await reloadResponse)).items).toEqual([]);
+  await expect(page.getByText("No missions match this view", { exact: true })).toBeVisible();
   await strictAudit(audit, testInfo);
 });
 

@@ -5,6 +5,10 @@ import type {
   MemoryScope,
   MemorySensitivity,
 } from "../memory/types";
+import type { BrainAtlasRegion } from "./AttackBrainAtlasMappingRegistry";
+import type { OperatorProfileBrainAtlasClass } from "../../shared/AttackBrainAtlasMappingRegistry";
+import type { ReusableKnowledgeOutcomeTag } from "../domain/reusable-knowledge-outcomes";
+import type { HistoricalReportedOutcomeSummary } from "../domain/historical-reported-outcomes";
 
 export interface VaultConnection {
   readonly id: string;
@@ -31,9 +35,29 @@ export interface VaultNoteAttachment {
   readonly contentHash?: string;
 }
 
+/**
+ * Bounded, integrity-bearing projection of private source custody.
+ *
+ * The full set remains canonical in SQLite. Obsidian receives only a bounded
+ * list of opaque `memory_sources.id` values plus this summary, so a note never
+ * grows in proportion to a high-fanout engagement history.
+ */
+export interface VaultPrivateProvenanceSummary {
+  readonly schema: "ti-scale/private-provenance/v1";
+  readonly total: number;
+  readonly projected: number;
+  readonly sha256: string;
+  readonly truncated: boolean;
+}
+
 export interface VaultNote {
   readonly id: string;
   readonly nodeType: MemoryNodeType;
+  /** Portable anatomical classification for attack knowledge or an explicitly
+   * consented Operator Profile projection. */
+  readonly brainRegion?: BrainAtlasRegion;
+  /** Explicit, consent-bound Atlas class for Operator Profile projections. */
+  readonly operatorProfileClass?: OperatorProfileBrainAtlasClass;
   readonly lifecycleStatus: MemoryLifecycle;
   readonly scope: MemoryScope;
   readonly sensitivity: MemorySensitivity;
@@ -48,9 +72,23 @@ export interface VaultNote {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly expiresAt?: string;
+  /** Opaque IDs for canonical `memory_sources` rows. Raw mission, target, and
+   * evidence locators remain in SQLite and are never copied into reusable
+   * attack-knowledge Markdown. */
+  readonly privateProvenanceIds: readonly string[];
+  /** Present on current managed projections; absent only for legacy notes
+   * written before bounded provenance summaries were introduced. */
+  readonly privateProvenanceSummary?: VaultPrivateProvenanceSummary;
   readonly sourceIds: readonly string[];
   readonly aliases: readonly string[];
   readonly tags: readonly string[];
+  /**
+   * Canonical evidence-linked outcomes projected from SQLite. An imported
+   * value is descriptive only and cannot create an outcome classification.
+   */
+  readonly outcomeTags: readonly ReusableKnowledgeOutcomeTag[];
+  /** Descriptive historical source claim. Never equivalent to outcomeTags. */
+  readonly reportedOutcome?: HistoricalReportedOutcomeSummary;
   readonly edges: readonly VaultNoteEdge[];
   readonly attachments: readonly VaultNoteAttachment[];
 }
@@ -129,6 +167,18 @@ export interface VaultPortableExport {
     readonly version: number;
     readonly projectionHash: string;
   }[];
+  readonly brainAtlasProfile?: {
+    readonly pluginId: "brain-atlas";
+    readonly version: string;
+    readonly configurationSha256: string;
+    readonly assetSha256: Readonly<Record<string, string>>;
+    readonly mode: "portable-copy";
+  };
+}
+
+export interface VaultPortableExportOptions {
+  /** Include only the verified pinned Brain Atlas plugin/profile in `.obsidian`. */
+  readonly includeBrainAtlasProfile?: boolean;
 }
 
 export interface VaultSyncVerificationItem {

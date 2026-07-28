@@ -4,10 +4,11 @@ import { operationsApi } from "../../data/api/operations";
 import { confirmMemoryCandidate, fetchContextPacks, fetchMemoryCandidates, rejectMemoryCandidate } from "../../data/api/brain";
 import { useQuery } from "../../data/cache/QueryProvider";
 import { Button, ButtonLink, Card, ErrorPanel, LoadingPanel, StatusPill } from "../../design-system/components/Primitives";
+import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
 import type { MemoryCandidate } from "../../domain/types/brain";
 import type { FindingRecord, LessonRecord } from "../../domain/types/operations";
 import type { RunPlan, RuntimeRun } from "../../domain/types/runtimeV2";
-import { budgetStatusLabel, comparisonBasisLabel, completionArtifactPageTruth, completionOutcomeLabel, findingReviewOptions, formatBudgetMetricValue, formatComparisonMetricValue, lessonReviewOptions, summarizeCompletionEvents, unresolvedCompletionTruth, type CompletionArtifactPageTruth, type UnresolvedCompletionTruth } from "../../lib/completionReview";
+import { budgetStatusLabel, comparisonBasisLabel, completionArtifactPageTruth, completionOutcomeLabel, completionVerificationTruth, findingReviewOptions, formatBudgetMetricValue, formatComparisonMetricValue, lessonReviewOptions, summarizeCompletionEvents, unresolvedCompletionTruth, type CompletionArtifactPageTruth, type UnresolvedCompletionTruth } from "../../lib/completionReview";
 import { ContextPackPanel } from "../brain/ContextPackPanel";
 import { DegradedNotice, formatDuration, formatTime, JsonDetails, percent, useActionState } from "./OperationalSurface";
 
@@ -39,24 +40,26 @@ export function FindingReviewControl({ finding, onReviewed }: { finding: Finding
     setOperatorOverride(false);
   }, [finding.reviewStatus, finding.version]);
   if (options.length === 0) return <p className="os-muted">No in-place review transition is available from {humanStatus(finding.reviewStatus)}.</p>;
-  const overrideRequired = status === "verified" && finding.evidenceCount === 0;
+  const overrideRequired = status === "verified" && finding.verifiedEvidenceCount === 0;
+  const minimumReasonLength = overrideRequired ? 12 : 1;
+  const trimmedReason = reason.trim();
   return <form className="os-review-form os-inline-review" aria-label={`Review finding ${finding.title}`} onSubmit={(event) => {
     event.preventDefault();
-    if (!reason.trim() || action.pending || (overrideRequired && !operatorOverride)) return;
+    if (trimmedReason.length < minimumReasonLength || action.pending || (overrideRequired && !operatorOverride)) return;
     void action.run(async () => {
       await operationsApi.reviewFinding(finding.id, {
         expectedVersion: finding.version,
         status,
-        reason: reason.trim(),
+        reason: trimmedReason,
         ...(status === "verified" ? { operatorOverride } : {}),
       }, `completion-finding-${crypto.randomUUID()}`);
       onReviewed();
     }, `Finding moved to ${humanStatus(status)} with an audited version-aware review.`);
   }}>
-    <label><span>Review outcome</span><select aria-label={`Finding outcome for ${finding.title}`} value={status} onChange={(event) => { setStatus(event.target.value as typeof status); setOperatorOverride(false); }}>{options.map((item) => <option value={item} key={item}>{humanStatus(item)}</option>)}</select></label>
-    <label><span>Review reason</span><textarea aria-label={`Finding review reason for ${finding.title}`} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Evidence-linked reason for this review decision" /></label>
-    {overrideRequired && <label className="os-check"><input type="checkbox" checked={operatorOverride} onChange={(event) => setOperatorOverride(event.target.checked)} /><span><strong>Use audited operator override</strong><small>No visible supporting evidence is linked. Verification is blocked unless your identity has override permission; the override and reason are written to the audit chain.</small></span></label>}
-    <Button type="submit" variant={status === "rejected" ? "danger" : "secondary"} disabled={action.pending || !reason.trim() || (overrideRequired && !operatorOverride)}>Record finding review</Button>
+    <label><span>Review outcome</span><TitaniumSelect aria-label={`Finding outcome for ${finding.title}`} value={status} onChange={(event) => { setStatus(event.target.value as typeof status); setOperatorOverride(false); }}>{options.map((item) => <option value={item} key={item}>{humanStatus(item)}</option>)}</TitaniumSelect></label>
+    <label><span>Review reason</span><textarea minLength={minimumReasonLength} aria-label={`Finding review reason for ${finding.title}`} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Evidence-linked reason for this review decision" /></label>
+    {overrideRequired && <label className="os-check"><input type="checkbox" checked={operatorOverride} onChange={(event) => setOperatorOverride(event.target.checked)} /><span><strong>Use audited operator override</strong><small>No verified supporting evidence is linked. A specific reason of at least 12 characters and an identity with override permission are required; the override and reason are written to the audit chain.</small></span></label>}
+    <Button type="submit" variant={status === "rejected" ? "danger" : "secondary"} disabled={action.pending || trimmedReason.length < minimumReasonLength || (overrideRequired && !operatorOverride)}>Record finding review</Button>
     {action.error && <ErrorPanel title="Finding review was not recorded" error={action.error} />}
     {action.message && <p role="status" className="os-success-note">{action.message}</p>}
   </form>;
@@ -84,7 +87,7 @@ export function LessonReviewControl({ lesson, onReviewed }: { lesson: LessonReco
       onReviewed();
     }, `Lesson moved to ${humanStatus(status)} through independent review.`);
   }}>
-    <label><span>Review outcome</span><select aria-label={`Lesson outcome for ${lesson.statement}`} value={status} onChange={(event) => setStatus(event.target.value as typeof status)}>{options.map((item) => <option value={item} key={item}>{humanStatus(item)}</option>)}</select></label>
+    <label><span>Review outcome</span><TitaniumSelect aria-label={`Lesson outcome for ${lesson.statement}`} value={status} onChange={(event) => setStatus(event.target.value as typeof status)}>{options.map((item) => <option value={item} key={item}>{humanStatus(item)}</option>)}</TitaniumSelect></label>
     <label><span>Independent review reason</span><textarea aria-label={`Lesson review reason for ${lesson.statement}`} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why the evidence supports this lifecycle decision" /></label>
     <p className="os-muted">Author: {lesson.authoringAgentId ?? "unknown"}. The service blocks an agent from verifying its own lesson and requires supporting evidence.</p>
     <Button type="submit" variant={status === "rejected" ? "danger" : "secondary"} disabled={action.pending || !reason.trim()}>Record lesson review</Button>
@@ -166,6 +169,7 @@ export function CompletionReview({ run, plan, missionSuccessCriteria = [] }: {
   ])], [contexts.data?.items, eventSummary.contextPackIds, lessonUsage.data?.items]);
   const unresolved = unresolvedCompletionTruth(plan?.steps ?? [], findings.data?.items ?? [], findings.data?.nextCursor);
   const evaluation = evaluations.data?.items[0];
+  const verificationTruth = completionVerificationTruth(evaluation);
   const artifactTruth = completionArtifactPageTruth(
     artifacts.data?.items.map((item) => item.artifactType) ?? [],
     artifacts.data?.nextCursor,
@@ -200,6 +204,7 @@ export function CompletionReview({ run, plan, missionSuccessCriteria = [] }: {
       <div><span>Visible evidence verified</span><strong>{verifiedEvidence}/{evidence.data?.items.length ?? 0}{evidence.data?.nextCursor ? "+" : ""}</strong></div>
       <div><span>Visible findings verified</span><strong>{verifiedFindings}/{findings.data?.items.length ?? 0}{findings.data?.nextCursor ? "+" : ""}</strong></div>
       <div><span>Evidence coverage</span><strong>{percent(evaluation?.evidenceCoverage)}</strong></div>
+      <div><span>Outcome basis</span><strong>{verificationTruth.label}</strong></div>
       <div><span>Elapsed</span><strong>{formatDuration(elapsedSeconds(run))}</strong></div>
     </section>
 
@@ -209,7 +214,7 @@ export function CompletionReview({ run, plan, missionSuccessCriteria = [] }: {
         {missionSuccessCriteria.length > 0 && <><h4>Mission criteria</h4><ul className="os-compact-list">{missionSuccessCriteria.map((criterion) => <li key={criterion}><span>{criterion}</span><StatusPill status={evaluation ? "evaluation_recorded" : "awaiting_evaluation"} /></li>)}</ul><p className="os-muted">A run evaluation is shown at aggregate level. A criterion is not labeled passed unless a canonical per-criterion verdict exists.</p></>}
         {criteria.length > 0 && <><h4>Plan criteria</h4><ul className="os-compact-list">{criteria.map((item, index) => <li key={`${item.step}:${index}`}><span><strong>{item.criterion}</strong><small>{item.step}</small></span><StatusPill status={item.status} /></li>)}</ul></>}
         {!evaluation && <p className="os-muted">No journey-aware run evaluation has been persisted yet. The terminal outcome is visible, but the system does not claim an evaluation score.</p>}
-        {evaluation && <><p>{evaluation.retrospective}</p><JsonDetails label="Evaluation scores and measured metrics" value={{ scores: evaluation.scores, metrics: evaluation.metrics, createdAt: evaluation.createdAt }} /></>}
+        {evaluation && <><p>{evaluation.retrospective}</p><p className="os-muted" data-verification-state={verificationTruth.status}>{verificationTruth.explanation}</p><JsonDetails label="Evaluation scores and measured metrics" value={{ scores: evaluation.scores, metrics: evaluation.metrics, createdAt: evaluation.createdAt }} /></>}
       </Card>
 
       <Card aria-label="Terminal run budget review">

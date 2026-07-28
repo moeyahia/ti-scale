@@ -14,7 +14,18 @@ import type {
   RuntimeCapabilityProjection,
   SafeStopDefinition,
 } from "../domain";
-import type { MissionCreateRequest } from "../missions";
+import type { MissionCreateRequest, MissionEnvironmentClassification } from "../missions";
+import type {
+  GuidedReconnaissanceSelection,
+  GuidedTcpPortPresetId,
+} from "../missions/GuidedReconnaissance";
+import type {
+  AutonomousOutcomeProfileId,
+} from "../domain/autonomous-outcome-registry";
+import type {
+  AgentModelAssignmentSelection,
+  AutonomousPlanningSelection,
+} from "../model-config";
 
 export interface IntakeFieldDefinition {
   readonly id: string;
@@ -47,9 +58,22 @@ export interface MissionIntakeRequest {
   readonly boundedDestructiveTargetIds?: readonly string[];
   readonly budgetPresetId?: BudgetPresetId;
   readonly engagementId?: string;
+  readonly environmentClassification?: MissionEnvironmentClassification;
   readonly explanationDepth?: "concise" | "balanced" | "deep";
   readonly executionPreference?: "manual" | "single_step_agent";
+  readonly guidedReconnaissance?: GuidedReconnaissanceSelection;
   readonly specialistAgentIds?: readonly string[];
+  /**
+   * Partial mission-local overrides. Missing selected agents are materialized
+   * from current scoped defaults or a deterministic live-catalog recommendation.
+   */
+  readonly agentModelAssignments?: readonly AgentModelAssignmentSelection[];
+  /**
+   * Selects how the Autonomous plan itself is constructed. This is separate
+   * from specialist execution assignments: provider-backed planning is always
+   * advisory-only and carries no tool or execution authority.
+   */
+  readonly planningSelection?: AutonomousPlanningSelection;
   readonly memoryScopes?: readonly string[];
   readonly contextNodeIds?: readonly string[];
 }
@@ -71,11 +95,48 @@ export interface IntakeRegistrySnapshot {
     readonly optional: readonly SafeStopDefinition[];
   };
   readonly budgets: Readonly<Record<"quick" | "standard" | "deep", MissionBudgetPreset>>;
+  readonly guidedReconnaissance: {
+    readonly registryVersion: 1;
+    readonly modes: readonly {
+      readonly id: "host_liveness" | "tcp_service_scan";
+      readonly label: string;
+      readonly description: string;
+      readonly toolId: string;
+      readonly readiness: "ready" | "unavailable";
+      readonly readinessExplanation: string;
+      readonly remediation: string;
+      readonly manualFallbackAvailable: true;
+    }[];
+    readonly tcpPortPresets: readonly {
+      readonly id: GuidedTcpPortPresetId;
+      readonly version: number;
+      readonly label: string;
+      readonly description: string;
+      readonly ports: readonly number[];
+    }[];
+    readonly customPorts: {
+      readonly maximumIndividualPorts: number;
+      readonly example: string;
+      readonly explanation: string;
+    };
+  };
 }
 
 export interface ResolvedMissionIntake {
   readonly schemaVersion: "2.4";
   readonly request: MissionCreateRequest;
+  /**
+   * Present only for Autonomous. This describes the promised result without
+   * introducing another journey or exposing an internal runtime mode.
+   */
+  readonly autonomousOutcome?: {
+    readonly id: AutonomousOutcomeProfileId;
+    readonly label: string;
+    readonly concisePromise: string;
+    readonly completionMeaning: string;
+    readonly requiredTerminalSuccessCriteria: readonly string[];
+    readonly requiredActionClassIds: readonly string[];
+  };
   readonly normalizedTargets: readonly MissionTarget[];
   readonly template: {
     readonly id: MissionTemplateId;

@@ -1,5 +1,9 @@
 import type { JsonValue } from "../events";
 import type {
+  CompiledAutonomousRecoveryMemory,
+  RecoveryMemoryDecisionReceipt,
+} from "../recovery-memory";
+import type {
   ActionIntent,
   BudgetState,
   BudgetValues,
@@ -11,6 +15,7 @@ import type {
   RunState,
   SupervisedRun,
 } from "../supervisor";
+import type { RuntimeModelBindingReceipt } from "../command-runtime/types";
 
 export interface RunLeaseToken {
   readonly runId: string;
@@ -67,6 +72,7 @@ export interface DurableActionIntent extends ActionIntent {
   readonly contextPackId?: string;
   readonly traceId?: string;
   readonly spanId?: string;
+  readonly runtimeModelBinding?: RuntimeModelBindingReceipt;
 }
 
 export interface DurableAction {
@@ -94,6 +100,7 @@ export interface DurableAction {
   readonly createdAt: string;
   readonly startedAt: string | null;
   readonly endedAt: string | null;
+  readonly runtimeModelBinding?: RuntimeModelBindingReceipt | null;
 }
 
 export interface ExecutionPort {
@@ -103,6 +110,30 @@ export interface ExecutionPort {
   resume(action: DurableAction, signal: AbortSignal): Promise<void>;
   /** Must resolve only after child work has cooperatively stopped and cleanup completed. */
   cancelRun(runId: string, reason: string): Promise<void>;
+}
+
+/**
+ * A trusted execution adapter uses this error only for a fail-closed rejection
+ * before it has accepted work. The code and category are deliberately typed
+ * so the coordinator can retain an operator-readable diagnosis instead of
+ * collapsing every adapter boundary into `dispatch_failed` / `unknown`.
+ */
+export class ExecutionBoundaryError extends Error {
+  constructor(
+    readonly code: string,
+    readonly failureCategory: FailureCategory,
+    message: string,
+  ) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/u.test(code)) {
+      throw new TypeError("Execution boundary error code is invalid");
+    }
+    const normalized = message.trim();
+    if (!normalized || normalized.length > 1_000 || /[\u0000-\u001F\u007F]/u.test(normalized)) {
+      throw new TypeError("Execution boundary error message is invalid");
+    }
+    super(normalized);
+    this.name = "ExecutionBoundaryError";
+  }
 }
 
 export interface StartActionInput {
@@ -131,6 +162,9 @@ export interface CompleteActionInput {
   readonly retryAfterMs?: number;
   readonly budgetDelta?: BudgetValues;
   readonly circuitKey?: string;
+  readonly operationalResetResult?: Readonly<Record<string, unknown>>;
+  /** Local typed constraints compiled from the exact failure Context Pack. */
+  readonly recoveryMemory?: CompiledAutonomousRecoveryMemory;
 }
 
 export interface CompleteActionResult {
@@ -141,6 +175,7 @@ export interface CompleteActionResult {
   readonly loopKinds: readonly string[];
   readonly eventSequence: number;
   readonly checkpointId: string;
+  readonly recoveryMemoryReceipt?: RecoveryMemoryDecisionReceipt;
 }
 
 export interface DurableTransitionResult {

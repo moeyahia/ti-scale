@@ -17,8 +17,10 @@ import type {
   MemoryRetentionPolicy,
   MemoryScope,
   RetrievalPolicy,
+  ReleaseDataClass,
   RetrievedMemory,
 } from "./types";
+import { SUPPORTED_MEMORY_SCOPE_CLASSES, isAttackCentricReusableNodeType } from "./types";
 import {
   assertIdentifier,
   assertNonEmpty,
@@ -36,10 +38,18 @@ import {
   validateSensitivity,
 } from "./validation";
 import {
+  type AttackKnowledgeOperationalLabel,
+  validateAttackCentricEdgeEndpoints,
+  validateAttackCentricReusableCandidate,
+  validateAttackCentricReusableEdge,
+  validateAttackCentricReusableNode,
+} from "./AttackKnowledgeTaxonomy";
+import {
   assertReusableMemoryText,
   assertReusableMemoryUnknown,
   REUSABLE_MEMORY_LIMITS,
 } from "./ReusableMemorySafety";
+import { autonomousInfluenceRejection } from "./AutonomousMemoryInfluence";
 import {
   assertCanonicalMemoryScope,
   memoryNodeMatchesPolicy,
@@ -118,12 +128,26 @@ interface RepositoryOptions {
   readonly createId?: (prefix: string) => string;
 }
 
+export interface VerifyAttackKnowledgeNodeForPromotionInput {
+  readonly bundleId: string;
+  readonly reviewHash: string;
+  readonly verificationAuditId: string;
+  readonly verificationAuditHash: string;
+  readonly evidence: readonly {
+    readonly id: string;
+    readonly contentHash: string;
+    readonly acquiredAt: string;
+  }[];
+  readonly actor: string;
+}
+
 const NODE_COLUMNS = `
   id, node_type, title, summary, body, scope, engagement_id, mission_id,
   sensitivity, confidence, lifecycle_status, confirmation_state,
   provenance_json, author_type, author_id, version, retention_policy_json,
   expires_at, pinned, created_at, updated_at
 `;
+const BOUNDED_READ_BATCH_SIZE = 500;
 
 function parseJson<T>(source: string, label: string): T {
   try {
@@ -338,6 +362,7 @@ export class MemoryRepository {
   readonly #database: SqliteDatabase;
   readonly #clock: () => Date;
   readonly #createId: (prefix: string) => string;
+  #attackKnowledgeVerificationDepth = 0;
 
   constructor(database: SqliteDatabase, options: RepositoryOptions = {}) {
     this.#database = database;
@@ -353,6 +378,84 @@ export class MemoryRepository {
     return this.#createId(prefix);
   }
 
+  #knownOperationalLabels(provenance: MemoryProvenance): readonly AttackKnowledgeOperationalLabel[] {
+    const labels = new Map<string, AttackKnowledgeOperationalLabel>();
+    const remember = (value: unknown, category: AttackKnowledgeOperationalLabel["category"]): void => {
+      if (typeof value !== "string") return;
+      const normalized = value.normalize("NFKC").trim();
+      if (normalized.length < 5) return;
+      labels.set(`${category}\0${normalized.toLocaleLowerCase("en-US")}`, { value: normalized, category });
+    };
+    const lookup = this.#database.prepare(`
+      WITH source_missions(mission_id) AS (
+        SELECT id FROM missions WHERE id = ?
+        UNION SELECT mission_id FROM runs WHERE id = ?
+        UNION SELECT mission_id FROM actions WHERE id = ?
+        UNION SELECT mission_id FROM evidence WHERE id = ?
+        UNION SELECT mission_id FROM artifacts WHERE id = ?
+        UNION SELECT mission_id FROM findings WHERE id = ?
+        UNION SELECT mission_id FROM events WHERE id = ?
+        UNION SELECT mission_id FROM attack_attempts WHERE id = ?
+        UNION SELECT mission_id FROM observations WHERE id = ?
+        UNION SELECT mission_id FROM engagement_log_records WHERE id = ?
+        UNION SELECT mission_id FROM evidence_candidates WHERE id = ?
+        UNION SELECT mission_id FROM conversations WHERE id = ?
+        UNION SELECT conversation.mission_id
+          FROM messages message
+          JOIN conversations conversation ON conversation.id = message.conversation_id
+          WHERE message.id = ?
+        UNION SELECT run.mission_id
+          FROM assignments assignment
+          JOIN runs run ON run.id = assignment.run_id
+          WHERE assignment.id = ?
+        UNION SELECT action.mission_id
+          FROM tool_calls tool_call
+          JOIN actions action ON action.id = tool_call.action_id
+          WHERE tool_call.id = ?
+        UNION SELECT run.mission_id
+          FROM provider_turns provider_turn
+          JOIN runs run ON run.id = provider_turn.run_id
+          WHERE provider_turn.id = ?
+      )
+      SELECT mission.name, mission.engagement_id, target.target, target.normalized_target
+      FROM source_missions source
+      JOIN missions mission ON mission.id = source.mission_id
+      LEFT JOIN mission_targets target ON target.mission_id = mission.id
+    `);
+    for (const source of provenance.sources) {
+      const ids = Array.from({ length: 16 }, () => source.sourceId);
+      const rows = lookup.all(...ids) as Array<{
+        name: string;
+        engagement_id: string | null;
+        target: string | null;
+        normalized_target: string | null;
+      }>;
+      for (const row of rows) {
+        remember(row.name, "engagement_label");
+        remember(row.engagement_id, "engagement_label");
+        remember(row.target, "target_identifier");
+        remember(row.normalized_target, "target_identifier");
+      }
+    }
+    const globalRows = this.#database.prepare(`
+      SELECT mission.name, mission.engagement_id, target.target, target.normalized_target
+      FROM missions mission
+      LEFT JOIN mission_targets target ON target.mission_id = mission.id
+    `).all() as Array<{
+      name: string;
+      engagement_id: string | null;
+      target: string | null;
+      normalized_target: string | null;
+    }>;
+    for (const row of globalRows) {
+      remember(row.name, "engagement_label");
+      remember(row.engagement_id, "engagement_label");
+      remember(row.target, "target_identifier");
+      remember(row.normalized_target, "target_identifier");
+    }
+    return [...labels.values()];
+  }
+
   getNode(id: string, includeForgotten = false): MemoryNode | undefined {
     assertIdentifier(id, "memory node ID");
     const row = this.#database
@@ -360,6 +463,25 @@ export class MemoryRepository {
       .get(id) as NodeRow | undefined;
     if (!row || (!includeForgotten && row.lifecycle_status === "forgotten")) return undefined;
     return nodeFromRow(row);
+  }
+
+  /** Bounded primary-key hydration for migration/reconciliation paths. */
+  getNodes(ids: readonly string[], includeForgotten = false): ReadonlyMap<string, MemoryNode> {
+    const uniqueIds = [...new Set(ids)];
+    for (const id of uniqueIds) assertIdentifier(id, "memory node ID");
+    const nodes = new Map<string, MemoryNode>();
+    for (let offset = 0; offset < uniqueIds.length; offset += BOUNDED_READ_BATCH_SIZE) {
+      const batch = uniqueIds.slice(offset, offset + BOUNDED_READ_BATCH_SIZE);
+      const placeholders = batch.map(() => "?").join(", ");
+      const rows = this.#database.prepare(`
+        SELECT ${NODE_COLUMNS} FROM memory_nodes WHERE id IN (${placeholders})
+      `).all(...batch) as NodeRow[];
+      for (const row of rows) {
+        if (!includeForgotten && row.lifecycle_status === "forgotten") continue;
+        nodes.set(row.id, nodeFromRow(row));
+      }
+    }
+    return nodes;
   }
 
   requireNode(id: string, includeForgotten = false): MemoryNode {
@@ -371,6 +493,9 @@ export class MemoryRepository {
   createNode(input: CreateMemoryNodeInput): MemoryNode {
     assertNodeContentSafe(input);
     validateCreateNode(input);
+    if (isAttackCentricReusableNodeType(input.nodeType)) {
+      validateAttackCentricReusableNode(input, this.#knownOperationalLabels(input.provenance));
+    }
     assertCanonicalMemoryScope(this.#database, input.scope);
     const id = input.id ?? this.createId("mem");
     assertIdentifier(id, "memory node ID");
@@ -430,6 +555,136 @@ export class MemoryRepository {
     );
   }
 
+  /**
+   * The sole confirmed-to-verified transition for reusable attack knowledge.
+   * It is callable only after the promotion service has appended the exact
+   * immutable operator/evidence review audit inside the same transaction.
+   */
+  verifyAttackKnowledgeNodeForPromotion(
+    id: string,
+    input: VerifyAttackKnowledgeNodeForPromotionInput,
+  ): MemoryNode {
+    assertIdentifier(id, "memory node ID");
+    assertIdentifier(input.bundleId, "attack-knowledge bundle ID");
+    assertIdentifier(input.verificationAuditId, "verification audit ID");
+    assertNonEmpty(input.actor, "verification actor", 256);
+    if (!/^[a-f0-9]{64}$/u.test(input.reviewHash)
+      || !/^[a-f0-9]{64}$/u.test(input.verificationAuditHash)) {
+      throw new TypeError("Attack-knowledge verification hashes are invalid");
+    }
+    if (input.evidence.length < 1 || input.evidence.length > 100) {
+      throw new TypeError("Attack-knowledge verification requires bounded canonical evidence");
+    }
+    const evidenceIds = input.evidence.map(({ id: evidenceId }) => {
+      assertIdentifier(evidenceId, "verification evidence ID");
+      return evidenceId;
+    });
+    if (new Set(evidenceIds).size !== evidenceIds.length) {
+      throw new TypeError("Attack-knowledge verification evidence contains duplicates");
+    }
+    return inImmediateTransaction(this.#database, () => {
+      const current = this.requireNode(id);
+      if (!isAttackCentricReusableNodeType(current.nodeType)) {
+        throw new TypeError("Only reusable attack knowledge may use the promotion verification path");
+      }
+      if (current.lifecycleStatus !== "confirmed" || current.confirmationState !== "confirmed") {
+        throw new TypeError("Attack knowledge must be operator-confirmed before verification");
+      }
+      const linked = this.#database.prepare(`
+        SELECT 1 AS valid
+        FROM attack_knowledge_bundle_candidates link
+        JOIN attack_knowledge_candidate_registry registry
+          ON registry.content_fingerprint = link.content_fingerprint
+        JOIN memory_candidates candidate ON candidate.id = registry.candidate_id
+        JOIN attack_knowledge_bundles bundle ON bundle.id = link.bundle_id
+        WHERE link.bundle_id = ? AND candidate.proposed_node_id = ?
+          AND candidate.status IN ('confirmed', 'edited_confirmed', 'merged')
+          AND candidate.reviewed_by = ? AND bundle.status = 'staged'
+      `).get(input.bundleId, id, input.actor) as { readonly valid: number } | undefined;
+      if (!linked) throw new TypeError("Node is not part of this exact staged operator review");
+      const audit = this.#database.prepare(`
+        SELECT actor_id, action, resource_id, details_json, record_hash, occurred_at
+        FROM audit_records WHERE id = ?
+      `).get(input.verificationAuditId) as {
+        readonly actor_id: string | null;
+        readonly action: string;
+        readonly resource_id: string | null;
+        readonly details_json: string;
+        readonly record_hash: string;
+        readonly occurred_at: string;
+      } | undefined;
+      if (!audit || audit.actor_id !== input.actor
+        || audit.action !== "attack_knowledge.verification_approved"
+        || audit.resource_id !== input.bundleId
+        || audit.record_hash !== input.verificationAuditHash) {
+        throw new TypeError("Attack-knowledge verification audit does not match this review");
+      }
+      const details = parseJson<Record<string, unknown>>(audit.details_json, "verification audit details");
+      if (details.reviewHash !== input.reviewHash
+        || canonicalJson(details.evidenceIds) !== canonicalJson([...evidenceIds].sort())) {
+        throw new TypeError("Attack-knowledge verification audit evidence or review hash changed");
+      }
+      for (const evidence of input.evidence) {
+        const row = this.#database.prepare(`
+          SELECT canonical.id FROM evidence canonical
+          JOIN attack_knowledge_bundle_evidence_bindings binding
+            ON binding.bundle_id = ? AND binding.evidence_id = canonical.id
+            AND binding.content_hash = canonical.content_hash
+            AND binding.acquired_at = canonical.acquired_at
+          WHERE canonical.id = ? AND canonical.content_hash = ?
+            AND canonical.acquired_at = ? AND canonical.verification_state = 'verified'
+            AND lower(trim(canonical.evidence_type)) <> 'command_output'
+            AND EXISTS (
+              SELECT 1 FROM evidence_chain_events custody
+              WHERE custody.evidence_id = canonical.id AND custody.event_type = 'verified'
+            )
+        `).get(input.bundleId, evidence.id, evidence.contentHash, evidence.acquiredAt);
+        if (!row) throw new TypeError("Attack-knowledge verification evidence changed or is no longer verified");
+      }
+      this.#attackKnowledgeVerificationDepth += 1;
+      try {
+        const updated = this.correctNode(id, {
+          lifecycleStatus: "verified",
+          confirmationState: "confirmed",
+          additionalProvenanceSources: [{
+            sourceType: "attack_knowledge_verification",
+            sourceId: `akverify_${input.reviewHash}`,
+            sourceHash: input.verificationAuditHash,
+            acquiredAt: audit.occurred_at,
+          }],
+          provenanceExplanation: "Operator-confirmed reusable attack knowledge was verified against canonical evidence during an immutable promotion review.",
+          authorType: "operator",
+          authorId: input.actor,
+          changeReason: `Verified by attack-knowledge promotion review ${input.reviewHash}`,
+        });
+        for (const evidence of input.evidence) {
+          this.#database.prepare(`
+            INSERT INTO memory_sources (
+              id, node_id, source_type, source_id, evidence_id, source_hash,
+              acquired_at, created_at
+            ) VALUES (?, ?, 'attack_knowledge_evidence_binding', ?, ?, ?, ?, ?)
+            ON CONFLICT(node_id, source_type, source_id) DO NOTHING
+          `).run(
+            this.createId("msrc"),
+            id,
+            sha256(canonicalJson({
+              bundleId: input.bundleId,
+              reviewHash: input.reviewHash,
+              evidenceId: evidence.id,
+            })),
+            evidence.id,
+            evidence.contentHash,
+            evidence.acquiredAt,
+            audit.occurred_at,
+          );
+        }
+        return updated;
+      } finally {
+        this.#attackKnowledgeVerificationDepth -= 1;
+      }
+    });
+  }
+
   correctNode(id: string, input: CorrectMemoryNodeInput): MemoryNode {
     assertNonEmpty(input.changeReason, "memory correction reason", 2_000);
     if (input.scope) validateScope(input.scope);
@@ -443,6 +698,16 @@ export class MemoryRepository {
 
     return inImmediateTransaction(this.#database, () => {
       const current = this.requireNode(id);
+      if (
+        isAttackCentricReusableNodeType(current.nodeType)
+        && current.lifecycleStatus !== "verified"
+        && input.lifecycleStatus === "verified"
+        && this.#attackKnowledgeVerificationDepth === 0
+      ) {
+        throw new TypeError(
+          "Reusable attack knowledge can be verified only through an evidence-backed attack-knowledge promotion review",
+        );
+      }
       const existingSourceKeys = new Set(
         current.provenance.sources.map((source) => `${source.sourceType}\0${source.sourceId}`),
       );
@@ -452,8 +717,12 @@ export class MemoryRepository {
         existingSourceKeys.add(key);
         return true;
       });
-      const provenance = additionalSources.length > 0
-        ? { ...current.provenance, sources: [...current.provenance.sources, ...additionalSources] }
+      const provenance = additionalSources.length > 0 || input.provenanceExplanation !== undefined
+        ? {
+            ...current.provenance,
+            explanation: input.provenanceExplanation ?? current.provenance.explanation,
+            sources: [...current.provenance.sources, ...additionalSources],
+          }
         : current.provenance;
       validateProvenance(provenance);
       const scope = input.scope ?? current.scope;
@@ -467,6 +736,20 @@ export class MemoryRepository {
       if (nextLifecycle === "confirmed" && nextConfirmation !== "confirmed") {
         throw new TypeError("confirmed memory requires confirmed consent state");
       }
+      validateAttackCentricReusableNode({
+        id: current.id,
+        nodeType: current.nodeType,
+        title,
+        summary,
+        body: input.body ?? current.body,
+        scope,
+        provenance,
+        authorType: input.authorType,
+        lifecycleStatus: nextLifecycle,
+        confirmationState: nextConfirmation,
+      }, isAttackCentricReusableNodeType(current.nodeType)
+        ? this.#knownOperationalLabels(provenance)
+        : []);
       assertNodeContentSafe({
         title,
         summary,
@@ -547,9 +830,19 @@ export class MemoryRepository {
   createEdge(input: CreateMemoryEdgeInput): MemoryEdge {
     assertEdgeContentSafe(input);
     validateCreateEdge(input);
-    assertCanonicalMemoryScope(this.#database, input.scope);
     const source = this.requireNode(input.sourceNodeId);
     const target = this.requireNode(input.targetNodeId);
+    validateAttackCentricReusableEdge(
+      input,
+      source.nodeType,
+      target.nodeType,
+      isAttackCentricReusableNodeType(source.nodeType)
+        || isAttackCentricReusableNodeType(target.nodeType)
+        ? this.#knownOperationalLabels(input.provenance)
+        : [],
+    );
+    assertCanonicalMemoryScope(this.#database, input.scope);
+    validateAttackCentricEdgeEndpoints(input.edgeType, source.nodeType, target.nodeType);
     const canonicalScope = (node: MemoryNode): {
       readonly engagementId: string | null;
       readonly missionId: string | null;
@@ -614,7 +907,7 @@ export class MemoryRepository {
   listEdges(nodeId: string): readonly MemoryEdge[] {
     this.requireNode(nodeId);
     const rows = this.#database.prepare(`
-      SELECT * FROM memory_edges
+      SELECT * FROM memory_edges_safe
       WHERE (source_node_id = ? OR target_node_id = ?)
         AND lifecycle_status != 'forgotten'
         AND (expires_at IS NULL OR expires_at > ?)
@@ -628,6 +921,12 @@ export class MemoryRepository {
   createCandidate(input: CreateMemoryCandidateInput): MemoryCandidate {
     assertCandidateContentSafe(input);
     validateNodeType(input.nodeType);
+    validateAttackCentricReusableCandidate(
+      input,
+      isAttackCentricReusableNodeType(input.nodeType)
+        ? this.#knownOperationalLabels(input.provenance)
+        : [],
+    );
     assertNonEmpty(input.title, "candidate title", 500);
     assertNonEmpty(input.summary, "candidate summary", 4_000);
     validateScope(input.scope);
@@ -668,6 +967,22 @@ export class MemoryRepository {
     assertIdentifier(id, "memory candidate ID");
     const row = this.#database.prepare("SELECT * FROM memory_candidates WHERE id = ?").get(id) as CandidateRow | undefined;
     return row ? candidateFromRow(row) : undefined;
+  }
+
+  /** Bounded primary-key hydration without weakening per-row parsing. */
+  getCandidates(ids: readonly string[]): ReadonlyMap<string, MemoryCandidate> {
+    const uniqueIds = [...new Set(ids)];
+    for (const id of uniqueIds) assertIdentifier(id, "memory candidate ID");
+    const candidates = new Map<string, MemoryCandidate>();
+    for (let offset = 0; offset < uniqueIds.length; offset += BOUNDED_READ_BATCH_SIZE) {
+      const batch = uniqueIds.slice(offset, offset + BOUNDED_READ_BATCH_SIZE);
+      const placeholders = batch.map(() => "?").join(", ");
+      const rows = this.#database.prepare(`
+        SELECT * FROM memory_candidates WHERE id IN (${placeholders})
+      `).all(...batch) as CandidateRow[];
+      for (const row of rows) candidates.set(row.id, candidateFromRow(row));
+    }
+    return candidates;
   }
 
   requireCandidate(id: string): MemoryCandidate {
@@ -1283,6 +1598,7 @@ export class MemoryRepository {
     readonly scopePolicy: RetrievalPolicy;
     readonly contextBudget: number;
     readonly retrievalMetrics?: Record<string, unknown>;
+    readonly releaseDataClass?: ReleaseDataClass;
     readonly createdBy: string;
     readonly items: readonly RetrievedMemory[];
   }): ContextPack {
@@ -1318,13 +1634,20 @@ export class MemoryRepository {
     input.scopePolicy.allowedNodeTypes?.forEach(validateNodeType);
     input.scopePolicy.exactNodeIds?.forEach((nodeId) => assertIdentifier(nodeId, "context pack exact memory ID"));
     if (input.scopePolicy.allowedScopeClasses) {
-      const allowed = new Set(["confirmed_preferences", "verified_lessons", "engagement_memory"]);
+      const allowed = new Set<string>(SUPPORTED_MEMORY_SCOPE_CLASSES);
       if (input.scopePolicy.allowedScopeClasses.some((scopeClass) => !allowed.has(scopeClass))) {
         throw new TypeError("context pack contains an unsupported Autonomous memory scope class");
       }
     }
     if (input.contextBudget !== input.scopePolicy.contextBudget) {
       throw new TypeError("context pack budget must match its retrieval policy");
+    }
+    if (
+      input.releaseDataClass !== undefined &&
+      input.releaseDataClass !== "canonical" &&
+      input.releaseDataClass !== "startup_readiness"
+    ) {
+      throw new TypeError("context pack release data class is invalid");
     }
     for (const [value, label] of [
       [input.missionId, "context pack mission ID"],
@@ -1354,13 +1677,14 @@ export class MemoryRepository {
         INSERT INTO memory_context_packs (
           id, mission_id, run_id, step_id, action_id, message_id, journey, purpose,
           query_redacted, scope_policy_json, context_budget, retrieval_metrics_json,
-          created_by, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          release_data_class, created_by, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, input.missionId ?? null, input.runId ?? null, input.stepId ?? null,
         input.actionId ?? null, input.messageId ?? null, input.journey, input.purpose,
         input.queryRedacted ?? null, canonicalJson(input.scopePolicy), input.contextBudget,
-        canonicalJson(input.retrievalMetrics ?? {}), input.createdBy, now,
+        canonicalJson(input.retrievalMetrics ?? {}), input.releaseDataClass ?? "canonical",
+        input.createdBy, now,
       );
       const insert = this.#database.prepare(`
         INSERT INTO memory_context_items (
@@ -1390,14 +1714,32 @@ export class MemoryRepository {
       { field: "contextDisposition.influenceSummary", value: disposition.influenceSummary, maximumBytes: 2_000 },
       { field: "contextDisposition.ignoredReason", value: disposition.ignoredReason, maximumBytes: 2_000 },
     ]);
+    const autonomousRejection = disposition.used
+      ? autonomousInfluenceRejection(
+          this.#database,
+          packId,
+          disposition.nodeId,
+        )
+      : undefined;
+    const effectiveDisposition: ContextPackItemDisposition = autonomousRejection
+      ? {
+          nodeId: disposition.nodeId,
+          used: false,
+          relevanceReason: disposition.relevanceReason,
+          ignoredReason: autonomousRejection,
+          corrected: disposition.corrected,
+        }
+      : disposition;
     const result = this.#database.prepare(`
       UPDATE memory_context_items SET used = ?, relevance_reason = ?, influence_summary = ?,
         ignored_reason = ?, corrected = ? WHERE context_pack_id = ? AND node_id = ?
     `).run(
-      disposition.used ? 1 : 0, disposition.relevanceReason,
-      disposition.used ? disposition.influenceSummary : null,
-      disposition.used ? null : disposition.ignoredReason,
-      disposition.corrected ? 1 : 0, packId, disposition.nodeId,
+      effectiveDisposition.used ? 1 : 0, effectiveDisposition.relevanceReason,
+      effectiveDisposition.used ? effectiveDisposition.influenceSummary : null,
+      effectiveDisposition.used ? null : effectiveDisposition.ignoredReason,
+      effectiveDisposition.corrected ? 1 : 0,
+      packId,
+      effectiveDisposition.nodeId,
     );
     if (result.changes !== 1) throw new Error("Context pack item not found");
   }
@@ -1425,6 +1767,7 @@ export class MemoryRepository {
       scopePolicy: parseJson<RetrievalPolicy>(String(row.scope_policy_json), "context scope policy"),
       contextBudget: Number(row.context_budget),
       retrievalMetrics: parseJson<Record<string, unknown>>(String(row.retrieval_metrics_json), "retrieval metrics"),
+      releaseDataClass: String(row.release_data_class) as ReleaseDataClass,
       createdBy: String(row.created_by),
       createdAt: String(row.created_at),
       items: items.map((item) => ({

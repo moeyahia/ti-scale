@@ -42,7 +42,9 @@ Review these headers whenever provider connectivity, media sources, or deploymen
 - Vault writes are sandboxed and atomic.
 - Logs and events redact known secret-shaped fields.
 
-Application-level database encryption is not currently provided. Use encrypted storage and encrypted backups where the deployment threat model requires it.
+Application-level database encryption is not currently provided. Use encrypted
+canonical storage where the deployment threat model requires it. This
+installation retains no database backup, snapshot, or rollback copy.
 
 ## Evidence integrity
 
@@ -69,7 +71,21 @@ Do not send raw evidence, complete transcripts, credentials, HTTP bodies, packet
 
 Research candidates may modify only an approved strategy schema. They cannot modify authorization, tool allowlists, destructive-action policy, disclosure policy, evidence integrity, the evaluation harness, audit retention, deployment settings, or production code.
 
-The proposal source cannot judge or promote its own candidate. Local evaluation, integrity receipts, hidden holdout, human review, shadow, bounded canary, and rollback are separate gates.
+Research execution readiness is established by two short-lived, locally signed
+attestations: one for a disposable lab and one for an isolated worker. Each
+attestation comes from a target-free bubblewrap probe with an unshared network,
+a private disposable workspace, an empty credential environment, read-only
+system binaries, and `prlimit`-enforced CPU, address-space, process, file, and
+descriptor bounds. Bubblewrap, `prlimit`, Python, and the fixed evaluator source
+are hash-pinned by a trusted descriptor. A missing binary, changed hash, stale
+receipt, timeout, incomplete cleanup, or failed isolation check keeps Research
+blocked. Merely configuring paths or environment variables is never accepted
+as readiness.
+
+The proposal source cannot judge or promote its own candidate. Local
+evaluation, integrity receipts, hidden holdout, human review, shadow, and
+bounded canary are separate gates. A rejected strategy remains an immutable
+domain record; it is not a restorable deployment payload.
 
 ## Deployment checklist
 
@@ -78,7 +94,9 @@ The proposal source cannot judge or promote its own candidate. Local evaluation,
 - HTTPS reverse proxy for remote access
 - Private configuration file, mode `0600`
 - Encrypted storage where required
-- Tested database and artifact backups
+- Forward-only migration and recovery procedure, with zero retained backup
+  payloads
+- Content-free release audit/transaction journal
 - Restricted vault root
 - No secrets in browser build variables
 - No secrets in repository or test fixtures

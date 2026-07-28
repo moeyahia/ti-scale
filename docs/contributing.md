@@ -4,15 +4,18 @@ Ti-Scale values small, reviewable changes with explicit evidence.
 
 ## Development setup
 
+From the root of a Ti-Scale source checkout:
+
 ```bash
-git clone https://github.com/moeyahia/ti-scale.git
-cd ti-scale
 bun install --frozen-lockfile
 cp .env.example .env
 bun run check
 ```
 
 Use an isolated local database, artifact root, and vault root. Never use client data or an operator's active vault as a test fixture.
+Keep documentation, examples, fixtures, and generated metadata self-contained:
+use Ti-Scale terminology, repository-relative paths, and synthetic operational
+data.
 
 ## Change principles
 

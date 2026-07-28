@@ -22,6 +22,7 @@ import { ReconDigitalTwinSurface, RunMetricsSurface } from "../run-intelligence/
 import OperationalTruthPanel from "../intelligence/OperationalTruthPanel";
 import { PlanChangePanel } from "./PlanChangePanel";
 import { operatorText } from "../../lib/operatorLanguage";
+import { guidedRuntimeCapabilities } from "../../domain/guidedRuntimeCapabilities";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const ArtifactIntelligenceSurface = lazy(() => import("../run-intelligence/ArtifactIntelligenceSurface"));
@@ -126,13 +127,19 @@ function PlanPanel({ missionId, run }: { missionId: string; run?: RuntimeRun }) 
   const contexts = useQuery(`brain-contexts:plan:${run?.id ?? "none"}`, (signal) => run ? fetchContextPacks({ runId: run.id, journey: run.journey, limit: 100 }, signal) : Promise.resolve(undefined), { staleTime: 0 });
   if (!run) return <NoRunState />;
   if (plans.isLoading) return <LoadingPanel label="Loading versioned mission plan" />;
-  if (plans.error && !plans.data) return <ErrorPanel error={plans.error} onRetry={plans.refresh} />;
+  if (plans.error && !plans.data) return <ErrorPanel title="Plan history is unavailable" error={plans.error} onRetry={plans.refresh} />;
   const activePlan = plans.data?.items.find((plan) => plan.id === run.currentPlanId) ?? plans.data?.items[0];
-  if (!activePlan) return <><ReconDigitalTwinSurface missionId={missionId} runId={run.id} /><Card><EmptyState title="No plan available" description="The runtime has not persisted a versioned plan for this run." /></Card><Suspense fallback={<LoadingPanel label="Loading script and page-capture intelligence" />}><ArtifactIntelligenceSurface missionId={missionId} runId={run.id} /></Suspense></>;
+  if (!activePlan) return <><ReconDigitalTwinSurface missionId={missionId} runId={run.id} currentStepId={run.currentStepId} /><Card><EmptyState title="No plan available" description="The runtime has not persisted a versioned plan for this run." /></Card><Suspense fallback={<LoadingPanel label="Loading script and page-capture intelligence" />}><ArtifactIntelligenceSurface missionId={missionId} runId={run.id} /></Suspense></>;
   const planningContexts = contexts.data?.items.filter((item) => /\bplan\b/iu.test(item.purpose)) ?? [];
-  return <><ReconDigitalTwinSurface missionId={missionId} runId={run.id} />
+  return <><ReconDigitalTwinSurface missionId={missionId} runId={run.id} currentStepId={run.currentStepId} />
     <PlanView plan={activePlan} currentStepId={run.currentStepId} />
-    <PlanChangePanel run={run} plan={activePlan} onPlanApplied={plans.refresh} />
+    <PlanChangePanel
+      run={run}
+      plan={activePlan}
+      plans={plans.data?.items ?? [activePlan]}
+      planHistoryCurrent={Boolean(plans.data && !plans.error && !plans.isRefreshing)}
+      onPlanApplied={plans.reconcile}
+    />
     <Suspense fallback={<LoadingPanel label="Loading script and page-capture intelligence" />}>
       <ArtifactIntelligenceSurface missionId={missionId} runId={run.id} />
     </Suspense>
@@ -155,11 +162,12 @@ function GuidePanel({ missionId, run }: { missionId: string; run?: RuntimeRun })
   const plans = useQuery(`run-plans:${run?.id ?? "none"}`, (signal) => run ? runtimeV2Api.plans(run.id, signal) : Promise.resolve(undefined), { staleTime: 0 });
   const decisions = useQuery(`guided-decisions:mission-guide:${run?.id ?? "none"}`, (signal) => run ? runtimeV2Api.decisions({ runId: run.id, status: "pending", limit: 20 }, signal) : Promise.resolve(undefined), { staleTime: 0 });
   if (!run) return <NoRunState />;
+  const capabilities = guidedRuntimeCapabilities(readiness.data);
   const activePlan = plans.data?.items.find((plan) => plan.id === run.currentPlanId) ?? plans.data?.items[0];
   const step = activePlan?.steps.find((item) => item.id === run.currentStepId) ?? activePlan?.steps.find((item) => !TERMINAL.has(item.status));
-  return <><div className="os-mission-guide-grid">
+  return <>{capabilities.manualOnly && <p className="os-guided-inline-warning" role="status">Manual Guided runtime is active. Operator result review and exact reject, skip, or stop decisions are available. {capabilities.localCommanderGuidance ? "Local deterministic Commander explanations are available without provider, tool, target, or plan authority." : "Commander explanations are unavailable until their local capability is attested."} Provider semantic interpretation and agent tool execution remain unavailable.</p>}{capabilities.mode === "ready" && !capabilities.providerGuidance && <p className="os-guided-inline-warning" role="status">Reviewed local Guided execution is active. Exact tool dispatch follows its separate readiness receipt. {capabilities.localCommanderGuidance ? "Local deterministic Commander explanations are available without contacting a provider or granting execution authority." : "Local Commander guidance is not currently attested."} Provider-backed semantic interpretation remains unavailable.</p>}<div className="os-mission-guide-grid">
     <section>{plans.isLoading && <LoadingPanel label="Loading represented Guided step" />}{plans.error && !plans.data && <ErrorPanel error={plans.error} onRetry={plans.refresh} />}{step ? <Card className="os-guided-step"><p className="os-eyebrow">Explain → recommend → choose</p><h2>{operatorText(step.title, { kind: "plan", agent: step.assignedAgentId, target: step.action.target })}</h2><p>{operatorText(step.explanation || step.objective, { kind: "plan", agent: step.assignedAgentId, target: step.action.target })}</p><div className="os-guided-columns"><div><h3>Why this matters</h3><p>{operatorText(step.rationale, { kind: "plan", agent: step.assignedAgentId, target: step.action.target }, "No rationale was returned by the versioned plan.")}</p></div><div><h3>Expected evidence</h3>{step.successCriteria.length ? <ul>{step.successCriteria.map((criterion) => <li key={criterion}>{operatorText(criterion, { kind: "plan" })}</li>)}</ul> : <p>Not specified</p>}</div><div><h3>Risk and reversal</h3><p><StatusPill status={step.riskClass || "unclassified"} /> {operatorText(step.reversibility, { kind: "plan" }, "Not reported")}</p></div></div><JsonDetails label="Exact proposed procedure and original wording" value={{ action: step.action, narrative: { title: step.title, objective: step.objective, explanation: step.explanation, rationale: step.rationale, reversibility: step.reversibility } }} /></Card> : !plans.isLoading && <Card><EmptyState title="No represented Guided step" description="The runtime has not persisted a current deliberate step." /></Card>}</section>
-    <aside><p className="os-eyebrow">Exact-step boundary</p><h2>Guided decision</h2><p>Only the fingerprint-bound decision below may execute or record this represented action.</p>{decisions.isLoading && <LoadingPanel label="Loading exact Guided decision" />}{decisions.error && !decisions.data && <ErrorPanel error={decisions.error} onRetry={decisions.refresh} />}{decisions.data?.items.map((decision) => <DecisionCard key={decision.id} decision={decision} runtimeAvailable={readiness.data?.execution.guided === "ready"} availabilityPending={readiness.isLoading} onChanged={() => decisions.refresh()} />)}{decisions.data?.items.length === 0 && <Card><EmptyState title="No decision is waiting" description="This Guided checkpoint has no pending consequential action." /></Card>}<ButtonLink href={`/guided/${encodeURIComponent(missionId)}`} variant="secondary">Open focused Guided Workspace</ButtonLink></aside>
+    <aside><p className="os-eyebrow">Exact-step boundary</p><h2>Guided decision</h2><p>Only the fingerprint-bound decision below may execute or record this represented action.</p>{decisions.isLoading && <LoadingPanel label="Loading exact Guided decision" />}{decisions.error && !decisions.data && <ErrorPanel error={decisions.error} onRetry={decisions.refresh} />}{decisions.data?.items.map((decision) => <DecisionCard key={decision.id} decision={decision} runtimeAvailable={capabilities.decisionMutations} toolExecutionAvailable={capabilities.toolDispatch} availabilityPending={readiness.isLoading} onChanged={() => decisions.refresh()} />)}{decisions.data?.items.length === 0 && <Card><EmptyState title="No decision is waiting" description="This Guided checkpoint has no pending consequential action." /></Card>}<ButtonLink href={`/guided/${encodeURIComponent(missionId)}`} variant="secondary">Open focused Guided Workspace</ButtonLink></aside>
   </div><ActionActivity runId={run.id} title="Guided action record" /></>;
 }
 
@@ -182,7 +190,7 @@ function FindingsPanel({ missionId }: { missionId: string }) {
 function ConversationPanel({ missionId, run }: { missionId: string; run?: RuntimeRun }) {
   const readiness = useQuery("runtime-readiness", fetchRuntimeReadiness, { staleTime: 5_000 });
   if (!run) return <NoRunState />;
-  if (run.journey === "guided") return <GuidedCommanderPanel missionId={missionId} runId={run.id} executionAvailable={readiness.data?.execution.guided === "ready"} availabilityPending={readiness.isLoading} />;
+  if (run.journey === "guided") return <GuidedCommanderPanel missionId={missionId} runId={run.id} capabilities={guidedRuntimeCapabilities(readiness.data)} availabilityPending={readiness.isLoading} />;
   return <AutonomousObserverHistory missionId={missionId} />;
 }
 

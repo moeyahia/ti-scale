@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { PRIMARY_NAVIGATION, USER_MANUAL_NAVIGATION } from "../../src/app/router/routes";
 import { validateInteractionManifest } from "../interaction-manifest/schema";
 import { BrowserAudit } from "./support/browserAudit";
 import {
@@ -10,10 +11,13 @@ import {
 import { canonicalFixtureNamespace } from "./support/fixtureNamespace";
 import { expect, test, type Locator, type Page, type Request, type Response } from "./support/playwright";
 import { readRunInterventionRecoverySnapshot } from "./support/runInterventionRecoveryFixture";
+import { readTitaniumOptions, selectTitaniumOption } from "./support/titaniumSelect";
 
 const TEST_SEARCH = "e2e.command-palette.search-record-families";
+const TEST_NAVIGATION = "e2e.command-palette.navigation-destinations";
 const TEST_RUN_CONTROL = "e2e.command-palette.run-control";
 const TEST_MEMORY = "e2e.command-palette.memory-candidate";
+const TEST_EDITOR_REJECTIONS = "e2e.command-palette.editor-rejections";
 const TEST_DEGRADED = "e2e.command-palette.partial-data";
 const MANIFEST_IDS = [
   "command-palette.search",
@@ -382,6 +386,33 @@ test(`${TEST_SEARCH} searches real permitted records and activates every result 
   await audit.assertClean(testInfo);
 });
 
+test(`${TEST_NAVIGATION} activates every local navigation destination`, async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
+  const destinations = [...PRIMARY_NAVIGATION, USER_MANUAL_NAVIGATION];
+  expect(manifestEntry("command-palette.navigation-results").options)
+    .toEqual(destinations.map((item) => item.label));
+
+  for (const [index, destination] of destinations.entries()) {
+    await test.step(destination.label, async () => {
+      await chooseResult({
+        page,
+        audit,
+        query: destination.label,
+        name: new RegExp(
+          `^${escapeRegex(destination.label)}.*Navigate to ${escapeRegex(destination.label)}$`,
+          "u",
+        ),
+        expectedPath: destination.path,
+        keyboard: index % 2 === 1,
+      });
+      await expect(page.getByRole("dialog", { name: "Command palette", exact: true })).toHaveCount(0);
+    });
+  }
+
+  await audit.assertClean(testInfo);
+});
+
 test(`${TEST_RUN_CONTROL} pauses, exactly resumes, and cancels disposable runs through reviewed editors`, async ({ page }, testInfo) => {
   const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
   const idempotencyKeys: string[] = [];
@@ -566,6 +597,216 @@ test(`${TEST_RUN_CONTROL} pauses, exactly resumes, and cancels disposable runs t
   await audit.assertClean(testInfo);
 });
 
+test(`${TEST_EDITOR_REJECTIONS} blocks resume when the represented checkpoint still has in-flight work`, async ({ page }, testInfo) => {
+  const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
+  const runPath = `/api/v2/runs/${fixture.invalidResume.runId}`;
+  let resumeMutationCount = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && pathname(request) === `${runPath}/resume`) {
+      resumeMutationCount += 1;
+    }
+  });
+  await page.route((url) => url.pathname === runPath, async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const payload = await response.json() as {
+      latestCheckpoint?: {
+        state?: {
+          inFlightActions?: unknown[];
+        };
+      } | null;
+    };
+    if (!payload.latestCheckpoint?.state) {
+      throw new Error("The invalid-resume fixture did not return its canonical checkpoint");
+    }
+    payload.latestCheckpoint.state.inFlightActions = [{
+      id: "action-still-in-flight",
+      status: "running",
+      idempotent: true,
+      destructive: false,
+    }];
+    await route.fulfill({ response, json: payload });
+  });
+
+  await page.goto(`/live/${fixture.invalidResume.runId}`, { waitUntil: "domcontentloaded" });
+  const dialog = await openPalette(page);
+  const search = dialog.getByRole("combobox", {
+    name: "Search commands, missions, runs, decisions, agents, and Second Brain",
+    exact: true,
+  });
+  await search.fill("Resume current run");
+  await waitForPaletteSearch(dialog);
+  const resume = dialog.getByRole("option", { name: /^Resume current run/u });
+  await expect(resume).toBeVisible();
+  await resume.click();
+  const reason = dialog.getByRole("textbox", { name: "Audited reason", exact: true });
+  await reason.fill("Do not resume while the durable checkpoint still records active work.");
+  await expect(dialog.getByRole("alert")).toHaveText(
+    "The exact verified zero-in-flight checkpoint is unavailable. Refresh the run before resuming.",
+  );
+  await expect(dialog.getByRole("button", { name: "Confirm resume", exact: true })).toBeDisabled();
+  await expect(reason).toHaveValue("Do not resume while the durable checkpoint still records active work.");
+  expect(resumeMutationCount).toBe(0);
+  expect(readRunInterventionRecoverySnapshot(fixture.invalidResume)).toMatchObject({
+    run: { status: "blocked", version: 1 },
+    runtimeIdempotencyCount: 0,
+  });
+  await dialog.getByRole("button", { name: "Back to command results", exact: true }).click();
+  await expect(search).toBeFocused();
+  await audit.waitForPageApiSettlement(page);
+  await audit.assertClean(testInfo);
+});
+
+test(`${TEST_EDITOR_REJECTIONS} retains the reviewed run editor after a structured mutation rejection`, async ({ page }, testInfo) => {
+  const pausePath = `/api/v2/runs/${fixture.pauseResume.runId}/pause`;
+  const audit = new BrowserAudit(page, {
+    allowEventStreamNavigationAbort: true,
+    expectedHttpResponses: [{
+      id: "command-palette.pause-version-conflict",
+      transport: "browser",
+      method: "POST",
+      pathname: pausePath,
+      query: {},
+      status: 409,
+      occurrences: 1,
+      reason: "Prove a rejected run mutation retains the reviewed editor and exact operator-authored reason.",
+    }],
+  });
+  await page.route((url) => url.pathname === pausePath, (route) => route.fulfill({
+    status: 409,
+    contentType: "application/json",
+    body: JSON.stringify({
+      error: {
+        code: "run_version_conflict",
+        message: "The supplied run boundary is stale.",
+        humanMessage: "The reviewed command no longer matches the current run.",
+        retryable: false,
+        category: "conflict",
+        remediation: "Refresh the run and review the exact boundary before trying again.",
+        traceId: "trace-palette-run-rejection",
+        timestamp: new Date().toISOString(),
+      },
+    }),
+  }));
+
+  await page.goto(`/live/${fixture.pauseResume.runId}`, { waitUntil: "domcontentloaded" });
+  const dialog = await openPalette(page);
+  const search = dialog.getByRole("combobox", {
+    name: "Search commands, missions, runs, decisions, agents, and Second Brain",
+    exact: true,
+  });
+  await search.fill("Pause current run");
+  await waitForPaletteSearch(dialog);
+  await dialog.getByRole("option", { name: /^Pause current run/u }).click();
+  const reason = dialog.getByRole("textbox", { name: "Audited reason", exact: true });
+  const reviewedReason = "Pause only the exact run boundary currently represented.";
+  await reason.fill(reviewedReason);
+  const rejected = await mutationResponse(page, pausePath, () =>
+    dialog.getByRole("button", { name: "Confirm pause", exact: true }).click());
+  expect(rejected.status()).toBe(409);
+  const alert = dialog.getByRole("alert");
+  await expect(alert).toContainText("The reviewed command no longer matches the current run.");
+  await expect(alert).toContainText("Next: Refresh the run and review the exact boundary before trying again.");
+  await expect(alert).toContainText("Trace trace-palette-run-rejection");
+  await expect(reason).toHaveValue(reviewedReason);
+  await expect(dialog.getByRole("button", { name: "Confirm pause", exact: true })).toBeEnabled();
+  expect(readRunInterventionRecoverySnapshot(fixture.pauseResume)).toMatchObject({
+    run: { status: "waiting_guided_decision", version: 1 },
+    runtimeIdempotencyCount: 0,
+  });
+  await dialog.getByRole("button", { name: "Back to command results", exact: true }).click();
+  await expect(search).toBeFocused();
+  await audit.waitForPageApiSettlement(page);
+  await audit.assertClean(testInfo);
+});
+
+test(`${TEST_EDITOR_REJECTIONS} retains the typed memory draft after a policy rejection`, async ({ page }, testInfo) => {
+  const rememberPath = `/api/v2/guided/${fixture.memoryCandidate.missionId}/commander/remember`;
+  const audit = new BrowserAudit(page, {
+    allowEventStreamNavigationAbort: true,
+    expectedHttpResponses: [{
+      id: "command-palette.memory-policy-rejection",
+      transport: "browser",
+      method: "POST",
+      pathname: rememberPath,
+      query: {},
+      status: 422,
+      occurrences: 1,
+      reason: "Prove a policy rejection retains the typed candidate editor without creating reusable memory.",
+    }],
+  });
+  await page.route((url) => url.pathname === rememberPath, (route) => route.fulfill({
+    status: 422,
+    contentType: "application/json",
+    body: JSON.stringify({
+      error: {
+        code: "sensitive_material_not_retained",
+        message: "Reusable memory content failed the local safety classifier.",
+        humanMessage: "This candidate cannot enter reusable memory because it contains protected authentication material.",
+        retryable: false,
+        category: "policy_denied",
+        remediation: "Remove the sensitive value and reference protected evidence by its opaque ID.",
+        traceId: "trace-palette-memory-rejection",
+        timestamp: new Date().toISOString(),
+      },
+    }),
+  }));
+
+  await page.goto(`/guided/${fixture.memoryCandidate.missionId}`, { waitUntil: "domcontentloaded" });
+  const dialog = await openPalette(page);
+  const search = dialog.getByRole("combobox", {
+    name: "Search commands, missions, runs, decisions, agents, and Second Brain",
+    exact: true,
+  });
+  await search.fill("Create memory candidate");
+  await waitForPaletteSearch(dialog);
+  const command = dialog.getByRole("option", {
+    name: /^Create memory candidate from latest Guided insight/u,
+  });
+  await expect(command).toBeVisible();
+  await command.click();
+
+  const type = dialog.getByRole("combobox", { name: "Type", exact: true });
+  const scope = dialog.getByRole("combobox", { name: "Scope", exact: true });
+  const sensitivity = dialog.getByRole("combobox", { name: "Sensitivity", exact: true });
+  await selectTitaniumOption(type, "preference", "pointer");
+  await selectTitaniumOption(scope, "global", "keyboard");
+  await selectTitaniumOption(sensitivity, "restricted", "pointer");
+  const rejectedTitle = `${fixture.candidateTitle} rejected`;
+  const rejectedSummary = "Keep the reviewed draft visible so the operator can remove protected content deliberately.";
+  await dialog.getByRole("textbox", { name: "Title", exact: true }).fill(rejectedTitle);
+  await dialog.getByRole("textbox", { name: "Summary", exact: true }).fill(rejectedSummary);
+
+  const rejected = await mutationResponse(page, rememberPath, () =>
+    dialog.getByRole("button", { name: "Create candidate", exact: true }).click());
+  expect(rejected.status()).toBe(422);
+  const alert = dialog.getByRole("alert");
+  await expect(alert).toContainText(
+    "This candidate cannot enter reusable memory because it contains protected authentication material.",
+  );
+  await expect(alert).toContainText(
+    "Next: Remove the sensitive value and reference protected evidence by its opaque ID.",
+  );
+  await expect(alert).toContainText("Trace trace-palette-memory-rejection");
+  await expect(dialog.getByRole("textbox", { name: "Title", exact: true })).toHaveValue(rejectedTitle);
+  await expect(dialog.getByRole("textbox", { name: "Summary", exact: true })).toHaveValue(rejectedSummary);
+  expect((await readTitaniumOptions(type)).find((option) => option.selected)?.value).toBe("preference");
+  expect((await readTitaniumOptions(scope)).find((option) => option.selected)?.value).toBe("global");
+  expect((await readTitaniumOptions(sensitivity)).find((option) => option.selected)?.value).toBe("restricted");
+  const snapshot = readCommandPaletteCandidateSnapshot(fixture);
+  expect(snapshot.candidates).toEqual([]);
+  expect(snapshot.confirmedNodeCount).toBe(0);
+  expect(snapshot.audits).toEqual([]);
+  expect(snapshot.events).toEqual([]);
+  await dialog.getByRole("button", { name: "Back to command results", exact: true }).click();
+  await expect(search).toBeFocused();
+  await audit.waitForPageApiSettlement(page);
+  await audit.assertClean(testInfo);
+});
+
 test(`${TEST_MEMORY} creates only a reviewable Guided memory candidate with audited provenance`, async ({ page }, testInfo) => {
   const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
   manifestEntry("command-palette.editor-back");
@@ -603,23 +844,26 @@ test(`${TEST_MEMORY} creates only a reviewable Guided memory candidate with audi
   const type = dialog.getByRole("combobox", { name: "Type", exact: true });
   const scope = dialog.getByRole("combobox", { name: "Scope", exact: true });
   const sensitivity = dialog.getByRole("combobox", { name: "Sensitivity", exact: true });
-  await type.selectOption("preference");
-  await scope.selectOption("global");
-  await type.selectOption("source");
-  await expect(scope).toHaveValue("mission");
-  await expect(scope.locator('option[value="global"]')).toHaveCount(0);
-  for (const value of ["procedure", "tool", "tactic", "technique"] as const) {
-    await type.selectOption(value);
-    await expect(type).toHaveValue(value);
+  await test.step("the portaled application selector accepts pointer input above the palette", async () => {
+    expect(await selectTitaniumOption(type, "preference", "pointer")).toBe("preference");
+    await expect(type).toHaveAttribute("aria-expanded", "false");
+    await expect(type).toContainText("Preference");
+    await expect(type).toBeFocused();
+    await expect(page.getByRole("listbox", { name: "Type options", exact: true })).toHaveCount(0);
+  });
+  await selectTitaniumOption(scope, "global", "keyboard");
+  await selectTitaniumOption(type, "source", "keyboard");
+  expect((await readTitaniumOptions(scope)).find((option) => option.selected)?.value).toBe("mission");
+  expect((await readTitaniumOptions(scope)).map((option) => option.value)).not.toContain("global");
+  for (const [index, value] of ["procedure", "tool", "tactic", "technique"].entries()) {
+    await selectTitaniumOption(type, value, index % 2 === 0 ? "pointer" : "keyboard");
   }
-  await type.selectOption("preference");
-  for (const value of ["mission", "engagement", "global"] as const) {
-    await scope.selectOption(value);
-    await expect(scope).toHaveValue(value);
+  await selectTitaniumOption(type, "preference", "keyboard");
+  for (const [index, value] of ["mission", "engagement", "global"].entries()) {
+    await selectTitaniumOption(scope, value, index % 2 === 0 ? "pointer" : "keyboard");
   }
-  for (const value of ["private", "restricted", "internal"] as const) {
-    await sensitivity.selectOption(value);
-    await expect(sensitivity).toHaveValue(value);
+  for (const [index, value] of ["private", "restricted", "internal"].entries()) {
+    await selectTitaniumOption(sensitivity, value, index % 2 === 0 ? "keyboard" : "pointer");
   }
   await dialog.getByRole("textbox", { name: "Title", exact: true })
     .fill(fixture.candidateTitle);

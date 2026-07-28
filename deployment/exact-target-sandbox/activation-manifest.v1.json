@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "ti-scale.exact-target-sandbox-activation.v1",
+  "bundleVersion": "2026.07.23-v1",
+  "broker": {
+    "executablePath": "/usr/local/libexec/ti-scale-exact-target-broker",
+    "executableSha256": "57c83e531b740a376646386c7633bf62c318f75ad7c0d0a2f0e5b435956d62dd",
+    "socketPath": "/run/ti-scale-exact-target-sandbox/broker.sock",
+    "socketGid": 979,
+    "protocolVersion": "ti-scale.exact-target-broker.v1"
+  },
+  "bubblewrap": {
+    "executablePath": "/usr/bin/bwrap",
+    "executableSha256": "042763bc80c8a895a497e6f801af003d585ea5588a580f7a4349d9ab2aa22980"
+  },
+  "interpreter": {
+    "bindingId": "python3-reviewed-v1",
+    "language": "python",
+    "executablePath": "/usr/bin/python3.13",
+    "executableSha256": "ecf651f545bcef039d29503acf695a38903b7e8e9867a1ce0994ff6924e0274b"
+  },
+  "storage": {
+    "stagingRoot": "/var/lib/ti-scale/exploit-sandbox/staging",
+    "jobsRoot": "/var/lib/ti-scale/exploit-sandbox/jobs"
+  },
+  "boundary": {
+    "exactIpTargets": true,
+    "targetPortConfinement": false,
+    "maximumTargets": 8,
+    "maximumSourceBytes": 1048576,
+    "maximumTimeoutMs": 300000,
+    "maximumOutputBytes": 8388608,
+    "publicProvider": false,
+    "credentialTransport": false
+  }
+}

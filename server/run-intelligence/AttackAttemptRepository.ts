@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import type { SqliteDatabase } from "../db";
 import { verifiedEvidenceSql } from "../domain/evidence-semantics";
 import { canonicalJson, parseJsonArray, parseJsonObject } from "./serialization";
 import {
   RunIntelligenceError,
   type AttackAttempt,
+  type AttackAttemptActionBinding,
   type AttackAttemptEvidenceLink,
   type AttackAttemptEvidenceRelationship,
   type AttackAttemptStatus,
@@ -19,6 +21,7 @@ interface AttackAttemptRow {
   readonly step_id: string | null;
   readonly target_asset_id: string | null;
   readonly target_service_id: string | null;
+  readonly recovery_source_attack_attempt_id: string | null;
   readonly objective: string;
   readonly technique_id: string | null;
   readonly technique_name: string;
@@ -44,6 +47,15 @@ interface EvidenceLinkRow {
   readonly verification_state: AttackAttemptEvidenceLink["verificationState"];
   readonly confidence: number;
   readonly content_hash: string;
+  readonly created_at: string;
+}
+
+interface ActionBindingRow {
+  readonly action_type: string;
+  readonly action_class: string;
+  readonly normalized_arguments_json: string;
+  readonly scoped_target: string;
+  readonly binding_hash: string;
   readonly created_at: string;
 }
 
@@ -79,6 +91,17 @@ function mapEvidence(row: EvidenceLinkRow): AttackAttemptEvidenceLink {
   };
 }
 
+function mapActionBinding(row: ActionBindingRow): AttackAttemptActionBinding {
+  return {
+    actionType: row.action_type,
+    actionClass: row.action_class,
+    normalizedArguments: parseJsonObject(row.normalized_arguments_json, "Attack-attempt action arguments"),
+    scopedTarget: row.scoped_target,
+    bindingHash: row.binding_hash,
+    createdAt: row.created_at,
+  };
+}
+
 export class AttackAttemptRepository {
   constructor(private readonly database: SqliteDatabase) {}
 
@@ -93,6 +116,9 @@ export class AttackAttemptRepository {
       WHERE aae.attack_attempt_id = ?
       ORDER BY aae.created_at, aae.evidence_id, aae.relationship
     `).all(id) as EvidenceLinkRow[];
+    const actionBinding = this.database.prepare(`
+      SELECT * FROM attack_attempt_action_bindings WHERE attack_attempt_id = ?
+    `).get(id) as ActionBindingRow | undefined;
     return {
       id: row.id,
       missionId: row.mission_id,
@@ -101,6 +127,8 @@ export class AttackAttemptRepository {
       stepId: row.step_id,
       targetAssetId: row.target_asset_id,
       targetServiceId: row.target_service_id,
+      recoverySourceAttackAttemptId: row.recovery_source_attack_attempt_id,
+      representedActionBinding: actionBinding ? mapActionBinding(actionBinding) : null,
       objective: row.objective,
       techniqueId: row.technique_id,
       techniqueName: row.technique_name,
@@ -162,6 +190,44 @@ export class AttackAttemptRepository {
         throw new RunIntelligenceError(`target_${kind}_mismatch`, `Attack attempt target ${kind} is outside the run mission`);
       }
     }
+    if (input.recoverySourceAttackAttemptId) {
+      if (!input.reviewedKnowledgeBinding || !input.representedActionBinding) {
+        throw new RunIntelligenceError(
+          "recovery_attack_knowledge_required",
+          "A recovery attempt requires exact reviewed procedure and represented-action bindings at creation",
+        );
+      }
+      const source = this.database.prepare(`
+        SELECT mission_id, run_id, target_asset_id, target_service_id, status
+        FROM attack_attempts WHERE id = ?
+      `).get(input.recoverySourceAttackAttemptId) as {
+        readonly mission_id: string;
+        readonly run_id: string;
+        readonly target_asset_id: string | null;
+        readonly target_service_id: string | null;
+        readonly status: AttackAttemptStatus;
+      } | undefined;
+      if (!source) {
+        throw new RunIntelligenceError("recovery_source_not_found", "Recovery source attack attempt was not found");
+      }
+      if (
+        source.mission_id !== input.missionId
+        || source.run_id !== input.runId
+        || source.target_asset_id !== (input.targetAssetId ?? null)
+        || source.target_service_id !== (input.targetServiceId ?? null)
+      ) {
+        throw new RunIntelligenceError(
+          "recovery_source_scope_mismatch",
+          "Recovery source must use the same mission, run, target asset, and target service",
+        );
+      }
+      if (source.status !== "waiting_conditions" && source.status !== "blocked") {
+        throw new RunIntelligenceError(
+          "recovery_source_not_blocked",
+          "Recovery source must remain in its preserved blocked or waiting-conditions state",
+        );
+      }
+    }
     if (input.assignedAgentId) {
       const agent = this.database.prepare("SELECT id FROM agents WHERE id = ?").get(input.assignedAgentId);
       if (!agent) throw new RunIntelligenceError("agent_not_found", `Assigned agent not found: ${input.assignedAgentId}`);
@@ -187,10 +253,11 @@ export class AttackAttemptRepository {
     this.database.prepare(`
       INSERT INTO attack_attempts (
         id, mission_id, run_id, plan_id, step_id, target_asset_id,
-        target_service_id, objective, technique_id, technique_name,
+        target_service_id, recovery_source_attack_attempt_id,
+        objective, technique_id, technique_name,
         action_class, prerequisites_json, normalized_parameters_json,
         status, assigned_agent_id, model_assignment_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)
     `).run(
       input.id,
       input.missionId,
@@ -199,6 +266,7 @@ export class AttackAttemptRepository {
       input.stepId ?? null,
       input.targetAssetId ?? null,
       input.targetServiceId ?? null,
+      input.recoverySourceAttackAttemptId ?? null,
       input.objective,
       input.techniqueId ?? null,
       input.techniqueName,
@@ -210,6 +278,33 @@ export class AttackAttemptRepository {
       input.now,
       input.now,
     );
+    if (input.representedActionBinding) {
+      const binding = input.representedActionBinding;
+      const normalizedArgumentsJson = canonicalJson(binding.normalizedArguments);
+      const bindingHash = createHash("sha256").update(canonicalJson({
+        missionId: input.missionId,
+        runId: input.runId,
+        stepId: input.stepId ?? null,
+        actionType: binding.actionType,
+        actionClass: binding.actionClass,
+        normalizedArguments: binding.normalizedArguments,
+        scopedTarget: binding.scopedTarget,
+      })).digest("hex");
+      this.database.prepare(`
+        INSERT INTO attack_attempt_action_bindings (
+          attack_attempt_id, action_type, action_class,
+          normalized_arguments_json, scoped_target, binding_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.id,
+        binding.actionType,
+        binding.actionClass,
+        normalizedArgumentsJson,
+        binding.scopedTarget,
+        bindingHash,
+        input.now,
+      );
+    }
     return this.get(input.id);
   }
 

@@ -2,7 +2,18 @@ import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import type { SqliteDatabase } from "../db";
 import { inImmediateTransaction } from "../db";
 import { EventRepository } from "../events";
-import { getMemoryControlPolicy, MemoryRepository, type MemoryNode } from "../memory";
+import { AuditTrailWriter } from "../intelligence-v24/AuditTrailWriter";
+import {
+  ATTACK_CENTRIC_REUSABLE_NODE_TYPES,
+  getMemoryControlPolicy,
+  isAttackCentricReusableNodeType,
+  MemoryRepository,
+  type MemoryNode,
+} from "../memory";
+import {
+  resolveAutonomousPlanningSelection,
+  type AutonomousPlanningSelection,
+} from "../model-config";
 import { autonomousContractHash, canonicalJson, hashCanonical, sha256 } from "./canonical";
 import { IdempotencyConflictError } from "./errors";
 import type {
@@ -105,6 +116,29 @@ export interface CreateMissionOptions {
     readonly journey: Journey;
     readonly memoryPolicy: Readonly<Record<string, unknown>>;
   }) => MissionIntakeContextBinding;
+  /**
+   * Runs after the canonical run exists but inside the same outer IMMEDIATE
+   * transaction. A graph failure therefore rolls back the complete launch
+   * instead of surfacing an ambiguous error after mission commit.
+   */
+  readonly materializeCanonicalGraph?: (input: {
+    readonly missionId: string;
+    readonly runId: string;
+  }) => readonly string[];
+  /**
+   * Resolves and immutably pins every launch-time specialist configuration
+   * after the run exists, but before any planning event is committed.
+   * Throwing rolls the complete mission launch back.
+   */
+  readonly pinModelAssignments?: (input: {
+    readonly missionId: string;
+    readonly runId: string;
+    readonly journey: Journey;
+    readonly specialistAgentIds: readonly string[];
+    readonly planningSelection: AutonomousPlanningSelection;
+    readonly agentModelAssignments: AutonomousMissionRequest["contract"]["agentModelAssignments"];
+    readonly allowedActionClasses: readonly string[];
+  }) => readonly string[];
 }
 
 function json(value: unknown): string {
@@ -238,15 +272,20 @@ function mapSummary(row: MissionSummaryRow): MissionSummary {
 function autonomousContextEligible(
   node: MemoryNode,
   request: AutonomousMissionRequest,
+  nowMs: number,
   requirePermittedScope = true,
 ): boolean {
-  const expectedStatus = node.nodeType === "preference" ? "confirmed" : "verified";
-  if ((node.nodeType !== "preference" && node.nodeType !== "lesson") || node.lifecycleStatus !== expectedStatus) {
+  const attackKnowledge = isAttackCentricReusableNodeType(node.nodeType);
+  if (node.nodeType === "preference") {
+    if (node.lifecycleStatus !== "confirmed") return false;
+  } else if (node.nodeType === "lesson") {
+    if (node.lifecycleStatus !== "verified") return false;
+  } else if (!attackKnowledge || !["confirmed", "verified"].includes(node.lifecycleStatus)) {
     return false;
   }
   if (node.nodeType === "preference" && node.confirmationState !== "confirmed") return false;
   if (node.sensitivity === "restricted") return false;
-  if (node.expiresAt && Date.parse(node.expiresAt) <= Date.now()) return false;
+  if (node.expiresAt && Date.parse(node.expiresAt) <= nowMs) return false;
   if (node.retentionPolicy.allowAutonomous === false) return false;
   if (node.retentionPolicy.journeys && !node.retentionPolicy.journeys.includes("autonomous")) return false;
   if (node.scope.kind === "mission") return false;
@@ -257,15 +296,30 @@ function autonomousContextEligible(
     const scopes = new Set(request.contract.memoryScopes);
     if (node.nodeType === "preference" && !scopes.has("confirmed_preferences")) return false;
     if (node.nodeType === "lesson" && !scopes.has("verified_lessons")) return false;
+    if (
+      attackKnowledge && node.lifecycleStatus === "confirmed"
+      && !scopes.has("confirmed_attack_knowledge")
+    ) return false;
+    if (
+      attackKnowledge && node.lifecycleStatus === "verified"
+      && !scopes.has("verified_attack_knowledge")
+      && !scopes.has("confirmed_attack_knowledge")
+    ) return false;
     if (node.scope.kind === "engagement" && !scopes.has("engagement_memory")) return false;
   }
   return true;
 }
 
 function contextCandidate(node: MemoryNode): AutonomousContextCandidate {
+  if (
+    node.nodeType !== "preference" && node.nodeType !== "lesson"
+    && !isAttackCentricReusableNodeType(node.nodeType)
+  ) {
+    throw new TypeError("Autonomous context candidate is not reusable memory");
+  }
   return {
     id: node.id,
-    nodeType: node.nodeType as "preference" | "lesson",
+    nodeType: node.nodeType,
     title: node.title,
     summary: node.summary,
     lifecycleStatus: node.lifecycleStatus as "confirmed" | "verified",
@@ -439,7 +493,10 @@ export class MissionRepository {
   private readonly events: EventRepository;
   private portfolioCursorSecret?: string;
 
-  constructor(private readonly database: SqliteDatabase) {
+  constructor(
+    private readonly database: SqliteDatabase,
+    private readonly clock: () => Date = () => new Date(),
+  ) {
     this.events = new EventRepository(database);
   }
 
@@ -468,7 +525,7 @@ export class MissionRepository {
         throw new Error("Mission portfolio cursor secret is corrupt");
       }
       const secret = randomBytes(32).toString("hex");
-      const now = new Date().toISOString();
+      const now = this.clock().toISOString();
       this.database.prepare(`
         INSERT INTO settings (key, value_json, sensitivity, version, updated_by, updated_at)
         VALUES (?, ?, 'restricted', 1, 'system:mission-portfolio', ?)
@@ -487,6 +544,7 @@ export class MissionRepository {
     readonly selectedNodeIds: readonly string[];
     readonly invalidSelectedNodeIds: readonly string[];
   } {
+    const now = this.clock();
     const control = getMemoryControlPolicy(this.database);
     if (!control.enabled || !control.autonomousUse) {
       return {
@@ -499,7 +557,12 @@ export class MissionRepository {
     const eligible = (node: MemoryNode | undefined, requirePermittedScope = true): node is MemoryNode => Boolean(
       node
       && (control.operationalMemoryEnabled || node.nodeType === "preference")
-      && autonomousContextEligible(node, request, requirePermittedScope),
+      && autonomousContextEligible(
+        node,
+        request,
+        now.getTime(),
+        requirePermittedScope,
+      ),
     );
     const invalidSelectedNodeIds = request.contract.contextNodeIds.filter((nodeId) => {
       const node = memory.getNode(nodeId);
@@ -508,15 +571,25 @@ export class MissionRepository {
     const selectedNodeIds = request.contract.contextNodeIds.filter(
       (nodeId) => !invalidSelectedNodeIds.includes(nodeId),
     );
+    const reusableNodeTypes = [
+      "preference",
+      "lesson",
+      ...ATTACK_CENTRIC_REUSABLE_NODE_TYPES,
+    ] as const;
+    const reusableTypePlaceholders = reusableNodeTypes.map(() => "?").join(", ");
     const rows = this.database.prepare(`
       SELECT id FROM memory_nodes
-      WHERE node_type IN ('preference', 'lesson')
+      WHERE node_type IN (${reusableTypePlaceholders})
         AND lifecycle_status IN ('confirmed', 'verified')
         AND sensitivity IN ('public', 'internal', 'private')
         AND (expires_at IS NULL OR expires_at > ?)
         AND (scope = 'global' OR (scope = 'engagement' AND engagement_id = ?))
       ORDER BY pinned DESC, updated_at DESC, id DESC LIMIT 200
-    `).all(new Date().toISOString(), request.authorization.engagementId ?? "") as Array<{ id: string }>;
+    `).all(
+      ...reusableNodeTypes,
+      now.toISOString(),
+      request.authorization.engagementId ?? "",
+    ) as Array<{ id: string }>;
     const listed = rows.flatMap(({ id: nodeId }) => {
       const node = memory.getNode(nodeId);
       return eligible(node, false) ? [contextCandidate(node)] : [];
@@ -540,7 +613,7 @@ export class MissionRepository {
    * selection and never substitutes for the enforcing runtime checks.
    */
   autonomousExecutionPreview(request: AutonomousMissionRequest): AutonomousExecutionPreview {
-    const now = new Date().toISOString();
+    const now = this.clock().toISOString();
     const providerRows = this.database.prepare(`
       WITH ranked AS (
         SELECT component_id, status, metrics_json, message, captured_at,
@@ -593,14 +666,14 @@ export class MissionRepository {
       policy_json: string;
       last_checked_at: string | null;
     }>;
-    const projectedTools = toolRows.map((row) => {
+    const projectedToolRows = toolRows.map((row) => {
       const policy = parseJsonObject(row.policy_json);
       return {
         id: row.id,
         name: row.name,
         status: row.status,
         capabilities: stringArray(JSON.parse(row.capabilities_json) as unknown),
-        assignedAgentIds: stringArray(policy.assignedAgents),
+        runtimeAssignedAgentIds: stringArray(policy.assignedAgents),
         enabled: policy.enabled === true,
         startPermitted: policy.startPermitted === true,
         riskClass: typeof policy.riskClass === "string" && policy.riskClass.trim()
@@ -612,8 +685,10 @@ export class MissionRepository {
     const needsTools = requiresExecutionTools(request);
     const agentRows = this.database.prepare(`
       SELECT id, display_name, role, status, provider_policy_json,
-        tool_policy_json, last_heartbeat_at
-      FROM agents ORDER BY display_name, id
+        tool_policy_json, configuration_json, last_heartbeat_at
+      FROM agents
+      WHERE json_extract(configuration_json, '$.userFacing') = 1
+      ORDER BY display_name, id
     `).all() as Array<{
       id: string;
       display_name: string;
@@ -621,20 +696,52 @@ export class MissionRepository {
       status: "available" | "busy" | "degraded" | "offline" | "quarantined";
       provider_policy_json: string;
       tool_policy_json: string;
+      configuration_json: string;
       last_heartbeat_at: string | null;
     }>;
+    const projectedTools = projectedToolRows.map((tool) => {
+      const { runtimeAssignedAgentIds, ...projectedTool } = tool;
+      return {
+        ...projectedTool,
+        assignedAgentIds: agentRows.flatMap((agent) => {
+          const configuration = parseJsonObject(agent.configuration_json);
+          const runtimeBindingAgentIds = stringArray(configuration.runtimeBindingAgentIds);
+          return runtimeAssignedAgentIds.includes(agent.id)
+            || runtimeBindingAgentIds.some((agentId) =>
+              runtimeAssignedAgentIds.includes(agentId))
+            ? [agent.id]
+            : [];
+        }),
+      };
+    });
     const toolBoundaryByAgent = new Map(agentRows.map((row) => {
       const toolPolicy = parseJsonObject(row.tool_policy_json);
-      const capabilities = (this.database.prepare(`
-        SELECT capability FROM agent_capabilities
+      const capabilityRows = this.database.prepare(`
+        SELECT capability, metadata_json FROM agent_capabilities
         WHERE agent_id = ? AND enabled = 1
           AND source = 'live-route-attestation'
           AND json_extract(metadata_json, '$.validUntil') >= ?
         ORDER BY capability
-      `).all(row.id, now) as Array<{ capability: string }>).map((item) => item.capability);
+      `).all(row.id, now) as Array<{ capability: string; metadata_json: string }>;
+      const capabilities = capabilityRows.map((item) => item.capability);
+      const autonomousLocalTools = capabilityRows.flatMap((item) => {
+        const metadata = parseJsonObject(item.metadata_json);
+        const journeys = stringArray(metadata.executionJourneys);
+        const actionClasses = [
+          ...(typeof metadata.actionClassId === "string" ? [metadata.actionClassId] : []),
+          ...stringArray(metadata.actionClassIds),
+        ];
+        return metadata.executionBinding === "reviewed_local_process"
+          && metadata.toolId === item.capability
+          && journeys.includes("autonomous")
+          && actionClasses.some((actionClass) => request.contract.allowedActionClasses.includes(actionClass))
+          ? [item.capability]
+          : [];
+      });
       return [row.id, {
         capabilities,
         capabilitySet: new Set(capabilities),
+        autonomousLocalTools: new Set(autonomousLocalTools),
         allowed: new Set(stringArray(toolPolicy.allowedTools)),
         denied: new Set(stringArray(toolPolicy.deniedTools)),
         approvalRequired: new Set(stringArray(toolPolicy.approvalRequiredTools)),
@@ -668,8 +775,10 @@ export class MissionRepository {
       const capabilities = boundary.capabilities;
       const deniedTools = stringArray(toolPolicy.deniedTools);
       const boundServers = runnableTools.filter((server) => server.assignedAgentIds.includes(row.id));
-      const executableTools = [...new Set(boundServers.flatMap((server) => server.capabilities)
-        .filter((tool) =>
+      const executableTools = [...new Set([
+        ...boundServers.flatMap((server) => server.capabilities),
+        ...boundary.autonomousLocalTools,
+      ].filter((tool) =>
           boundary.capabilitySet.has(tool)
           && boundary.allowed.has(tool)
           && !boundary.denied.has(tool)
@@ -679,7 +788,7 @@ export class MissionRepository {
         incompatibilityReasons.push(`Specialist status is ${row.status}; a fresh callable route is required.`);
       }
       if (needsTools && executableTools.length === 0) {
-        incompatibilityReasons.push("No approval-free reviewed MCP tool binding is available for this tool-requiring contract.");
+        incompatibilityReasons.push("No approval-free reviewed local-process or MCP tool binding is available for this tool-requiring contract.");
       }
       return {
         id: row.id,
@@ -720,6 +829,7 @@ export class MissionRepository {
         invalidSelectedAgentIds,
         recommendedAgentIds,
         effectiveAgentIds,
+        modelAssignments: [],
       },
     };
   }
@@ -751,7 +861,7 @@ export class MissionRepository {
     readonly explanation: string;
   }): string {
     return inImmediateTransaction(this.database, () => {
-      const now = new Date().toISOString();
+      const now = this.clock().toISOString();
       const auditId = id("audit-intake-blocked");
       const details = {
         hook: "intake",
@@ -798,12 +908,29 @@ export class MissionRepository {
     });
   }
 
+  recordCanonicalGraphDeferred(input: {
+    readonly missionId: string;
+    readonly runId: string;
+  }): string {
+    return inImmediateTransaction(this.database, () => new AuditTrailWriter(this.database).append({
+      missionId: input.missionId,
+      runId: input.runId,
+      actor: { type: "system", id: "system:canonical-memory-reconciliation" },
+      action: "memory.canonical_graph_reconciliation_deferred",
+      resourceType: "memory_graph",
+      resourceId: input.missionId,
+      reason: "The committed idempotent mission replay remained valid while canonical graph repair was deferred for explicit reconciliation.",
+      details: { retrySafe: true, mutationCommittedPreviously: true },
+      occurredAt: this.clock().toISOString(),
+    }));
+  }
+
   create(options: CreateMissionOptions): CreatedMission {
     return inImmediateTransaction(this.database, () => {
       const replay = this.getIdempotentCreate(options.idempotencyKey, options.requestHash);
       if (replay) return replay;
 
-      const now = new Date().toISOString();
+      const now = this.clock().toISOString();
       const missionId = id("mission");
       const runId = id("run");
       const { request } = options;
@@ -815,6 +942,9 @@ export class MissionRepository {
         ? {
             allowedTargets: request.authorization.allowedTargets,
             prohibitedTargets: request.authorization.prohibitedTargets,
+            ...(request.authorization.environmentClassification ? {
+              environmentClassification: request.authorization.environmentClassification,
+            } : {}),
             timeWindow: request.authorization.timeWindow ?? null,
             dataHandling: request.authorization.dataHandling ?? null,
           }
@@ -910,7 +1040,13 @@ export class MissionRepository {
             auditRecordId: intakeContext.auditRecordId,
             status: intakeContext.status,
             retrievedCount: intakeContext.retrievedCount,
-            memoryInfluencedDefaults: false,
+            memoryInfluencedDefaults: intakeContext.memoryInfluencedDefaults,
+            ...(intakeContext.safeOptionalDefaults
+              ? { safeOptionalDefaults: intakeContext.safeOptionalDefaults }
+              : {}),
+            ...(intakeContext.influenceExplanation
+              ? { influenceExplanation: intakeContext.influenceExplanation }
+              : {}),
             ...(intakeContext.degradation
               ? { degradation: { ...intakeContext.degradation } }
               : {}),
@@ -945,6 +1081,10 @@ export class MissionRepository {
             destructivePolicy: request.contract.destructivePolicy,
             boundedDestructiveTargets: request.contract.boundedDestructiveTargets ?? [],
             specialistAgentIds: request.contract.specialistAgentIds,
+            planningSelection: resolveAutonomousPlanningSelection(
+              request.contract.planningSelection,
+            ),
+            agentModelAssignments: request.contract.agentModelAssignments,
           }),
           now,
         );
@@ -987,6 +1127,12 @@ export class MissionRepository {
             explanationDepth: request.explanationDepth,
             executionPreference: request.executionPreference,
             evidenceExpectations: request.evidenceExpectations,
+            ...(request.guidedReconnaissance === undefined
+              ? {}
+              : { guidedReconnaissance: request.guidedReconnaissance }),
+            ...(request.guidedWindowsIdentity === undefined
+              ? {}
+              : { guidedWindowsIdentity: request.guidedWindowsIdentity }),
           }),
           now,
         );
@@ -1039,6 +1185,10 @@ export class MissionRepository {
               providerPolicy: request.contract.providerPolicy,
               toolPolicy: request.contract.toolPolicy,
               specialistAgentIds: request.contract.specialistAgentIds,
+              planningSelection: resolveAutonomousPlanningSelection(
+                request.contract.planningSelection,
+              ),
+              agentModelAssignments: request.contract.agentModelAssignments,
               contextNodeIds: request.contract.contextNodeIds,
             }),
             json(budget),
@@ -1058,16 +1208,19 @@ export class MissionRepository {
         .prepare(`
           INSERT INTO runs (
             id, mission_id, journey, status, contract_id,
+            contract_version_bound, contract_hash_bound,
             progress, status_reason, next_action_summary,
             budget_json, budget_usage_json, started_at,
             created_at, updated_at, version
-          ) VALUES (?, ?, ?, 'planning', ?, 0, ?, ?, ?, '{}', ?, ?, ?, 1)
+          ) VALUES (?, ?, ?, 'planning', ?, ?, ?, 0, ?, ?, ?, '{}', ?, ?, ?, 1)
         `)
         .run(
           runId,
           missionId,
           request.journey,
           contractId,
+          autonomous ? 1 : null,
+          autonomous ? contractHash : null,
           autonomous
             ? "Autonomous contract confirmed; durable planning may proceed without routine input."
             : "Guided mission created; an explained first step must precede any consequential action.",
@@ -1077,6 +1230,26 @@ export class MissionRepository {
           now,
           now,
         );
+
+      const pinnedModelAssignmentIds = options.pinModelAssignments?.({
+        missionId,
+        runId,
+        journey: request.journey,
+        specialistAgentIds: autonomous
+          ? request.contract.specialistAgentIds
+          : [],
+        planningSelection: autonomous
+          ? resolveAutonomousPlanningSelection(request.contract.planningSelection)
+          : resolveAutonomousPlanningSelection(undefined),
+        agentModelAssignments: autonomous
+          ? request.contract.agentModelAssignments
+          : [],
+        allowedActionClasses: autonomous
+          ? request.contract.allowedActionClasses
+          : [],
+      }) ?? [];
+
+      options.materializeCanonicalGraph?.({ missionId, runId });
 
       this.events.append({
         missionId,
@@ -1092,6 +1265,7 @@ export class MissionRepository {
           runId,
           journey: request.journey,
           authorizationStatus: "verified",
+          pinnedModelAssignmentIds: [...pinnedModelAssignmentIds],
           ...(intakeContextEvent ? { intakeContext: intakeContextEvent } : {}),
         },
       });
@@ -1112,7 +1286,13 @@ export class MissionRepository {
             ? {
                 intakeContextStatus: intakeContext.status,
                 intakeContextPackId: intakeContext.contextPackId,
-                memoryInfluencedDefaults: false,
+                memoryInfluencedDefaults: intakeContext.memoryInfluencedDefaults,
+                ...(intakeContext.safeOptionalDefaults
+                  ? { safeOptionalDefaults: intakeContext.safeOptionalDefaults }
+                  : {}),
+                ...(intakeContext.influenceExplanation
+                  ? { influenceExplanation: intakeContext.influenceExplanation }
+                  : {}),
               }
             : {}),
         },
@@ -1138,6 +1318,7 @@ export class MissionRepository {
         runId,
         contractHash,
         idempotentMutation: true,
+        pinnedModelAssignmentIds: [...pinnedModelAssignmentIds],
         intakeContext: intakeContext ?? null,
       };
       const previous = this.database
@@ -1201,8 +1382,17 @@ export class MissionRepository {
     const filterHash = portfolioFilterHash(options);
     const cursorSecret = this.cursorSecret();
     const cursor = decodeCursor(options.cursor, filterHash, cursorSecret);
-    const where: string[] = ["m.status != 'archived'"];
+    const normalizedQuery = options.query?.trim();
+    // Archived missions stay out of ordinary portfolio browsing and text
+    // discovery, but a caller holding the canonical stable ID must be able to
+    // reconcile an imported/archive deep link. Every other supplied filter is
+    // still applied below, so the ID escape hatch does not bypass journey,
+    // engagement, date, or other portfolio boundaries.
+    const where: string[] = normalizedQuery
+      ? ["(m.status != 'archived' OR m.id = ?)"]
+      : ["m.status != 'archived'"];
     const parameters: unknown[] = [];
+    if (normalizedQuery) parameters.push(normalizedQuery);
     if (cursor) {
       where.push("(m.updated_at < ? OR (m.updated_at = ? AND m.id < ?))");
       parameters.push(cursor.updatedAt, cursor.updatedAt, cursor.id);
@@ -1215,13 +1405,13 @@ export class MissionRepository {
       where.push("COALESCE(r.status, m.status) = ?");
       parameters.push(options.status);
     }
-    if (options.query) {
+    if (normalizedQuery) {
       where.push(`instr(lower(
         m.id || ' ' || m.name || ' ' || m.objective || ' ' || m.journey || ' ' ||
         COALESCE(r.id, '') || ' ' || COALESCE(r.status, '') || ' ' ||
         COALESCE(ps.phase, '') || ' ' || COALESCE(r.next_action_summary, '')
       ), lower(?)) > 0`);
-      parameters.push(options.query);
+      parameters.push(normalizedQuery);
     }
     if (options.engagement) {
       where.push("lower(COALESCE(m.engagement_id, '')) = lower(?)");

@@ -1,14 +1,27 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { lazy, Suspense, type ReactNode, useEffect, useState } from "react";
 import { useEventStream } from "../../data/events/EventStreamProvider";
 import { Icon } from "../../design-system/components/Icon";
 import { AppLink, useNavigation } from "../router/navigation";
 import { isNavigationItemActive, PRIMARY_NAVIGATION, USER_MANUAL_NAVIGATION } from "../router/routes";
-import { CommandPalette } from "../command-palette/CommandPalette";
 import { NotificationCenter } from "../../features/notifications/NotificationCenter";
 import { assetUrl } from "../../lib/assetUrl";
 import { useAuth } from "../providers/AuthProvider";
 import { operatorText } from "../../lib/operatorLanguage";
 import { PRODUCT_NAME } from "../../lib/productIdentity";
+
+const CommandPalette = lazy(() => import("../command-palette/CommandPalette").then((module) => ({
+  default: module.CommandPalette,
+})));
+
+function CommandPaletteLoading() {
+  return (
+    <div className="os-palette-layer" role="presentation">
+      <div className="os-palette" role="status" aria-live="polite">
+        <p className="os-palette-loading">Opening live command search…</p>
+      </div>
+    </div>
+  );
+}
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { pathname } = useNavigation();
@@ -16,6 +29,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const auth = useAuth();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteRequested, setPaletteRequested] = useState(false);
   const [motionState, setMotionState] = useState<"active" | "paused">(() => (
     typeof document !== "undefined" && document.visibilityState === "hidden" ? "paused" : "active"
   ));
@@ -37,7 +51,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setPaletteOpen((open) => !open);
+        setPaletteOpen((open) => {
+          const next = !open;
+          if (next) setPaletteRequested(true);
+          return next;
+        });
       }
       if (event.key === "Escape") {
         setPaletteOpen(false);
@@ -49,11 +67,33 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    let mounted = true;
+    let visibilityTimer: number | undefined;
     const onVisibilityChange = () => {
-      setMotionState(document.visibilityState === "hidden" ? "paused" : "active");
+      const next =
+        document.visibilityState === "hidden" ? "paused" : "active";
+      // Firefox can deliver visibilitychange while React is rendering the
+      // route being discarded or restored. Defer the shell update so an
+      // external document event never mutates AppShell during child render.
+      if (visibilityTimer !== undefined) {
+        window.clearTimeout(visibilityTimer);
+      }
+      visibilityTimer = window.setTimeout(() => {
+        visibilityTimer = undefined;
+        if (mounted) setMotionState(next);
+      }, 0);
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      mounted = false;
+      if (visibilityTimer !== undefined) {
+        window.clearTimeout(visibilityTimer);
+      }
+      document.removeEventListener(
+        "visibilitychange",
+        onVisibilityChange,
+      );
+    };
   }, []);
 
   return (
@@ -67,7 +107,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           <img src={assetUrl("brand-v2/source/ti-scale-wordmark.svg")} alt="" />
           <span><strong>COMMAND INTELLIGENCE</strong><small>2.4 live</small></span>
         </AppLink>
-        <button type="button" className="os-command-trigger" aria-label="Search or run a command" onClick={() => setPaletteOpen(true)}>
+        <button type="button" className="os-command-trigger" aria-label="Search or run a command" onClick={() => {
+          setPaletteRequested(true);
+          setPaletteOpen(true);
+        }}>
           <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m16 16 5 5" /></svg>
           <span>Search or run a command</span>
           <kbd>{navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl"} K</kbd>
@@ -125,7 +168,11 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         <main id="ti-scale-content" className="os-content" tabIndex={-1}>{children}</main>
       </div>
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      {paletteRequested && (
+        <Suspense fallback={<CommandPaletteLoading />}>
+          <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+        </Suspense>
+      )}
     </div>
   );
 }

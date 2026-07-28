@@ -1,0 +1,115 @@
+[Unit]
+Description=Ti-Scale public NVD MCP connector
+Documentation=file:/opt/ti-scale/docs/public-nvd-mcp.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ti-scale-mcp-nvd
+Group=ti-scale-mcp-nvd
+WorkingDirectory=/opt/ti-scale
+
+# PID 1 reads the root-owned source file and exposes only this credential in the
+# service's private, read-only credential directory.
+LoadCredential=mcp-token:/etc/ti-scale-mcp-nvd/mcp-token
+Environment=NODE_ENV=production
+Environment=HOME=/nonexistent
+Environment=XDG_CACHE_HOME=/tmp/ti-scale-mcp-nvd-cache
+Environment=TI_SCALE_PUBLIC_NVD_MCP_PORT=43142
+Environment=TI_SCALE_PUBLIC_NVD_MCP_TOKEN_FILE=%d/mcp-token
+ExecStart=/usr/local/bin/bun run /opt/ti-scale/server/mcp-public-nvd/http.ts
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=20s
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+KillMode=mixed
+FinalKillSignal=SIGKILL
+SendSIGKILL=yes
+UMask=0077
+
+# Filesystem and process isolation. The connector is stateless; only its
+# private temporary directory is writable.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateMounts=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/opt/ti-scale
+InaccessiblePaths=-/etc/ti-scale -/etc/ti-scale-mcp-nvd -/var/lib/ti-scale -/var/backups/ti-scale
+CapabilityBoundingSet=
+AmbientCapabilities=
+DevicePolicy=closed
+KeyringMode=private
+LockPersonality=yes
+RemoveIPC=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+# The application also hard-codes 127.0.0.1 and rejects non-loopback peers.
+# These controls prevent binding any other protocol or port and deny access to
+# local, link-local, documentation, benchmark, and multicast address ranges.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SocketBindAllow=ipv4:tcp:43142
+SocketBindDeny=any
+IPAddressAllow=localhost
+IPAddressDeny=0.0.0.0/8
+IPAddressDeny=10.0.0.0/8
+IPAddressDeny=100.64.0.0/10
+IPAddressDeny=169.254.0.0/16
+IPAddressDeny=172.16.0.0/12
+IPAddressDeny=192.0.0.0/24
+IPAddressDeny=192.0.2.0/24
+IPAddressDeny=192.168.0.0/16
+IPAddressDeny=198.18.0.0/15
+IPAddressDeny=198.51.100.0/24
+IPAddressDeny=203.0.113.0/24
+IPAddressDeny=224.0.0.0/4
+IPAddressDeny=240.0.0.0/4
+IPAddressDeny=::/128
+IPAddressDeny=64:ff9b:1::/48
+IPAddressDeny=100::/64
+IPAddressDeny=2001:db8::/32
+IPAddressDeny=fc00::/7
+IPAddressDeny=fe80::/10
+IPAddressDeny=ff00::/8
+
+# Bounded resource use prevents the intelligence connector from competing with
+# mission-critical workloads.
+CPUQuota=25%
+CPUWeight=20
+IOWeight=10
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=256
+LimitNPROC=64
+Nice=10
+OOMPolicy=stop
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ti-scale-mcp-nvd
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=20
+
+[Install]
+WantedBy=multi-user.target

@@ -23,7 +23,9 @@ import {
   parseRecoveryProviderRouteTombstone,
   recoveryProviderCircuitState,
   recoveryProviderHealthMaxAge,
+  recoveryProviderModelPin,
   recoveryProviderRouteSettingKey,
+  type ParsedRecoveryProviderRouteBinding,
   type RecoveryProviderRouteBinding,
 } from "./recoveryProviderRoute";
 
@@ -201,10 +203,12 @@ export class RecoveryMutationRepository {
     idempotencyKey: string,
     actor: OperationsActor,
     access: OperationsAccessPolicy,
+    assertMutationAuthority: () => void,
   ): RecoveryMutationProjection {
     assertManager(actor, access);
     const requestHash = hashJson({ kind: "replan", runId, ...input, actorId: actor.id });
     return inImmediateTransaction(this.database, () => {
+      assertMutationAuthority();
       const row = this.context(runId, access);
       assertV2ControlPlane(row);
       const replay = this.idempotentReplay(idempotencyKey, requestHash, row);
@@ -380,10 +384,12 @@ export class RecoveryMutationRepository {
     idempotencyKey: string,
     actor: OperationsActor,
     access: OperationsAccessPolicy,
+    assertMutationAuthority: () => void,
   ): RecoveryMutationProjection {
     assertManager(actor, access);
     const requestHash = hashJson({ kind: "reassign", runId, ...input, actorId: actor.id });
     return inImmediateTransaction(this.database, () => {
+      assertMutationAuthority();
       const row = this.context(runId, access);
       assertV2ControlPlane(row);
       const replay = this.idempotentReplay(idempotencyKey, requestHash, row);
@@ -505,6 +511,12 @@ export class RecoveryMutationRepository {
           invalidated: true,
           runId,
           previousProviderId: previousProviderRoute.providerId,
+          previousModelId: previousProviderRoute.schemaVersion === RECOVERY_PROVIDER_ROUTE_SCHEMA_VERSION
+            ? previousProviderRoute.modelId
+            : null,
+          previousModelConfigurationHash: previousProviderRoute.schemaVersion === RECOVERY_PROVIDER_ROUTE_SCHEMA_VERSION
+            ? previousProviderRoute.modelConfigurationHash
+            : null,
           previousVersion: previousProviderRoute.version,
           planId: previousProviderRoute.planId,
           stepId: previousProviderRoute.stepId,
@@ -640,6 +652,8 @@ export class RecoveryMutationRepository {
     runId: string,
     input: ExactRecoveryExpectation & {
       readonly providerId: string;
+      readonly modelId: string;
+      readonly modelConfigurationHash: string;
       readonly guidedDecisionId?: string;
       readonly expectedDecisionFingerprint?: string;
       readonly reason: string;
@@ -647,10 +661,12 @@ export class RecoveryMutationRepository {
     idempotencyKey: string,
     actor: OperationsActor,
     access: OperationsAccessPolicy,
+    assertMutationAuthority: () => void,
   ): RecoveryMutationProjection {
     assertManager(actor, access);
     const requestHash = hashJson({ kind: "change_provider", runId, ...input, actorId: actor.id });
     return inImmediateTransaction(this.database, () => {
+      assertMutationAuthority();
       const row = this.context(runId, access);
       assertV2ControlPlane(row);
       const replay = this.idempotentReplay(idempotencyKey, requestHash, row);
@@ -684,12 +700,12 @@ export class RecoveryMutationRepository {
       }
       const health = this.providerHealth(input.providerId);
       if (
-        !health || health.status !== "healthy"
+        !health || health.status !== "healthy" || health.metrics.configured === false
         || health.metrics.authenticated !== true
         || health.metrics.callable !== true
       ) {
         throw new OperationsApiError(409, "provider_route_unhealthy", "The requested provider is not healthy", {
-          humanMessage: "Choose a healthy, authenticated provider route.",
+          humanMessage: "Choose a healthy, configured, authenticated provider route.",
           category: "provider_unavailable",
           retryable: true,
         });
@@ -703,6 +719,26 @@ export class RecoveryMutationRepository {
           humanMessage: "Refresh provider health before selecting this route.",
           category: "provider_unavailable",
           retryable: true,
+        });
+      }
+      const modelPin = recoveryProviderModelPin(health.metrics);
+      if (!modelPin) {
+        throw new OperationsApiError(409, "provider_route_model_unavailable", "The requested provider has no exact callable model attestation", {
+          humanMessage: "This provider is not currently attesting one exact requested-and-returned model with a valid configuration hash.",
+          category: "provider_unavailable",
+          retryable: true,
+          remediation: "Refresh provider readiness and choose an enabled provider/model option.",
+        });
+      }
+      if (
+        modelPin.modelId !== input.modelId ||
+        modelPin.modelConfigurationHash !== input.modelConfigurationHash
+      ) {
+        throw new OperationsApiError(409, "provider_route_model_changed", "The requested provider model attestation changed", {
+          humanMessage: "The provider or exact model configuration changed after this recovery view loaded.",
+          category: "conflict",
+          retryable: true,
+          remediation: "Refresh the Recovery Panel and deliberately select the current enabled provider/model option.",
         });
       }
       if (recoveryProviderCircuitState(this.database, runId, input.providerId) !== "closed") {
@@ -724,7 +760,13 @@ export class RecoveryMutationRepository {
       }
       this.assertJourneyPolicy(row, "change_provider", input, health.metrics);
       const existing = this.providerRouteBinding(runId);
-      if (existing?.providerId === input.providerId && existing.planId === row.plan_id && existing.stepId === row.step_id) {
+      if (
+        existing?.schemaVersion === RECOVERY_PROVIDER_ROUTE_SCHEMA_VERSION &&
+        existing.providerId === input.providerId && existing.modelId === modelPin.modelId &&
+        existing.modelConfigurationHash === modelPin.modelConfigurationHash &&
+        existing.planId === row.plan_id && existing.stepId === row.step_id &&
+        existing.assignmentId === row.assignment_id
+      ) {
         throw conflict("The requested provider already owns this exact recovery route.");
       }
       const now = this.clock().toISOString();
@@ -739,6 +781,8 @@ export class RecoveryMutationRepository {
             runId,
             journey: "autonomous",
             providerId: input.providerId,
+            modelId: modelPin.modelId,
+            modelConfigurationHash: modelPin.modelConfigurationHash,
             planId: row.plan_id,
             planVersion: row.plan_version,
             stepId: row.step_id,
@@ -757,6 +801,8 @@ export class RecoveryMutationRepository {
             runId,
             journey: "guided",
             providerId: input.providerId,
+            modelId: modelPin.modelId,
+            modelConfigurationHash: modelPin.modelConfigurationHash,
             planId: row.plan_id,
             planVersion: row.plan_version,
             stepId: row.step_id,
@@ -778,7 +824,7 @@ export class RecoveryMutationRepository {
       const updated = this.database.prepare(`
         UPDATE runs SET next_action_summary = ?, version = version + 1, updated_at = ?
         WHERE id = ? AND version = ? AND current_plan_id = ? AND current_step_id = ?
-      `).run(`Use ${input.providerId} for the exact current provider-backed step`, now, runId, row.run_version, row.plan_id, row.step_id);
+      `).run(`Use ${input.providerId} / ${modelPin.modelId} for the exact current provider-backed step`, now, runId, row.run_version, row.plan_id, row.step_id);
       if (updated.changes !== 1) throw conflict("The current run changed during provider selection.");
       const event = this.events.append({
         missionId: row.mission_id,
@@ -787,9 +833,11 @@ export class RecoveryMutationRepository {
         eventType: "run.provider_route_changed",
         actorType: "operator",
         actorId: actor.id,
-        summary: `Provider route changed to ${input.providerId} for the exact current step`,
+        summary: `Provider route changed to ${input.providerId} / ${modelPin.modelId} for the exact current step`,
         payload: {
           providerId: input.providerId,
+          modelId: modelPin.modelId,
+          modelConfigurationHash: modelPin.modelConfigurationHash,
           routeVersion,
           planId: row.plan_id,
           planVersion: row.plan_version,
@@ -823,6 +871,8 @@ export class RecoveryMutationRepository {
           eventId: event.id,
           checkpointId: checkpoint.id,
           providerId: input.providerId,
+          modelId: modelPin.modelId,
+          modelConfigurationHash: modelPin.modelConfigurationHash,
           routeVersion,
           planId: row.plan_id,
           stepId: row.step_id,
@@ -835,6 +885,8 @@ export class RecoveryMutationRepository {
         eventId: event.id,
         checkpointId: checkpoint.id,
         providerId: input.providerId,
+        modelId: modelPin.modelId,
+        modelConfigurationHash: modelPin.modelConfigurationHash,
         providerRouteVersion: routeVersion,
       });
       this.saveIdempotency(idempotencyKey, requestHash, response, actor.id, now);
@@ -1063,7 +1115,7 @@ export class RecoveryMutationRepository {
     `).get(runId, stepId) as { id: string } | undefined ?? null;
   }
 
-  private providerRouteBinding(runId: string): RecoveryProviderRouteBinding | null {
+  private providerRouteBinding(runId: string): ParsedRecoveryProviderRouteBinding | null {
     const row = this.database.prepare("SELECT value_json FROM settings WHERE key = ?")
       .get(recoveryProviderRouteSettingKey(runId)) as { value_json: string } | undefined;
     return row ? parseRecoveryProviderRouteBinding(asJson(row.value_json)) : null;
@@ -1210,6 +1262,8 @@ export class RecoveryMutationRepository {
       readonly continuationId?: string;
       readonly agentId?: string;
       readonly providerId?: string;
+      readonly modelId?: string;
+      readonly modelConfigurationHash?: string;
       readonly providerRouteVersion?: number;
       readonly assignmentId?: string;
     },
@@ -1226,6 +1280,8 @@ export class RecoveryMutationRepository {
         agentId: details.agentId ?? null,
         assignmentId: details.assignmentId ?? null,
         providerId: details.providerId ?? null,
+        modelId: details.modelId ?? null,
+        modelConfigurationHash: details.modelConfigurationHash ?? null,
         providerRouteVersion: details.providerRouteVersion ?? null,
       },
       run: {

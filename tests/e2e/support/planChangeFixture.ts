@@ -5,7 +5,15 @@ import { acquireTestRunMutationAuthority } from "../../../server/control-plane/T
 import { E2E_DATABASE_PATH } from "./environment";
 import { normalizeFixtureNamespace } from "./fixtureNamespace";
 
-export type PlanChangeFixtureState = "queued_apply" | "queued_reject" | "running" | "corrupt_history" | "direct_editor" | "direct_edit";
+export type PlanChangeFixtureState =
+  | "queued_apply"
+  | "queued_reject"
+  | "running"
+  | "inflight_resolution"
+  | "corrupt_history"
+  | "direct_editor"
+  | "direct_edit"
+  | "version_history";
 
 export interface PlanChangeFixture {
   readonly missionId: string;
@@ -13,6 +21,9 @@ export interface PlanChangeFixture {
   readonly target: string;
   readonly runId: string;
   readonly planId: string;
+  readonly historicalPlanId?: string;
+  readonly historicalPlanV1Id?: string;
+  readonly historicalPlanV2Id?: string;
   readonly stepOneId: string;
   readonly stepTwoId: string;
   readonly stepThreeId?: string;
@@ -96,6 +107,7 @@ export function createPlanChangeFixture(state: PlanChangeFixtureState, instanceI
   const target = `${suffix}.fixture.test`;
   const runId = `run-plan-change-e2e-${suffix}`;
   const planId = `plan-plan-change-e2e-${suffix}-v1`;
+  const versionHistory = state === "version_history";
   const stepOneId = `step-plan-change-e2e-${suffix}-one`;
   const stepTwoId = `step-plan-change-e2e-${suffix}-two`;
   const direct = state === "direct_editor" || state === "direct_edit";
@@ -103,10 +115,16 @@ export function createPlanChangeFixture(state: PlanChangeFixtureState, instanceI
   const agentId = `agent-plan-change-e2e-${suffix}`;
   const alternateAgentId = direct ? `agent-plan-change-e2e-${suffix}-alternate` : undefined;
   const assignmentId = `assignment-plan-change-e2e-${suffix}`;
+  const intermediatePlanId = versionHistory ? `plan-plan-change-e2e-${suffix}-v2` : undefined;
+  const currentPlanId = versionHistory ? `plan-plan-change-e2e-${suffix}-v3` : planId;
+  const intermediateStepId = versionHistory ? `step-plan-change-e2e-${suffix}-intermediate` : undefined;
+  const currentStepId = versionHistory ? `step-plan-change-e2e-${suffix}-current` : stepOneId;
+  const currentAssignmentId = versionHistory ? `assignment-plan-change-e2e-${suffix}-current` : assignmentId;
   const workerId = `worker-plan-change-e2e-${suffix}`;
-  const strategySummary = `Map the authorized ${suffix} fixture`;
+  const strategySummary = versionHistory ? "Map the approved surface" : `Map the authorized ${suffix} fixture`;
   const now = "2026-07-16T18:00:00.000Z";
-  const running = state === "running";
+  const running = state === "running" || state === "inflight_resolution";
+  const exactInflight = state === "inflight_resolution";
   const connection = database();
   let corruptRequest: PlanChangeRequest | undefined;
 
@@ -289,6 +307,117 @@ export function createPlanChangeFixture(state: PlanChangeFixtureState, instanceI
         now,
         now,
       );
+      if (exactInflight) {
+        connection.prepare(`
+          INSERT INTO actions (
+            id, mission_id, run_id, step_id, assignment_id, action_type,
+            action_class, fingerprint, normalized_arguments_json,
+            scoped_target, status, intent_summary, started_at, created_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'fixture:observe',
+            'passive_intelligence_osint', ?, ?, ?, 'running',
+            'Collect one attributable observation', ?, ?, ?)
+        `).run(
+          `action-plan-change-e2e-${suffix}`,
+          missionId,
+          runId,
+          stepOneId,
+          assignmentId,
+          hash(`action:${runId}`),
+          JSON.stringify({
+            orchestration: {
+              idempotent: true,
+              destructive: false,
+            },
+          }),
+          target,
+          now,
+          now,
+          now,
+        );
+        connection.prepare(`
+          INSERT INTO attack_attempts (
+            id, mission_id, run_id, plan_id, step_id, objective,
+            technique_name, action_class, status, assigned_agent_id,
+            started_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'Observe the current represented service',
+            'Bounded service observation', 'passive_intelligence_osint',
+            'running', ?, ?, ?, ?)
+        `).run(
+          `attempt-plan-change-e2e-${suffix}`,
+          missionId,
+          runId,
+          planId,
+          stepOneId,
+          agentId,
+          now,
+          now,
+          now,
+        );
+      }
+
+      if (versionHistory) {
+        if (!intermediatePlanId || !intermediateStepId) throw new Error("Version-history fixture IDs were not initialized");
+        const versionTwoStrategy = "Correlate verified service evidence";
+        const currentStrategy = "Validate the current application hypothesis";
+        connection.prepare("UPDATE plans SET status = 'superseded' WHERE id = ?").run(planId);
+        connection.prepare("UPDATE plan_steps SET status = 'cancelled', ended_at = ?, updated_at = ? WHERE plan_id = ?").run(now, now, planId);
+        connection.prepare("UPDATE assignments SET status = 'cancelled', ended_at = ?, updated_at = ? WHERE run_id = ?").run(now, now, runId);
+        connection.prepare(`
+          INSERT INTO plans (
+            id, run_id, version, status, strategy_summary, rationale_summary,
+            plan_hash, created_by, created_at, activated_at
+          ) VALUES (?, ?, 2, 'superseded', ?, 'Version two correlated the first verified service observations', ?, 'e2e-runtime-planner', ?, ?)
+        `).run(intermediatePlanId, runId, versionTwoStrategy, hash(`${intermediatePlanId}:${versionTwoStrategy}`), now, now);
+        connection.prepare(`
+          INSERT INTO plan_steps (
+            id, plan_id, run_id, ordinal, phase, title, objective, status,
+            success_criteria_json, dependencies_json, action_class, risk_class,
+            assigned_agent_id, ended_at, created_at, updated_at
+          ) VALUES (?, ?, ?, 0, 'Analysis', 'Correlate service observations',
+            'Retain only independently attributable service evidence', 'cancelled',
+            '["Verified service evidence is correlated"]', '[]', 'passive_intelligence_osint',
+            'low', ?, ?, ?, ?)
+        `).run(intermediateStepId, intermediatePlanId, runId, agentId, now, now, now);
+        insertRepresentation.run(
+          `constraint-plan-change-e2e-${suffix}-intermediate`,
+          missionId,
+          representedAction("passive_intelligence_osint", target, []),
+          intermediateStepId,
+          now,
+        );
+        connection.prepare(`
+          INSERT INTO plans (
+            id, run_id, version, status, strategy_summary, rationale_summary,
+            plan_hash, created_by, created_at, activated_at
+          ) VALUES (?, ?, 3, 'active', ?, 'Version three follows a separately reviewed current hypothesis', ?, 'e2e-runtime-planner', ?, ?)
+        `).run(currentPlanId, runId, currentStrategy, hash(`${currentPlanId}:${currentStrategy}`), now, now);
+        connection.prepare(`
+          INSERT INTO plan_steps (
+            id, plan_id, run_id, ordinal, phase, title, objective, status,
+            success_criteria_json, dependencies_json, action_class, risk_class,
+            assigned_agent_id, created_at, updated_at
+          ) VALUES (?, ?, ?, 0, 'Analysis', 'Validate the current hypothesis',
+            'Classify one current evidence-backed branch', 'ready',
+            '["Current branch is classified"]', '[]', 'passive_intelligence_osint',
+            'low', ?, ?, ?)
+        `).run(currentStepId, currentPlanId, runId, agentId, now, now);
+        insertRepresentation.run(
+          `constraint-plan-change-e2e-${suffix}-current`,
+          missionId,
+          representedAction("passive_intelligence_osint", target, []),
+          currentStepId,
+          now,
+        );
+        connection.prepare(`
+          INSERT INTO assignments (id, run_id, step_id, agent_id, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 'queued', ?, ?)
+        `).run(currentAssignmentId, runId, currentStepId, agentId, now, now);
+        connection.prepare(`
+          UPDATE runs SET current_plan_id = ?, current_step_id = ?, status_reason = ?, next_action_summary = ?
+          WHERE id = ?
+        `).run(currentPlanId, currentStepId, "Plan v3 is queued at a safe pre-execution boundary.", "Review the current represented step", runId);
+      }
 
       if (state === "corrupt_history") {
         const service = new PlanChangeService(
@@ -324,17 +453,22 @@ export function createPlanChangeFixture(state: PlanChangeFixtureState, instanceI
     missionName,
     target,
     runId,
-    planId,
-    stepOneId,
+    planId: currentPlanId,
+    ...(versionHistory ? {
+      historicalPlanId: planId,
+      historicalPlanV1Id: planId,
+      historicalPlanV2Id: intermediatePlanId,
+    } : {}),
+    stepOneId: currentStepId,
     stepTwoId,
     ...(stepThreeId ? { stepThreeId } : {}),
     agentId,
     ...(alternateAgentId ? { alternateAgentId } : {}),
-    assignmentId,
+    assignmentId: currentAssignmentId,
     workerId,
-    strategySummary,
+    strategySummary: versionHistory ? "Validate the current application hypothesis" : strategySummary,
     runVersion: running ? 2 : 1,
-    planVersion: 1,
+    planVersion: versionHistory ? 3 : 1,
     ...(corruptRequest ? {
       corruptRequestId: corruptRequest.id,
       validNormalizedChangeJson: JSON.stringify(corruptRequest.normalizedChange),
@@ -374,6 +508,47 @@ export function refreshPlanChangeFixtureAgents(fixture: PlanChangeFixture): void
     `).run("2026-07-16T18:00:00.000Z", "2026-07-16T18:00:00.000Z", ...ids);
     if (result.changes !== ids.length) throw new Error("Not every plan-change fixture specialist was restored");
     acquireTestRunMutationAuthority(connection, fixture.runId);
+  } finally {
+    connection.close();
+  }
+}
+
+export function settlePlanChangeInflightWork(fixture: PlanChangeFixture): void {
+  const connection = database();
+  const now = "2026-07-16T18:02:00.000Z";
+  try {
+    inImmediateTransaction(connection, () => {
+      const actions = connection.prepare(`
+        UPDATE actions SET status = 'succeeded',
+          result_summary = 'The represented repeat-safe observation completed.',
+          ended_at = ?, updated_at = ?
+        WHERE run_id = ? AND status = 'running'
+      `).run(now, now, fixture.runId);
+      const attempts = connection.prepare(`
+        UPDATE attack_attempts SET status = 'succeeded',
+          outcome_summary = 'The bounded observation completed.',
+          ended_at = ?, updated_at = ?, version = version + 1
+        WHERE run_id = ? AND status = 'running'
+      `).run(now, now, fixture.runId);
+      const assignments = connection.prepare(`
+        UPDATE assignments SET status = 'completed', ended_at = ?,
+          lease_owner = NULL, lease_acquired_at = NULL,
+          last_heartbeat_at = NULL, lease_expires_at = NULL, updated_at = ?
+        WHERE run_id = ? AND status = 'active'
+      `).run(now, now, fixture.runId);
+      const steps = connection.prepare(`
+        UPDATE plan_steps SET status = 'completed', ended_at = ?, updated_at = ?
+        WHERE run_id = ? AND status = 'running'
+      `).run(now, now, fixture.runId);
+      if (
+        actions.changes !== 1
+        || attempts.changes !== 1
+        || assignments.changes !== 1
+        || steps.changes !== 1
+      ) {
+        throw new Error("The exact in-flight fixture did not settle every represented child");
+      }
+    });
   } finally {
     connection.close();
   }

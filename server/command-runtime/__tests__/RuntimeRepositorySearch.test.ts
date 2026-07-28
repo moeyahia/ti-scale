@@ -41,4 +41,59 @@ describe("RuntimeRepository command search", () => {
       database.close();
     }
   });
+
+  test("applies journey and operational-state predicates before the bounded page", () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    try {
+      migrateDatabase(database);
+      seed(database);
+      database.prepare("UPDATE runs SET updated_at = '2026-07-14T00:00:00.000Z' WHERE id = 'run-beta'")
+        .run();
+      for (let index = 0; index < 24; index += 1) {
+        const suffix = String(index).padStart(2, "0");
+        const missionId = `mission-newer-guided-${suffix}`;
+        const runId = `run-newer-guided-${suffix}`;
+        const updatedAt = `2026-07-16T00:${suffix}:00.000Z`;
+        database.prepare(`
+          INSERT INTO missions (
+            id, name, objective, journey, status, authorization_status,
+            success_criteria_json, memory_policy_json, created_by, created_at, updated_at
+          ) VALUES (?, ?, 'Exercise the newer Guided projection', 'guided', 'active',
+            'verified', '[]', '{}', 'operator', ?, ?)
+        `).run(missionId, `Newer Guided ${suffix}`, updatedAt, updatedAt);
+        database.prepare(`
+          INSERT INTO runs (
+            id, mission_id, journey, status, progress, budget_json, budget_usage_json,
+            status_reason, next_action_summary, current_owner_id, started_at,
+            created_at, updated_at, version
+          ) VALUES (?, ?, 'guided', 'running', 0.25, '{}', '{}', 'Fixture run',
+            'Collect unique evidence', 'GuidedCommander', ?, ?, ?, 1)
+        `).run(runId, missionId, updatedAt, updatedAt, updatedAt);
+      }
+
+      const repository = new RuntimeRepository(database);
+      expect(repository.listRunProjectionPage({
+        journey: "autonomous",
+        statuses: ["queued", "planning", "awaiting_contract_confirmation", "running", "blocked", "recovering"],
+        limit: 1,
+      })).toEqual({
+        items: [expect.objectContaining({ id: "run-beta", journey: "autonomous", status: "running" })],
+        nextCursor: null,
+      });
+
+      database.prepare("UPDATE runs SET status = 'completed' WHERE id = 'run-beta'").run();
+      expect(repository.listRunProjectionPage({
+        journey: "autonomous",
+        statuses: ["queued", "planning", "awaiting_contract_confirmation", "running", "blocked", "recovering"],
+        limit: 1,
+      })).toEqual({ items: [], nextCursor: null });
+      expect(repository.listRunProjectionPage({
+        journey: "autonomous",
+        status: "completed",
+        limit: 1,
+      }).items.map((run) => run.id)).toEqual(["run-beta"]);
+    } finally {
+      database.close();
+    }
+  });
 });

@@ -1,9 +1,12 @@
-import { checkDatabaseIntegrity } from "./connection";
+import { getDatabaseIntegrityAttestation } from "./connection";
 import type { SqliteDatabase } from "./types";
 
 export interface DatabaseHealth {
   readonly healthy: boolean;
   readonly integrity: readonly string[];
+  readonly integrityStatus: "verified" | "unverified";
+  readonly integrityCheckedAt: string | null;
+  readonly integritySource: "startup" | "diagnostic" | null;
   readonly journalMode: string;
   readonly foreignKeys: boolean;
   readonly busyTimeoutMs: number;
@@ -12,25 +15,13 @@ export interface DatabaseHealth {
   readonly checkedAt: string;
 }
 
-export interface DatabaseHealthOptions {
-  /** Force a new full SQLite quick-check instead of using this connection's verified result. */
-  readonly refreshIntegrity?: boolean;
-}
-
 interface CountRow {
   readonly count: number;
 }
 
-interface CachedIntegrity {
-  readonly ok: boolean;
-  readonly messages: readonly string[];
-}
-
-// A full quick_check is intentionally connection-scoped and cached. On a
-// multi-gigabyte database it is an offline/startup integrity operation, not a
-// request-path liveness probe. New connections still verify independently,
-// and callers performing an explicit diagnostic may force a refresh.
-const integrityByConnection = new WeakMap<SqliteDatabase, CachedIntegrity>();
+const UNVERIFIED_INTEGRITY = Object.freeze([
+  "Database integrity has not been attested for this connection.",
+]);
 
 function tableExists(database: SqliteDatabase, name: string): boolean {
   const row = database
@@ -41,13 +32,11 @@ function tableExists(database: SqliteDatabase, name: string): boolean {
 
 export function getDatabaseHealth(
   database: SqliteDatabase,
-  options: DatabaseHealthOptions = {},
 ): DatabaseHealth {
-  let integrity = options.refreshIntegrity ? undefined : integrityByConnection.get(database);
-  if (!integrity) {
-    integrity = checkDatabaseIntegrity(database);
-    integrityByConnection.set(database, integrity);
-  }
+  // This accessor is used by HTTP readiness and Brain health. It must never
+  // execute SQLite quick_check: a multi-gigabyte store can take minutes. The
+  // connection records its startup attestation before it is published.
+  const integrity = getDatabaseIntegrityAttestation(database);
   const journalMode = String(database.pragma("journal_mode", { simple: true }));
   const foreignKeys = Number(database.pragma("foreign_keys", { simple: true })) === 1;
   const busyTimeoutMs = Number(database.pragma("busy_timeout", { simple: true }));
@@ -69,8 +58,11 @@ export function getDatabaseHealth(
   }
 
   return {
-    healthy: integrity.ok && foreignKeys,
-    integrity: integrity.messages,
+    healthy: integrity?.ok === true && foreignKeys,
+    integrity: integrity?.messages ?? UNVERIFIED_INTEGRITY,
+    integrityStatus: integrity ? "verified" : "unverified",
+    integrityCheckedAt: integrity?.checkedAt ?? null,
+    integritySource: integrity?.source ?? null,
     journalMode,
     foreignKeys,
     busyTimeoutMs,

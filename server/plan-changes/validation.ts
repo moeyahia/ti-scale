@@ -3,10 +3,12 @@ import type {
   ApplyPlanChangeInput,
   CreatePlanChangeInput,
   EditPlanChangeInput,
+  FinalizePlanChangeInflightInput,
   PlanChangeJson,
   PlanChangeOperation,
   PlanStepRepresentationInput,
   RejectPlanChangeInput,
+  ResolvePlanChangeInflightInput,
 } from "./types";
 import { PlanChangeError } from "./types";
 
@@ -175,9 +177,63 @@ function representation(value: unknown, label: string): PlanStepRepresentationIn
   };
 }
 
+/**
+ * Revalidate an immutable database projection before it can participate in a
+ * rollback. Imported or corrupted history must meet the same strict action
+ * boundary as a newly submitted operation; truthy strings are never treated
+ * as booleans and embedded authentication material remains forbidden.
+ */
+export function validatePersistedPlanStepRepresentation(
+  value: unknown,
+  label: string,
+  expectedActionClass: string,
+  expectedDependencyStepIds?: readonly string[],
+): void {
+  const root = exact(value, label, ["action", "explanation", "rationale", "reversibility", "dependencies"]);
+  const action = exact(
+    root.action,
+    `${label}.action`,
+    ["actionType", "actionClass", "target", "arguments", "intentSummary", "kind", "idempotent", "destructive"],
+  );
+  const actionClass = optionalActionClass(action.actionClass);
+  if (!actionClass || actionClass !== expectedActionClass) {
+    throw invalid(`${label}.action.actionClass does not match its canonical plan step`);
+  }
+  const dependencies = stringList(root.dependencies, `${label}.dependencies`, 200)
+    .map((entry) => identifier(entry, `${label}.dependencyStepId`));
+  if (expectedDependencyStepIds && (
+    dependencies.length !== expectedDependencyStepIds.length
+    || dependencies.some((entry, index) => entry !== expectedDependencyStepIds[index])
+  )) {
+    throw invalid(`${label}.dependencies do not match the canonical plan step dependencies`);
+  }
+  representation({
+    action: {
+      actionType: action.actionType,
+      target: action.target,
+      arguments: action.arguments,
+      intentSummary: action.intentSummary,
+      kind: action.kind,
+      idempotent: action.idempotent,
+      destructive: action.destructive,
+    },
+    explanation: root.explanation,
+    rationale: root.rationale,
+    reversibility: root.reversibility,
+  }, label);
+}
+
 function parseOperation(value: unknown, index: number): PlanChangeOperation {
   const root = object(value, `operations[${index}]`);
   const kind = root.kind;
+  if (kind === "restore_plan_version") {
+    const item = exact(root, `operations[${index}]`, ["kind", "targetPlanId", "targetPlanVersion"]);
+    return {
+      kind,
+      targetPlanId: identifier(item.targetPlanId, "targetPlanId"),
+      targetPlanVersion: positiveInteger(item.targetPlanVersion, "targetPlanVersion"),
+    };
+  }
   if (kind === "update_plan") {
     const item = exact(root, `operations[${index}]`, ["kind"], ["strategySummary", "rationaleSummary"]);
     const strategySummary = optionalText(item.strategySummary, "strategySummary");
@@ -248,31 +304,45 @@ function parseOperation(value: unknown, index: number): PlanChangeOperation {
 
 function operations(value: unknown): readonly PlanChangeOperation[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 50) throw invalid("operations must contain 1 through 50 structured changes");
-  return value.map(parseOperation);
+  const parsed = value.map(parseOperation);
+  if (parsed.some((operation) => operation.kind === "restore_plan_version") && parsed.length !== 1) {
+    throw invalid("restore_plan_version must be the only operation so a historical snapshot cannot be mixed with unrelated edits");
+  }
+  return parsed;
 }
 
 export function parseCreatePlanChangeInput(missionId: string, runId: string, value: unknown): CreatePlanChangeInput {
   const item = exact(value, "plan change proposal", ["basePlanId", "expectedRunVersion", "expectedPlanVersion", "operations"], ["requestText"]);
+  const parsedOperations = operations(item.operations);
+  const requestText = item.requestText === undefined ? undefined : boundedText(item.requestText, "requestText", 4_000);
+  if (parsedOperations.some((operation) => operation.kind === "restore_plan_version") && !requestText) {
+    throw invalid("A historical rollback requires an operator reason before its comparison can be reviewed");
+  }
   return {
     missionId,
     runId,
     basePlanId: identifier(item.basePlanId, "basePlanId"),
     expectedRunVersion: positiveInteger(item.expectedRunVersion, "expectedRunVersion"),
     expectedPlanVersion: positiveInteger(item.expectedPlanVersion, "expectedPlanVersion"),
-    ...(item.requestText === undefined ? {} : { requestText: boundedText(item.requestText, "requestText", 4_000) }),
-    operations: operations(item.operations),
+    ...(requestText === undefined ? {} : { requestText }),
+    operations: parsedOperations,
   };
 }
 
 export function parseEditPlanChangeInput(requestId: string, value: unknown): EditPlanChangeInput {
   const item = exact(value, "plan change edit", ["expectedRequestVersion", "expectedRunVersion", "expectedPlanVersion", "operations"], ["requestText"]);
+  const parsedOperations = operations(item.operations);
+  const requestText = item.requestText === undefined ? undefined : boundedText(item.requestText, "requestText", 4_000);
+  if (parsedOperations.some((operation) => operation.kind === "restore_plan_version") && !requestText) {
+    throw invalid("A historical rollback requires an operator reason before its comparison can be reviewed");
+  }
   return {
     requestId,
     expectedRequestVersion: positiveInteger(item.expectedRequestVersion, "expectedRequestVersion"),
     expectedRunVersion: positiveInteger(item.expectedRunVersion, "expectedRunVersion"),
     expectedPlanVersion: positiveInteger(item.expectedPlanVersion, "expectedPlanVersion"),
-    ...(item.requestText === undefined ? {} : { requestText: boundedText(item.requestText, "requestText", 4_000) }),
-    operations: operations(item.operations),
+    ...(requestText === undefined ? {} : { requestText }),
+    operations: parsedOperations,
   };
 }
 
@@ -292,6 +362,59 @@ export function parseRejectPlanChangeInput(requestId: string, value: unknown): R
     requestId,
     expectedRequestVersion: positiveInteger(item.expectedRequestVersion, "expectedRequestVersion"),
     reason: boundedText(item.reason, "reason", 2_000),
+  };
+}
+
+export function parseResolvePlanChangeInflightInput(
+  requestId: string,
+  value: unknown,
+): ResolvePlanChangeInflightInput {
+  const item = exact(
+    value,
+    "in-flight plan-change resolution",
+    [
+      "mode",
+      "expectedRequestVersion",
+      "expectedRunVersion",
+      "expectedPlanVersion",
+      "reason",
+    ],
+  );
+  const mode = identifier(item.mode, "mode");
+  if (
+    mode !== "checkpoint_finish_idempotent_work"
+    && mode !== "checkpoint_cancel_affected_work"
+  ) {
+    throw invalid("mode must be one of the two represented in-flight resolution options");
+  }
+  return {
+    requestId,
+    mode,
+    expectedRequestVersion: positiveInteger(
+      item.expectedRequestVersion,
+      "expectedRequestVersion",
+    ),
+    expectedRunVersion: positiveInteger(item.expectedRunVersion, "expectedRunVersion"),
+    expectedPlanVersion: positiveInteger(item.expectedPlanVersion, "expectedPlanVersion"),
+    reason: boundedText(item.reason, "reason", 2_000),
+  };
+}
+
+export function parseFinalizePlanChangeInflightInput(
+  requestId: string,
+  value: unknown,
+): FinalizePlanChangeInflightInput {
+  const item = exact(
+    value,
+    "in-flight plan-change finalization",
+    ["expectedResolutionVersion"],
+  );
+  return {
+    requestId,
+    expectedResolutionVersion: positiveInteger(
+      item.expectedResolutionVersion,
+      "expectedResolutionVersion",
+    ),
   };
 }
 

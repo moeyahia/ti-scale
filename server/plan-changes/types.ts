@@ -14,6 +14,17 @@ export interface PlanUpdateOperation {
   readonly rationaleSummary?: string | null;
 }
 
+/**
+ * Rebuild a prior immutable plan as a newly reviewed version. The historical
+ * record remains superseded and is never reactivated or mutated in place.
+ */
+export interface PlanVersionRestoreOperation {
+  readonly kind: "restore_plan_version";
+  readonly targetPlanId: string;
+  /** Visible immutable version selected by the operator, used as a stale-history fence. */
+  readonly targetPlanVersion: number;
+}
+
 export interface PlanStepUpdateOperation {
   readonly kind: "update_step";
   readonly stepId: string;
@@ -88,6 +99,7 @@ export interface PlanStepRepresentationOperation {
 
 export type PlanChangeOperation =
   | PlanUpdateOperation
+  | PlanVersionRestoreOperation
   | PlanStepUpdateOperation
   | PlanStepAddOperation
   | PlanStepRemoveOperation
@@ -152,14 +164,109 @@ export interface PlanChangeInflightImpact {
   readonly safeToApply: boolean;
   readonly runStatus: string;
   readonly leaseOwner: string | null;
+  readonly affectedSubgraphStepIds: readonly string[];
+  /** Base-plan steps in the proposal's direct or transitive affected subgraph. */
   readonly activeStepIds: readonly string[];
+  readonly unaffectedActiveStepIds: readonly string[];
   readonly activeAssignmentIds: readonly string[];
+  readonly unaffectedActiveAssignmentIds: readonly string[];
   readonly activeActionIds: readonly string[];
+  readonly unaffectedActiveActionIds: readonly string[];
   readonly pendingDecisionIds: readonly string[];
+  readonly unaffectedPendingDecisionIds: readonly string[];
   readonly queuedAssignmentIdsToCancel: readonly string[];
+  readonly affectedActions: readonly PlanChangeAffectedAction[];
+  readonly unaffectedActions: readonly PlanChangeAffectedAction[];
+  readonly affectedAttackAttempts: readonly PlanChangeAffectedAttackAttempt[];
+  readonly unaffectedAttackAttempts: readonly PlanChangeAffectedAttackAttempt[];
+  readonly resolutionOptions: readonly [
+    PlanChangeInflightResolutionOption,
+    PlanChangeInflightResolutionOption,
+  ];
   readonly requiresCheckpoint: boolean;
   readonly requiresCancellation: boolean;
   readonly reasons: readonly string[];
+}
+
+export interface PlanChangeAffectedAction {
+  readonly id: string;
+  readonly stepId: string | null;
+  readonly actionType: string;
+  readonly actionClass: string;
+  readonly intentSummary: string;
+  readonly target: string | null;
+  readonly status: "queued" | "running";
+  readonly idempotent: boolean;
+  readonly destructive: boolean;
+}
+
+export interface PlanChangeAffectedAttackAttempt {
+  readonly id: string;
+  readonly stepId: string | null;
+  readonly objective: string;
+  readonly techniqueName: string;
+  readonly actionClass: string;
+  readonly status: string;
+  readonly targetAssetId: string | null;
+  readonly targetServiceId: string | null;
+}
+
+export type PlanChangeInflightResolutionMode =
+  | "checkpoint_finish_idempotent_work"
+  | "checkpoint_cancel_affected_work";
+
+export interface PlanChangeInflightResolutionOption {
+  readonly mode: PlanChangeInflightResolutionMode;
+  readonly label: string;
+  readonly consequence: string;
+  readonly enabled: boolean;
+  readonly disabledReason: string | null;
+}
+
+export type PlanChangeInflightResolutionStatus =
+  | "waiting_for_terminal_work"
+  | "ready_for_review"
+  | "failed";
+
+export interface PlanChangeInflightResolution {
+  readonly id: string;
+  readonly planChangeRequestId: string;
+  readonly missionId: string;
+  readonly runId: string;
+  readonly basePlanId: string;
+  readonly mode: PlanChangeInflightResolutionMode;
+  readonly status: PlanChangeInflightResolutionStatus;
+  readonly affectedStepIds: readonly string[];
+  readonly affectedAssignmentIds: readonly string[];
+  readonly affectedActionIds: readonly string[];
+  readonly affectedAttackAttemptIds: readonly string[];
+  readonly affectedDecisionIds: readonly string[];
+  readonly sourceCheckpointId: string;
+  readonly sourceCheckpointStateHash: string;
+  readonly sourceCheckpointEventSequence: number;
+  readonly settleDeadlineAt: string;
+  readonly lastHeartbeatAt: string;
+  readonly failureReason: string | null;
+  readonly freshRequestId: string | null;
+  readonly requestedBy: string;
+  readonly reason: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly resolvedAt: string | null;
+  readonly version: number;
+}
+
+/**
+ * Trusted runtime receipt for the exact live child records whose underlying
+ * processes were stopped at an amendment boundary. Logical records may only
+ * be closed after every identity is reconciled against canonical runtime
+ * relationships.
+ */
+export interface PlanChangeAffectedWorkStopReceipt {
+  readonly stoppedActionIds: readonly string[];
+  readonly stoppedAssignmentIds: readonly string[];
+  readonly stoppedAttackAttemptIds: readonly string[];
+  readonly stoppedStepIds: readonly string[];
 }
 
 export interface PlanChangeRequest {
@@ -215,6 +322,20 @@ export interface RejectPlanChangeInput {
   readonly requestId: string;
   readonly expectedRequestVersion: number;
   readonly reason: string;
+}
+
+export interface ResolvePlanChangeInflightInput {
+  readonly requestId: string;
+  readonly mode: PlanChangeInflightResolutionMode;
+  readonly expectedRequestVersion: number;
+  readonly expectedRunVersion: number;
+  readonly expectedPlanVersion: number;
+  readonly reason: string;
+}
+
+export interface FinalizePlanChangeInflightInput {
+  readonly requestId: string;
+  readonly expectedResolutionVersion: number;
 }
 
 export interface PlanChangeActor {

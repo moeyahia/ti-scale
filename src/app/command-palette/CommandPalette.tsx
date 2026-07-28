@@ -13,6 +13,7 @@ import { guidedCommanderApi } from "../../data/api/guidedCommander";
 import { operationsApi } from "../../data/api/operations";
 import { exactResumeBoundary, runtimeV2Api } from "../../data/api/runtimeV2";
 import { useQueryCache } from "../../data/cache/QueryProvider";
+import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
 import type { GuidedCommanderMessage, GuidedCommanderStep, GuidedRememberInput } from "../../domain/types/guidedCommander";
 import type { RunSnapshot, RuntimeRun } from "../../domain/types/runtimeV2";
 import { suggestedMemorySummary, suggestedMemoryTitle } from "../../features/guided/guidedCommanderUi";
@@ -20,6 +21,7 @@ import { useNavigation } from "../router/navigation";
 import { PRIMARY_NAVIGATION, USER_MANUAL_NAVIGATION } from "../router/routes";
 import {
   agentCommand,
+  commandMutationErrorMessage,
   contextualRunCommands,
   decisionCommand,
   JOURNEY_COMMANDS,
@@ -78,10 +80,6 @@ function requestKey(prefix: string): string {
   return `${prefix}-${id}`;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "The command could not be completed.";
-}
-
 function nonTerminal(run: RuntimeRun): boolean {
   return !["completed", "failed", "cancelled"].includes(run.status);
 }
@@ -96,7 +94,11 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const [memoryNodes, setMemoryNodes] = useState<Awaited<ReturnType<typeof fetchMemoryNodes>>["items"]>([]);
   const [contextualSnapshot, setContextualSnapshot] = useState<RunSnapshot>();
   const [memorySource, setMemorySource] = useState<GuidedMemorySource>();
-  const [loading, setLoading] = useState(false);
+  // AppShell mounts this route chunk only after the first deliberate palette
+  // request. Start in the truthful loading state so the first committed
+  // dialog never advertises a settled empty catalog before its four canonical
+  // domain reads have even begun.
+  const [loading, setLoading] = useState(true);
   const [brainLoading, setBrainLoading] = useState(false);
   const [loadWarnings, setLoadWarnings] = useState<string[]>([]);
   const [searchWarnings, setSearchWarnings] = useState<string[]>([]);
@@ -147,29 +149,39 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     const controller = new AbortController();
     setLoading(true);
     setLoadWarnings([]);
-    void Promise.allSettled([
-      fetchMissions({ limit: 100 }, controller.signal),
-      runtimeV2Api.runs({ limit: 100 }, controller.signal),
-      runtimeV2Api.decisions({ limit: 100 }, controller.signal),
-      operationsApi.agents({ limit: 100 }, controller.signal),
-    ]).then((results) => {
-      if (controller.signal.aborted) return;
-      const warnings: string[] = [];
-      const [missions, runs, decisions, agents] = results;
-      if (missions.status === "rejected") warnings.push("missions");
-      if (runs.status === "rejected") warnings.push("runs");
-      if (decisions.status === "rejected") warnings.push("decisions");
-      if (agents.status === "rejected") warnings.push("agents");
-      setData({
-        missions: missions.status === "fulfilled" ? missions.value.items : [],
-        runs: runs.status === "fulfilled" ? runs.value.items : [],
-        decisions: decisions.status === "fulfilled" ? decisions.value.items : [],
-        agents: agents.status === "fulfilled" ? agents.value.items : [],
+    // This component is lazy-mounted while open. Defer the first transport by
+    // one task so React's development StrictMode mount probe can set up and
+    // clean up without starting four requests that it must immediately abort.
+    // The committed mount owns the only transport and ordinary close/navigation
+    // still aborts genuinely in-flight work through the controller below.
+    const start = window.setTimeout(() => {
+      void Promise.allSettled([
+        fetchMissions({ limit: 100 }, controller.signal),
+        runtimeV2Api.runs({ limit: 100 }, controller.signal),
+        runtimeV2Api.decisions({ limit: 100 }, controller.signal),
+        operationsApi.agents({ limit: 100 }, controller.signal),
+      ]).then((results) => {
+        if (controller.signal.aborted) return;
+        const warnings: string[] = [];
+        const [missions, runs, decisions, agents] = results;
+        if (missions.status === "rejected") warnings.push("missions");
+        if (runs.status === "rejected") warnings.push("runs");
+        if (decisions.status === "rejected") warnings.push("decisions");
+        if (agents.status === "rejected") warnings.push("agents");
+        setData({
+          missions: missions.status === "fulfilled" ? missions.value.items : [],
+          runs: runs.status === "fulfilled" ? runs.value.items : [],
+          decisions: decisions.status === "fulfilled" ? decisions.value.items : [],
+          agents: agents.status === "fulfilled" ? agents.value.items : [],
+        });
+        setLoadWarnings(warnings);
+        setLoading(false);
       });
-      setLoadWarnings(warnings);
-      setLoading(false);
-    });
-    return () => controller.abort();
+    }, 0);
+    return () => {
+      window.clearTimeout(start);
+      controller.abort();
+    };
   }, [open]);
 
   useEffect(() => {
@@ -179,16 +191,25 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     }
     const controller = new AbortController();
     setContextualSnapshot(undefined);
-    const load = routeContext.runId
-      ? runtimeV2Api.run(routeContext.runId, controller.signal)
-      : runtimeV2Api.mission(routeContext.missionId!, controller.signal).then((snapshot) => {
-          const selected = snapshot.runs.find(nonTerminal) ?? snapshot.runs[0];
-          return selected ? runtimeV2Api.run(selected.id, controller.signal) : undefined;
-        });
-    void load.then((snapshot) => { if (!controller.signal.aborted) setContextualSnapshot(snapshot); }).catch(() => {
-      if (!controller.signal.aborted) setContextualSnapshot(undefined);
-    });
-    return () => controller.abort();
+    // The palette can first lazy-mount on a mission or run route. Keep this
+    // contextual read under the same StrictMode ownership boundary as the
+    // canonical palette collections above; otherwise the development probe
+    // still starts and immediately aborts one required run/mission request.
+    const start = window.setTimeout(() => {
+      const load = routeContext.runId
+        ? runtimeV2Api.run(routeContext.runId, controller.signal)
+        : runtimeV2Api.mission(routeContext.missionId!, controller.signal).then((snapshot) => {
+            const selected = snapshot.runs.find(nonTerminal) ?? snapshot.runs[0];
+            return selected ? runtimeV2Api.run(selected.id, controller.signal) : undefined;
+          });
+      void load.then((snapshot) => { if (!controller.signal.aborted) setContextualSnapshot(snapshot); }).catch(() => {
+        if (!controller.signal.aborted) setContextualSnapshot(undefined);
+      });
+    }, 0);
+    return () => {
+      window.clearTimeout(start);
+      controller.abort();
+    };
   }, [open, routeContext.missionId, routeContext.runId]);
 
   useEffect(() => {
@@ -366,7 +387,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       setStatusMessage(`${editor.command === "cancel" ? "Cancelled" : editor.command === "pause" ? "Paused" : "Resumed"} ${updated.run.missionName}.`);
       resetEditor();
     } catch (error) {
-      setMutationError(errorMessage(error));
+      setMutationError(commandMutationErrorMessage(error));
     } finally {
       setMutationPending(false);
     }
@@ -394,7 +415,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       setStatusMessage("A reviewable candidate was created. It is not confirmed memory until you approve it in the Memory Inbox.");
       resetEditor();
     } catch (error) {
-      setMutationError(errorMessage(error));
+      setMutationError(commandMutationErrorMessage(error));
     } finally {
       setMutationPending(false);
     }
@@ -464,9 +485,9 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
             </div>
             <p>This references the latest Guided Commander insight and current exact step. It enters the Memory Inbox as a candidate and is never auto-confirmed.</p>
             <div className="os-palette-editor-grid">
-              <label>Type<select value={memoryDraft.nodeType} onChange={(event) => setMemoryDraft((draft) => ({ ...draft, nodeType: event.target.value as MemoryDraft["nodeType"], ...(event.target.value !== "preference" && draft.scope === "global" ? { scope: "mission" } : {}) }))}><option value="source">Source</option><option value="preference">Preference</option><option value="procedure">Procedure</option><option value="tool">Tool</option><option value="tactic">Tactic</option><option value="technique">Technique</option></select></label>
-              <label>Scope<select value={memoryDraft.scope} onChange={(event) => setMemoryDraft((draft) => ({ ...draft, scope: event.target.value as MemoryDraft["scope"] }))}><option value="mission">This mission</option>{memorySource?.engagementAvailable && <option value="engagement">This engagement</option>}{memoryDraft.nodeType === "preference" && <option value="global">Global operator preference</option>}</select></label>
-              <label>Sensitivity<select value={memoryDraft.sensitivity} onChange={(event) => setMemoryDraft((draft) => ({ ...draft, sensitivity: event.target.value as MemoryDraft["sensitivity"] }))}><option value="internal">Internal</option><option value="private">Private</option><option value="restricted">Restricted</option></select></label>
+              <label>Type<TitaniumSelect value={memoryDraft.nodeType} onChange={(event) => setMemoryDraft((draft) => ({ ...draft, nodeType: event.target.value as MemoryDraft["nodeType"], ...(event.target.value !== "preference" && draft.scope === "global" ? { scope: "mission" } : {}) }))}><option value="source">Source</option><option value="preference">Preference</option><option value="procedure">Procedure</option><option value="tool">Tool</option><option value="tactic">Tactic</option><option value="technique">Technique</option></TitaniumSelect></label>
+              <label>Scope<TitaniumSelect value={memoryDraft.scope} onChange={(event) => setMemoryDraft((draft) => ({ ...draft, scope: event.target.value as MemoryDraft["scope"] }))}><option value="mission">This mission</option>{memorySource?.engagementAvailable && <option value="engagement">This engagement</option>}{memoryDraft.nodeType === "preference" && <option value="global">Global operator preference</option>}</TitaniumSelect></label>
+              <label>Sensitivity<TitaniumSelect value={memoryDraft.sensitivity} onChange={(event) => setMemoryDraft((draft) => ({ ...draft, sensitivity: event.target.value as MemoryDraft["sensitivity"] }))}><option value="internal">Internal</option><option value="private">Private</option><option value="restricted">Restricted</option></TitaniumSelect></label>
             </div>
             <label>Title<input required maxLength={500} value={memoryDraft.title} onChange={(event) => setMemoryDraft((draft) => ({ ...draft, title: event.target.value }))} autoFocus /></label>
             <label>Summary<textarea required maxLength={4000} value={memoryDraft.summary} onChange={(event) => setMemoryDraft((draft) => ({ ...draft, summary: event.target.value }))} /></label>

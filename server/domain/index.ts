@@ -9,3 +9,7 @@ export * from "./source-manifest-adapters";
 export * from "./safe-stop-registry";
 export * from "./budget-presets";
 export * from "./destructive-policy";
+export * from "./specialist-execution-policy";
+export * from "./autonomous-outcome-registry";
+export * from "./historical-reported-outcomes";
+export * from "./reusable-knowledge-outcomes";

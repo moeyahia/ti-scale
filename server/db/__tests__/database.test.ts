@@ -3,13 +3,20 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  backupDatabase,
+  assertDatabaseIntegrity,
   createDatabaseConnection,
   DATABASE_MIGRATIONS,
   getDatabaseHealth,
   listAppliedMigrations,
   migrateDatabase,
 } from "../index";
+import * as DatabaseBarrel from "../index";
+import {
+  backupDatabase,
+  createTimestampedBackup,
+  DATABASE_BACKUP_DISABLED_ERROR,
+} from "../backup";
+import { WeakStatementRegistry } from "../connection";
 import { MemoryRepository } from "../../memory/index";
 import { ControlPlaneLeaseError, RunMutationAuthorityGuard } from "../../control-plane";
 
@@ -51,15 +58,164 @@ describe("Ti-Scale database foundation", () => {
       const second = migrateDatabase(database);
       const health = getDatabaseHealth(database);
 
-      expect(first.applied.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+      expect(first.applied.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
       expect(second.applied).toEqual([]);
-      expect(listAppliedMigrations(database)).toHaveLength(13);
+      expect(listAppliedMigrations(database)).toHaveLength(60);
       expect(health.healthy).toBe(true);
       expect(health.journalMode).toBe("wal");
       expect(health.foreignKeys).toBe(true);
       expect(health.busyTimeoutMs).toBe(5_000);
-      expect(health.currentMigration).toBe(13);
+      expect(health.currentMigration).toBe(60);
       expect(existsSync(databasePath)).toBe(true);
+      expect(database.prepare(`
+        SELECT "unique" AS is_unique
+        FROM pragma_index_list('autonomous_activation_bindings')
+        WHERE name = 'idx_autonomous_activation_binding_subject'
+      `).get()).toEqual({ is_unique: 1 });
+      expect(database.prepare(`
+        SELECT name
+        FROM pragma_index_info('idx_autonomous_activation_binding_subject')
+        ORDER BY seqno
+      `).all()).toEqual([
+        { name: "receipt_id" },
+        { name: "binding_type" },
+        { name: "subject_id" },
+      ]);
+      const v24Objects = (database.prepare(`
+        SELECT type, name FROM sqlite_master
+        WHERE name IN (
+          'operational_reset_authorizations',
+          'operational_reset_control_receipts',
+          'operational_hazard_occurrences',
+          'operational_hazard_observation_jobs',
+          'operational_reset_authorizations_no_update',
+          'operational_reset_authorizations_no_delete',
+          'operational_reset_control_receipts_no_update',
+          'operational_reset_control_receipts_no_delete',
+          'operational_hazard_occurrences_no_update',
+          'operational_hazard_occurrences_no_delete',
+          'attack_knowledge_bundle_evidence_bindings',
+          'attack_knowledge_evidence_bindings_no_update',
+          'attack_knowledge_evidence_bindings_no_delete',
+          'attack_knowledge_promotion_verification_integrity_insert',
+          'operational_hazard_receipt_backed_counts',
+          'operational_hazard_profiles_receipt_count_insert',
+          'operational_hazard_profiles_receipt_count_update',
+          'operational_hazard_occurrence_refresh_profile_count'
+        ) ORDER BY type, name
+      `).all() as Array<{ type: string; name: string }>).map((item) => item.name);
+      expect(v24Objects).toEqual([
+        'attack_knowledge_bundle_evidence_bindings',
+        'operational_hazard_observation_jobs',
+        'operational_hazard_occurrences',
+        'operational_reset_authorizations',
+        'operational_reset_control_receipts',
+        'attack_knowledge_evidence_bindings_no_delete',
+        'attack_knowledge_evidence_bindings_no_update',
+        'attack_knowledge_promotion_verification_integrity_insert',
+        'operational_hazard_occurrence_refresh_profile_count',
+        'operational_hazard_occurrences_no_delete',
+        'operational_hazard_occurrences_no_update',
+        'operational_hazard_profiles_receipt_count_insert',
+        'operational_hazard_profiles_receipt_count_update',
+        'operational_reset_authorizations_no_delete',
+        'operational_reset_authorizations_no_update',
+        'operational_reset_control_receipts_no_delete',
+        'operational_reset_control_receipts_no_update',
+        'operational_hazard_receipt_backed_counts',
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  test("migrates legacy plan hashes into a non-unique content fingerprint while retaining unique version receipts", () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    const now = "2026-07-19T05:00:00.000Z";
+    try {
+      migrateDatabase(database, DATABASE_MIGRATIONS.slice(0, 15));
+      insertMission(database, "mission-plan-fingerprint", "guided");
+      database.prepare(`
+        INSERT INTO runs (id, mission_id, journey, status, created_at, updated_at)
+        VALUES ('run-plan-fingerprint', 'mission-plan-fingerprint', 'guided', 'queued', ?, ?)
+      `).run(now, now);
+      database.prepare(`
+        INSERT INTO plans (
+          id, run_id, version, status, strategy_summary, plan_hash,
+          created_by, created_at
+        ) VALUES ('plan-fingerprint-v1', 'run-plan-fingerprint', 1,
+          'superseded', 'Historical strategy', ?, 'planner:test', ?)
+      `).run("a".repeat(64), now);
+
+      expect(migrateDatabase(database)).toMatchObject({
+        applied: [
+          { version: 16, name: "plan_content_fingerprint" },
+          { version: 17, name: "terminal_memory_projection_continuation" },
+          { version: 18, name: "attack_centric_reusable_memory" },
+          { version: 19, name: "attack_attempt_knowledge_context" },
+          { version: 20, name: "attack_knowledge_compiler" },
+          { version: 21, name: "reusable_memory_edge_privacy_boundary" },
+          { version: 22, name: "operational_hazard_health_gate" },
+          { version: 23, name: "attack_knowledge_promotion" },
+          { version: 24, name: "operational_hazard_observations" },
+          { version: 25, name: "attack_knowledge_evidence_bindings" },
+          { version: 26, name: "historical_hazard_evidence_staging" },
+          { version: 27, name: "receipt_backed_hazard_occurrence_count" },
+          { version: 28, name: "operational_hazard_retry_contract" },
+          { version: 29, name: "historical_attack_knowledge_source_custody" },
+          { version: 30, name: "historical_attack_knowledge_batch_promotion" },
+          { version: 31, name: "legacy_migration_reconciliation_integrity" },
+          { version: 32, name: "historical_migration_settled_source_boundary" },
+          { version: 33, name: "reusable_knowledge_outcomes" },
+          { version: 34, name: "private_source_custody_and_operator_graph" },
+          { version: 35, name: "canonical_database_leases" },
+          { version: 36, name: "vault_provenance_sync_invalidation" },
+          { version: 37, name: "existing_vault_provenance_reconciliation" },
+          { version: 38, name: "startup_readiness_audit_classification" },
+          { version: 39, name: "brain_provenance_source_lookup" },
+          { version: 40, name: "historical_reported_outcomes" },
+          { version: 41, name: "historical_reported_outcome_two_hash_custody" },
+          { version: 42, name: "historical_reported_outcome_projection_lookup" },
+          { version: 43, name: "autonomous_recovery_memory_receipts" },
+          { version: 44, name: "exploit_outcome_observer_specs" },
+          { version: 45, name: "candidate_linux_post_exploit_sessions" },
+          { version: 46, name: "candidate_linux_post_exploit_integrity" },
+          { version: 47, name: "model_assignment_preferences" },
+          { version: 48, name: "provider_turn_agent_binding" },
+          { version: 49, name: "cve_applicability_review_lifecycle" },
+          { version: 50, name: "research_promotion_lifecycle" },
+          { version: 51, name: "plan_change_inflight_resolution" },
+          { version: 52, name: "research_execution_boundary" },
+          { version: 53, name: "research_promotion_decision_fingerprint" },
+          { version: 54, name: "research_execution_integrity" },
+          { version: 55, name: "research_history_integrity" },
+          { version: 56, name: "private_research_holdout_execution" },
+          { version: 57, name: "model_assignment_purpose" },
+          { version: 58, name: "autonomous_activation_receipts" },
+          { version: 59, name: "provider_advisory_disclosure_mode" },
+          { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
+        ],
+        currentVersion: 60,
+      });
+      expect(database.prepare(`
+        SELECT plan_hash, content_hash, content_hash_version
+        FROM plans WHERE id = 'plan-fingerprint-v1'
+      `).get()).toEqual({
+        plan_hash: "a".repeat(64),
+        content_hash: "a".repeat(64),
+        content_hash_version: 0,
+      });
+      database.prepare(`
+        INSERT INTO plans (
+          id, run_id, version, status, strategy_summary, plan_hash,
+          content_hash, content_hash_version, created_by, created_at
+        ) VALUES ('plan-fingerprint-v2', 'run-plan-fingerprint', 2,
+          'active', 'Historical strategy', ?, ?, 1, 'operator:test', ?)
+      `).run("b".repeat(64), "a".repeat(64), now);
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM plans
+        WHERE run_id = 'run-plan-fingerprint' AND content_hash = ?
+      `).get("a".repeat(64))).toEqual({ count: 2 });
     } finally {
       database.close();
     }
@@ -106,8 +262,57 @@ describe("Ti-Scale database foundation", () => {
       `).run(importedRunId, "f".repeat(64), now, now, "2026-07-17T10:00:00.000Z");
 
       expect(migrateDatabase(database)).toMatchObject({
-        applied: [{ version: 13, name: "imported_legacy_control_plane" }],
-        currentVersion: 13,
+        applied: [
+          { version: 13, name: "imported_legacy_control_plane" },
+          { version: 14, name: "provider_turn_exact_usage" },
+          { version: 15, name: "provider_request_authorization" },
+          { version: 16, name: "plan_content_fingerprint" },
+          { version: 17, name: "terminal_memory_projection_continuation" },
+          { version: 18, name: "attack_centric_reusable_memory" },
+          { version: 19, name: "attack_attempt_knowledge_context" },
+          { version: 20, name: "attack_knowledge_compiler" },
+          { version: 21, name: "reusable_memory_edge_privacy_boundary" },
+          { version: 22, name: "operational_hazard_health_gate" },
+          { version: 23, name: "attack_knowledge_promotion" },
+          { version: 24, name: "operational_hazard_observations" },
+          { version: 25, name: "attack_knowledge_evidence_bindings" },
+          { version: 26, name: "historical_hazard_evidence_staging" },
+          { version: 27, name: "receipt_backed_hazard_occurrence_count" },
+          { version: 28, name: "operational_hazard_retry_contract" },
+          { version: 29, name: "historical_attack_knowledge_source_custody" },
+          { version: 30, name: "historical_attack_knowledge_batch_promotion" },
+          { version: 31, name: "legacy_migration_reconciliation_integrity" },
+          { version: 32, name: "historical_migration_settled_source_boundary" },
+          { version: 33, name: "reusable_knowledge_outcomes" },
+          { version: 34, name: "private_source_custody_and_operator_graph" },
+          { version: 35, name: "canonical_database_leases" },
+          { version: 36, name: "vault_provenance_sync_invalidation" },
+          { version: 37, name: "existing_vault_provenance_reconciliation" },
+          { version: 38, name: "startup_readiness_audit_classification" },
+          { version: 39, name: "brain_provenance_source_lookup" },
+          { version: 40, name: "historical_reported_outcomes" },
+          { version: 41, name: "historical_reported_outcome_two_hash_custody" },
+          { version: 42, name: "historical_reported_outcome_projection_lookup" },
+          { version: 43, name: "autonomous_recovery_memory_receipts" },
+          { version: 44, name: "exploit_outcome_observer_specs" },
+          { version: 45, name: "candidate_linux_post_exploit_sessions" },
+          { version: 46, name: "candidate_linux_post_exploit_integrity" },
+          { version: 47, name: "model_assignment_preferences" },
+          { version: 48, name: "provider_turn_agent_binding" },
+          { version: 49, name: "cve_applicability_review_lifecycle" },
+          { version: 50, name: "research_promotion_lifecycle" },
+          { version: 51, name: "plan_change_inflight_resolution" },
+          { version: 52, name: "research_execution_boundary" },
+          { version: 53, name: "research_promotion_decision_fingerprint" },
+          { version: 54, name: "research_execution_integrity" },
+          { version: 55, name: "research_history_integrity" },
+          { version: 56, name: "private_research_holdout_execution" },
+          { version: 57, name: "model_assignment_purpose" },
+          { version: 58, name: "autonomous_activation_receipts" },
+          { version: 59, name: "provider_advisory_disclosure_mode" },
+          { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
+        ],
+        currentVersion: 60,
       });
       expect(database.prepare(`
         SELECT id, control_plane FROM missions ORDER BY id
@@ -203,12 +408,59 @@ describe("Ti-Scale database foundation", () => {
           { version: 11, name: "memory_edge_scope_identity" },
           { version: 12, name: "planning_retry_continuation" },
           { version: 13, name: "imported_legacy_control_plane" },
+          { version: 14, name: "provider_turn_exact_usage" },
+          { version: 15, name: "provider_request_authorization" },
+          { version: 16, name: "plan_content_fingerprint" },
+          { version: 17, name: "terminal_memory_projection_continuation" },
+          { version: 18, name: "attack_centric_reusable_memory" },
+          { version: 19, name: "attack_attempt_knowledge_context" },
+          { version: 20, name: "attack_knowledge_compiler" },
+          { version: 21, name: "reusable_memory_edge_privacy_boundary" },
+          { version: 22, name: "operational_hazard_health_gate" },
+          { version: 23, name: "attack_knowledge_promotion" },
+          { version: 24, name: "operational_hazard_observations" },
+          { version: 25, name: "attack_knowledge_evidence_bindings" },
+          { version: 26, name: "historical_hazard_evidence_staging" },
+          { version: 27, name: "receipt_backed_hazard_occurrence_count" },
+          { version: 28, name: "operational_hazard_retry_contract" },
+          { version: 29, name: "historical_attack_knowledge_source_custody" },
+          { version: 30, name: "historical_attack_knowledge_batch_promotion" },
+          { version: 31, name: "legacy_migration_reconciliation_integrity" },
+          { version: 32, name: "historical_migration_settled_source_boundary" },
+          { version: 33, name: "reusable_knowledge_outcomes" },
+          { version: 34, name: "private_source_custody_and_operator_graph" },
+          { version: 35, name: "canonical_database_leases" },
+          { version: 36, name: "vault_provenance_sync_invalidation" },
+          { version: 37, name: "existing_vault_provenance_reconciliation" },
+          { version: 38, name: "startup_readiness_audit_classification" },
+          { version: 39, name: "brain_provenance_source_lookup" },
+          { version: 40, name: "historical_reported_outcomes" },
+          { version: 41, name: "historical_reported_outcome_two_hash_custody" },
+          { version: 42, name: "historical_reported_outcome_projection_lookup" },
+          { version: 43, name: "autonomous_recovery_memory_receipts" },
+          { version: 44, name: "exploit_outcome_observer_specs" },
+          { version: 45, name: "candidate_linux_post_exploit_sessions" },
+          { version: 46, name: "candidate_linux_post_exploit_integrity" },
+          { version: 47, name: "model_assignment_preferences" },
+          { version: 48, name: "provider_turn_agent_binding" },
+          { version: 49, name: "cve_applicability_review_lifecycle" },
+          { version: 50, name: "research_promotion_lifecycle" },
+          { version: 51, name: "plan_change_inflight_resolution" },
+          { version: 52, name: "research_execution_boundary" },
+          { version: 53, name: "research_promotion_decision_fingerprint" },
+          { version: 54, name: "research_execution_integrity" },
+          { version: 55, name: "research_history_integrity" },
+          { version: 56, name: "private_research_holdout_execution" },
+          { version: 57, name: "model_assignment_purpose" },
+          { version: 58, name: "autonomous_activation_receipts" },
+          { version: 59, name: "provider_advisory_disclosure_mode" },
+          { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
         ],
-        currentVersion: 13,
+        currentVersion: 60,
       });
       expect(getDatabaseHealth(database)).toMatchObject({
         healthy: true,
-        currentMigration: 13,
+        currentMigration: 60,
       });
     } finally {
       database.close();
@@ -292,8 +544,55 @@ describe("Ti-Scale database foundation", () => {
           { version: 11, name: "memory_edge_scope_identity" },
           { version: 12, name: "planning_retry_continuation" },
           { version: 13, name: "imported_legacy_control_plane" },
+          { version: 14, name: "provider_turn_exact_usage" },
+          { version: 15, name: "provider_request_authorization" },
+          { version: 16, name: "plan_content_fingerprint" },
+          { version: 17, name: "terminal_memory_projection_continuation" },
+          { version: 18, name: "attack_centric_reusable_memory" },
+          { version: 19, name: "attack_attempt_knowledge_context" },
+          { version: 20, name: "attack_knowledge_compiler" },
+          { version: 21, name: "reusable_memory_edge_privacy_boundary" },
+          { version: 22, name: "operational_hazard_health_gate" },
+          { version: 23, name: "attack_knowledge_promotion" },
+          { version: 24, name: "operational_hazard_observations" },
+          { version: 25, name: "attack_knowledge_evidence_bindings" },
+          { version: 26, name: "historical_hazard_evidence_staging" },
+          { version: 27, name: "receipt_backed_hazard_occurrence_count" },
+          { version: 28, name: "operational_hazard_retry_contract" },
+          { version: 29, name: "historical_attack_knowledge_source_custody" },
+          { version: 30, name: "historical_attack_knowledge_batch_promotion" },
+          { version: 31, name: "legacy_migration_reconciliation_integrity" },
+          { version: 32, name: "historical_migration_settled_source_boundary" },
+          { version: 33, name: "reusable_knowledge_outcomes" },
+          { version: 34, name: "private_source_custody_and_operator_graph" },
+          { version: 35, name: "canonical_database_leases" },
+          { version: 36, name: "vault_provenance_sync_invalidation" },
+          { version: 37, name: "existing_vault_provenance_reconciliation" },
+          { version: 38, name: "startup_readiness_audit_classification" },
+          { version: 39, name: "brain_provenance_source_lookup" },
+          { version: 40, name: "historical_reported_outcomes" },
+          { version: 41, name: "historical_reported_outcome_two_hash_custody" },
+          { version: 42, name: "historical_reported_outcome_projection_lookup" },
+          { version: 43, name: "autonomous_recovery_memory_receipts" },
+          { version: 44, name: "exploit_outcome_observer_specs" },
+          { version: 45, name: "candidate_linux_post_exploit_sessions" },
+          { version: 46, name: "candidate_linux_post_exploit_integrity" },
+          { version: 47, name: "model_assignment_preferences" },
+          { version: 48, name: "provider_turn_agent_binding" },
+          { version: 49, name: "cve_applicability_review_lifecycle" },
+          { version: 50, name: "research_promotion_lifecycle" },
+          { version: 51, name: "plan_change_inflight_resolution" },
+          { version: 52, name: "research_execution_boundary" },
+          { version: 53, name: "research_promotion_decision_fingerprint" },
+          { version: 54, name: "research_execution_integrity" },
+          { version: 55, name: "research_history_integrity" },
+          { version: 56, name: "private_research_holdout_execution" },
+          { version: 57, name: "model_assignment_purpose" },
+          { version: 58, name: "autonomous_activation_receipts" },
+          { version: 59, name: "provider_advisory_disclosure_mode" },
+          { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
         ],
-        currentVersion: 13,
+        currentVersion: 60,
       });
       expect(upgraded.prepare(`
         SELECT id, scope, engagement_id, mission_id
@@ -355,7 +654,7 @@ describe("Ti-Scale database foundation", () => {
       }]);
       expect(getDatabaseHealth(upgraded)).toMatchObject({
         healthy: true,
-        currentMigration: 13,
+        currentMigration: 60,
       });
     } finally {
       upgraded.close();
@@ -394,8 +693,55 @@ describe("Ti-Scale database foundation", () => {
         applied: [
           { version: 12, name: "planning_retry_continuation" },
           { version: 13, name: "imported_legacy_control_plane" },
+          { version: 14, name: "provider_turn_exact_usage" },
+          { version: 15, name: "provider_request_authorization" },
+          { version: 16, name: "plan_content_fingerprint" },
+          { version: 17, name: "terminal_memory_projection_continuation" },
+          { version: 18, name: "attack_centric_reusable_memory" },
+          { version: 19, name: "attack_attempt_knowledge_context" },
+          { version: 20, name: "attack_knowledge_compiler" },
+          { version: 21, name: "reusable_memory_edge_privacy_boundary" },
+          { version: 22, name: "operational_hazard_health_gate" },
+          { version: 23, name: "attack_knowledge_promotion" },
+          { version: 24, name: "operational_hazard_observations" },
+          { version: 25, name: "attack_knowledge_evidence_bindings" },
+          { version: 26, name: "historical_hazard_evidence_staging" },
+          { version: 27, name: "receipt_backed_hazard_occurrence_count" },
+          { version: 28, name: "operational_hazard_retry_contract" },
+          { version: 29, name: "historical_attack_knowledge_source_custody" },
+          { version: 30, name: "historical_attack_knowledge_batch_promotion" },
+          { version: 31, name: "legacy_migration_reconciliation_integrity" },
+          { version: 32, name: "historical_migration_settled_source_boundary" },
+          { version: 33, name: "reusable_knowledge_outcomes" },
+          { version: 34, name: "private_source_custody_and_operator_graph" },
+          { version: 35, name: "canonical_database_leases" },
+          { version: 36, name: "vault_provenance_sync_invalidation" },
+          { version: 37, name: "existing_vault_provenance_reconciliation" },
+          { version: 38, name: "startup_readiness_audit_classification" },
+          { version: 39, name: "brain_provenance_source_lookup" },
+          { version: 40, name: "historical_reported_outcomes" },
+          { version: 41, name: "historical_reported_outcome_two_hash_custody" },
+          { version: 42, name: "historical_reported_outcome_projection_lookup" },
+          { version: 43, name: "autonomous_recovery_memory_receipts" },
+          { version: 44, name: "exploit_outcome_observer_specs" },
+          { version: 45, name: "candidate_linux_post_exploit_sessions" },
+          { version: 46, name: "candidate_linux_post_exploit_integrity" },
+          { version: 47, name: "model_assignment_preferences" },
+          { version: 48, name: "provider_turn_agent_binding" },
+          { version: 49, name: "cve_applicability_review_lifecycle" },
+          { version: 50, name: "research_promotion_lifecycle" },
+          { version: 51, name: "plan_change_inflight_resolution" },
+          { version: 52, name: "research_execution_boundary" },
+          { version: 53, name: "research_promotion_decision_fingerprint" },
+          { version: 54, name: "research_execution_integrity" },
+          { version: 55, name: "research_history_integrity" },
+          { version: 56, name: "private_research_holdout_execution" },
+          { version: 57, name: "model_assignment_purpose" },
+          { version: 58, name: "autonomous_activation_receipts" },
+          { version: 59, name: "provider_advisory_disclosure_mode" },
+          { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
         ],
-        currentVersion: 13,
+        currentVersion: 60,
       });
       expect(database.prepare(`
         SELECT kind, source_id, payload_json, status, attempt_count,
@@ -507,8 +853,55 @@ describe("Ti-Scale database foundation", () => {
           { version: 11, name: "memory_edge_scope_identity" },
           { version: 12, name: "planning_retry_continuation" },
           { version: 13, name: "imported_legacy_control_plane" },
+          { version: 14, name: "provider_turn_exact_usage" },
+          { version: 15, name: "provider_request_authorization" },
+          { version: 16, name: "plan_content_fingerprint" },
+          { version: 17, name: "terminal_memory_projection_continuation" },
+          { version: 18, name: "attack_centric_reusable_memory" },
+          { version: 19, name: "attack_attempt_knowledge_context" },
+          { version: 20, name: "attack_knowledge_compiler" },
+          { version: 21, name: "reusable_memory_edge_privacy_boundary" },
+          { version: 22, name: "operational_hazard_health_gate" },
+          { version: 23, name: "attack_knowledge_promotion" },
+          { version: 24, name: "operational_hazard_observations" },
+          { version: 25, name: "attack_knowledge_evidence_bindings" },
+          { version: 26, name: "historical_hazard_evidence_staging" },
+          { version: 27, name: "receipt_backed_hazard_occurrence_count" },
+          { version: 28, name: "operational_hazard_retry_contract" },
+          { version: 29, name: "historical_attack_knowledge_source_custody" },
+          { version: 30, name: "historical_attack_knowledge_batch_promotion" },
+          { version: 31, name: "legacy_migration_reconciliation_integrity" },
+          { version: 32, name: "historical_migration_settled_source_boundary" },
+          { version: 33, name: "reusable_knowledge_outcomes" },
+          { version: 34, name: "private_source_custody_and_operator_graph" },
+          { version: 35, name: "canonical_database_leases" },
+          { version: 36, name: "vault_provenance_sync_invalidation" },
+          { version: 37, name: "existing_vault_provenance_reconciliation" },
+          { version: 38, name: "startup_readiness_audit_classification" },
+          { version: 39, name: "brain_provenance_source_lookup" },
+          { version: 40, name: "historical_reported_outcomes" },
+          { version: 41, name: "historical_reported_outcome_two_hash_custody" },
+          { version: 42, name: "historical_reported_outcome_projection_lookup" },
+          { version: 43, name: "autonomous_recovery_memory_receipts" },
+          { version: 44, name: "exploit_outcome_observer_specs" },
+          { version: 45, name: "candidate_linux_post_exploit_sessions" },
+          { version: 46, name: "candidate_linux_post_exploit_integrity" },
+          { version: 47, name: "model_assignment_preferences" },
+          { version: 48, name: "provider_turn_agent_binding" },
+          { version: 49, name: "cve_applicability_review_lifecycle" },
+          { version: 50, name: "research_promotion_lifecycle" },
+          { version: 51, name: "plan_change_inflight_resolution" },
+          { version: 52, name: "research_execution_boundary" },
+          { version: 53, name: "research_promotion_decision_fingerprint" },
+          { version: 54, name: "research_execution_integrity" },
+          { version: 55, name: "research_history_integrity" },
+          { version: 56, name: "private_research_holdout_execution" },
+          { version: 57, name: "model_assignment_purpose" },
+          { version: 58, name: "autonomous_activation_receipts" },
+          { version: 59, name: "provider_advisory_disclosure_mode" },
+          { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
         ],
-        currentVersion: 13,
+        currentVersion: 60,
       });
       expect(database.prepare(`
         SELECT DISTINCT status, decision_actor, decision_reason
@@ -559,11 +952,17 @@ describe("Ti-Scale database foundation", () => {
     }
   });
 
-  test("caches the full integrity scan per connection while explicit diagnostics can refresh it", () => {
-    const database = createDatabaseConnection({ filename: ":memory:" });
+  test("uses the startup integrity attestation without running quick_check on health reads", () => {
+    let quickChecks = 0;
+    const database = createDatabaseConnection({
+      filename: ":memory:",
+      integrityChecker(candidate) {
+        quickChecks += 1;
+        return { ok: true, messages: ["ok"] };
+      },
+    });
     try {
       migrateDatabase(database);
-      let quickChecks = 0;
       const wrapped = new Proxy(database, {
         get(target, property, receiver) {
           if (property === "pragma") {
@@ -577,14 +976,89 @@ describe("Ti-Scale database foundation", () => {
         },
       });
 
-      expect(getDatabaseHealth(wrapped).healthy).toBe(true);
-      expect(getDatabaseHealth(wrapped).healthy).toBe(true);
+      // A proxy is a distinct connection identity and therefore cannot borrow
+      // the canonical connection's attestation.
+      expect(getDatabaseHealth(wrapped).healthy).toBe(false);
+      expect(getDatabaseHealth(database).healthy).toBe(true);
+      expect(getDatabaseHealth(database).healthy).toBe(true);
       expect(quickChecks).toBe(1);
-      expect(getDatabaseHealth(wrapped, { refreshIntegrity: true }).healthy).toBe(true);
+      assertDatabaseIntegrity(database, (candidate) => {
+        quickChecks += 1;
+        return candidate.pragma("quick_check")
+          ? { ok: true, messages: ["ok"] }
+          : { ok: false, messages: ["failed"] };
+      });
       expect(quickChecks).toBe(2);
     } finally {
       database.close();
     }
+  });
+
+  test("does not strongly retain transient Bun prepared statements", () => {
+    interface StatementProbe {
+      readonly id: string;
+    }
+    let reachable: StatementProbe | undefined;
+    const registry = new WeakStatementRegistry<StatementProbe>(() => ({
+      deref: () => reachable,
+    }));
+    const statement = { id: "statement-probe" };
+    reachable = statement;
+
+    registry.track(statement);
+    const firstVisit: string[] = [];
+    registry.visitLive((candidate) => firstVisit.push(candidate.id));
+    expect(firstVisit).toEqual(["statement-probe"]);
+    expect(registry.referenceCount).toBe(1);
+
+    // The registry must have no independent path to the statement once its
+    // weak reference reports collection. This models the only lifecycle signal
+    // the production native WeakRef provides, without asserting GC timing.
+    reachable = undefined;
+    const afterCollection: string[] = [];
+    registry.visitLive((candidate) => afterCollection.push(candidate.id));
+    expect(afterCollection).toEqual([]);
+    expect(registry.referenceCount).toBe(0);
+  });
+
+  test("finalizes live Bun statements before reporting the connection closed", () => {
+    if (!("bun" in process.versions)) return;
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    const statement = database.prepare("SELECT 1 AS value");
+
+    expect(statement.get()).toEqual({ value: 1 });
+    expect(database.open).toBe(true);
+    database.close();
+
+    expect(database.open).toBe(false);
+    expect(() => statement.get()).toThrow("Statement has finalized");
+    expect(() => database.close()).not.toThrow();
+  });
+
+  test("closes after transient Bun statements are collected but native disposal is pending", () => {
+    if (!("bun" in process.versions)) return;
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    for (let index = 0; index < 5_000; index += 1) {
+      database.prepare("SELECT 1 AS value").get();
+    }
+    Bun.gc(true);
+
+    expect(() => database.close()).not.toThrow();
+    expect(database.open).toBe(false);
+  });
+
+  test("does not hide an active transaction during Bun connection cleanup", () => {
+    if (!("bun" in process.versions)) return;
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    database.exec("BEGIN IMMEDIATE");
+
+    expect(database.inTransaction).toBe(true);
+    expect(() => database.close()).toThrow("while a transaction is active");
+    expect(database.open).toBe(true);
+
+    database.exec("ROLLBACK");
+    database.close();
+    expect(database.open).toBe(false);
   });
 
   test("creates all canonical runtime, memory, vault, learning, and audit tables", () => {
@@ -807,7 +1281,7 @@ describe("Ti-Scale database foundation", () => {
       `).run(now);
 
       const result = migrateDatabase(database);
-      expect(result.applied.map((migration) => migration.version)).toEqual([6, 7, 8, 9, 10, 11, 12, 13]);
+      expect(result.applied.map((migration) => migration.version)).toEqual([6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
       expect(database.prepare(`
         SELECT comparison_status, reason, prior_run_id, metrics_json
         FROM run_evaluation_comparisons WHERE evaluation_id = 'evaluation-legacy'
@@ -861,7 +1335,7 @@ describe("Ti-Scale database foundation", () => {
       `).run("b".repeat(64), now);
 
       const result = migrateDatabase(database);
-      expect(result.applied.map((migration) => migration.version)).toEqual([7, 8, 9, 10, 11, 12, 13]);
+      expect(result.applied.map((migration) => migration.version)).toEqual([7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
       expect(database.prepare(
         "SELECT journey, record_hash FROM audit_records WHERE id = 'audit-legacy'",
       ).get()).toEqual({ journey: "guided", record_hash: "legacy-record-hash" });
@@ -1035,31 +1509,35 @@ describe("Ti-Scale database foundation", () => {
     }
   });
 
-  test("creates and validates an online backup", async () => {
+  test("fails closed before database or backup-path access", async () => {
     const directory = temporaryDirectory();
-    const source = join(directory, "live.sqlite");
-    const destination = join(directory, "backups", "snapshot.sqlite");
-    const database = createDatabaseConnection({ filename: source });
-    try {
-      migrateDatabase(database);
-      insertMission(database, "mission-backup");
-      const result = await backupDatabase(database, destination);
-      expect(result.destination).toBe(destination);
-      expect(result.totalPages).toBeGreaterThan(0);
+    const backupRoot = join(directory, "must-not-exist");
+    const database = new Proxy({} as ReturnType<typeof createDatabaseConnection>, {
+      get() {
+        throw new Error("database was accessed");
+      },
+    });
 
-      const verification = createDatabaseConnection({
-        filename: destination,
-        readonly: true,
-        fileMustExist: true,
-      });
-      try {
-        const row = verification
-          .prepare("SELECT id FROM missions WHERE id = ?")
-          .get("mission-backup") as { id: string } | undefined;
-        expect(row?.id).toBe("mission-backup");
-      } finally {
-        verification.close();
-      }
+    await expect(backupDatabase(database, join(backupRoot, "snapshot.sqlite")))
+      .rejects.toThrow(DATABASE_BACKUP_DISABLED_ERROR);
+    await expect(createTimestampedBackup(database, backupRoot))
+      .rejects.toThrow(DATABASE_BACKUP_DISABLED_ERROR);
+
+    expect(existsSync(backupRoot)).toBe(false);
+    expect("backupDatabase" in DatabaseBarrel).toBe(false);
+    expect("createTimestampedBackup" in DatabaseBarrel).toBe(false);
+  });
+
+  test("disables the database driver's direct backup method before destination access", async () => {
+    const directory = temporaryDirectory();
+    const databasePath = join(directory, "canonical.sqlite");
+    const destination = join(directory, "must-not-exist", "snapshot.sqlite");
+    const database = createDatabaseConnection({ filename: databasePath });
+    try {
+      await expect(database.backup(destination))
+        .rejects.toThrow(DATABASE_BACKUP_DISABLED_ERROR);
+      expect(existsSync(destination)).toBe(false);
+      expect(existsSync(join(directory, "must-not-exist"))).toBe(false);
     } finally {
       database.close();
     }

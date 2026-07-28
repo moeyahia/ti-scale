@@ -149,7 +149,8 @@ export interface RecoveryMutationRecord {
     kind: "replan" | "reassign" | "change_provider";
     eventId: string; checkpointId: string; continuationId: string | null;
     agentId: string | null; assignmentId: string | null;
-    providerId: string | null; providerRouteVersion: number | null;
+    providerId: string | null; modelId: string | null; modelConfigurationHash: string | null;
+    providerRouteVersion: number | null;
   };
   run: {
     id: string; journey: "autonomous" | "guided"; status: string; version: number;
@@ -171,7 +172,11 @@ export interface RunRecoveryRecord {
     agentId: string; displayName: string; status: "available"; capabilities: string[];
   }>;
   providerCandidates: Array<{
-    providerId: string; status: "healthy"; supportsGuided: boolean; enforcesAutonomousBoundary: boolean;
+    providerId: string; modelId: string | null; modelConfigurationHash: string | null;
+    status: "healthy" | "degraded" | "unhealthy" | "unknown" | "missing";
+    eligibility: "compatible" | "unavailable" | "stale" | "budget_incompatible" | "enforcement_incompatible";
+    enabled: boolean; reason: string;
+    supportsGuided: boolean; enforcesAutonomousBoundary: boolean;
     reportsExactTokenUsage: boolean; reportsExactCostUsage: boolean;
   }>;
   detection: {
@@ -256,6 +261,25 @@ export interface ArtifactRecord {
     remediation: string | null;
     verifiedEvidenceCount: number;
   };
+}
+
+export interface ReportGenerationRecord {
+  schemaVersion: "2.4";
+  reportSchemaVersion: "2.4-report.1";
+  missionId: string;
+  runId: string;
+  reportVersion: number;
+  sourceSnapshotHash: string;
+  snapshotThrough: string;
+  idempotent: true;
+  artifacts: Array<{
+    id: string;
+    format: "markdown" | "json";
+    mediaType: string;
+    contentHash: string;
+    byteSize: number;
+    downloadUrl: string;
+  }>;
 }
 
 export interface ActionRecord {

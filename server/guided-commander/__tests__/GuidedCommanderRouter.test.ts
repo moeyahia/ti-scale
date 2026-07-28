@@ -14,10 +14,18 @@ import {
 import { createDatabaseConnection, migrateDatabase, type SqliteDatabase } from "../../db";
 import { MemoryRepository } from "../../memory";
 import { canonicalJson } from "../../missions/canonical";
+import { fingerprintAction } from "../../supervisor";
 import { GuidedCommanderRepository } from "../GuidedCommanderRepository";
 import { createGuidedCommanderRouter } from "../GuidedCommanderRouter";
 import { createGuidedMemoryCandidateRouter } from "../GuidedMemoryCandidateRouter";
 import { GuidedCommanderService } from "../GuidedCommanderService";
+import { OpenRouterGuidedCommanderPort } from "../OpenRouterGuidedCommanderPort";
+import type {
+  StructuredJsonCall,
+  StructuredJsonProviderClient,
+  StructuredJsonResult,
+} from "../../providers/openrouter";
+import { resolveOpenRouterModelConfiguration } from "../../providers/openrouter";
 import type {
   GuidedCommanderPort,
   GuidedCommanderPortInput,
@@ -25,7 +33,6 @@ import type {
 } from "../types";
 
 const servers: Server[] = [];
-const FINGERPRINT = "a".repeat(64);
 const AUTHORITY_NOW = "2026-07-15T10:00:00.000Z";
 const CONTROL_LEASE_OWNER = "guided-runtime-test";
 const CONTROL_LEASE_TOKEN = "guided-runtime-test-token-00000001";
@@ -44,6 +51,25 @@ const IDS = {
   conversation: "conversation-guided-commander",
   initialMessage: "message-guided-initial",
 };
+const REPRESENTED_ACTION = {
+  actionType: "service_banner",
+  actionClass: "port_service_enumeration",
+  target: "lab.internal",
+  arguments: { target: "lab.internal", ports: [443] },
+  intentSummary: "Inspect the approved service banner",
+  kind: "tool" as const,
+  idempotent: true,
+  destructive: false,
+};
+const REPRESENTED_INTENT = {
+  missionId: IDS.mission,
+  runId: IDS.run,
+  stepId: IDS.step,
+  assignmentId: IDS.assignment,
+  planVersion: 1,
+  ...REPRESENTED_ACTION,
+};
+const FINGERPRINT = fingerprintAction(REPRESENTED_INTENT).hash;
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
@@ -184,6 +210,11 @@ function seedGuidedRuntime(database: SqliteDatabase): void {
       'active', 'verified', 'eng-guided', ?, 'operator-test', ?, ?)
   `).run(IDS.mission, canonicalJson({ target: "lab.internal" }), now, now);
   database.prepare(`
+    INSERT INTO mission_targets (
+      id, mission_id, target, target_type, disposition, normalized_target, created_at
+    ) VALUES ('target-guided-commander', ?, 'lab.internal', 'domain', 'allowed', 'lab.internal', ?)
+  `).run(IDS.mission, now);
+  database.prepare(`
     INSERT INTO agents (
       id, role, display_name, status, version, created_at, updated_at
     ) VALUES (?, 'recon', 'Recon Specialist', 'available', '1', ?, ?)
@@ -210,7 +241,7 @@ function seedGuidedRuntime(database: SqliteDatabase): void {
       assigned_agent_id, created_at, updated_at
     ) VALUES (?, ?, ?, 0, 'Reconnaissance', 'Inspect the approved service',
       'Determine the exposed service without changing it', 'waiting_guided_decision',
-      ?, '[]', 'reconnaissance', 'low', ?, ?, ?)
+      ?, '[]', 'port_service_enumeration', 'low', ?, ?, ?)
   `).run(
     IDS.step,
     IDS.plan,
@@ -232,16 +263,7 @@ function seedGuidedRuntime(database: SqliteDatabase): void {
   `).run(
     IDS.mission,
     canonicalJson({
-      action: {
-        actionType: "service_banner",
-        actionClass: "reconnaissance",
-        target: "lab.internal",
-        arguments: { target: "lab.internal", ports: [443] },
-        intentSummary: "Inspect the approved service banner",
-        kind: "tool",
-        idempotent: true,
-        destructive: false,
-      },
+      action: REPRESENTED_ACTION,
       explanation: "Inspect one approved service without expanding scope.",
       rationale: "A banner can identify the next evidence-led branch.",
       reversibility: "Read-only and reversible.",
@@ -256,14 +278,14 @@ function seedGuidedRuntime(database: SqliteDatabase): void {
       requested_parameters_json, rationale, risk_class, reversibility,
       status, expires_at, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, 'Inspect the approved service', 'low',
-      'Read-only', 'pending', '2026-07-16T10:00:00.000Z', ?)
+      'Read-only', 'pending', '2099-07-16T10:00:00.000Z', ?)
   `).run(
     IDS.decision,
     IDS.mission,
     IDS.run,
     IDS.step,
     FINGERPRINT,
-    canonicalJson({ target: "lab.internal", ports: [443] }),
+    canonicalJson(REPRESENTED_INTENT),
     now,
   );
   database.prepare(`
@@ -707,6 +729,139 @@ describe("Guided Commander durable HTTP boundary", () => {
     }
   });
 
+  test("discards a provider response when its exact Guided decision is rejected in flight", async () => {
+    const port = new DeferredPlanningOnlyPort();
+    const { database, url } = await application(port);
+    try {
+      const pending = fetch(
+        `${url}/api/v2/guided/${IDS.mission}/commander/explain-more`,
+        mutation("guided-in-flight-decision-rejected", actionBody()),
+      );
+      await port.started;
+      expect(port.calls).toHaveLength(1);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM messages").get()).toEqual({ count: 1 });
+
+      database.prepare(`
+        UPDATE guided_decisions SET status = 'rejected', decision_actor = 'operator-test',
+          decision_reason = 'Use another represented step', decided_at = ? WHERE id = ?
+      `).run(AUTHORITY_NOW, IDS.decision);
+      port.releaseAll();
+
+      const response = await pending;
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: "guided_decision_not_pending",
+          humanMessage: expect.stringContaining("stale"),
+          category: "conflict",
+        },
+      });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM messages").get()).toEqual({ count: 1 });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM events WHERE event_type LIKE 'guided.commander.%'
+      `).get()).toEqual({ count: 0 });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM memory_context_items WHERE used = 1
+      `).get()).toEqual({ count: 0 });
+      expect(database.prepare("SELECT status, error_category FROM provider_turns").get())
+        .toEqual({ status: "failed", error_category: "persistence_error" });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM settings
+        WHERE key LIKE 'idempotency.guided-commander.%'
+      `).get()).toEqual({ count: 0 });
+    } finally {
+      port.releaseAll();
+      database.close();
+    }
+  });
+
+  test("rejects ambiguous pending Guided decisions before provider reservation or context retrieval", async () => {
+    const { database, port, url } = await application();
+    try {
+      // Simulate a pre-migration/corrupt store; healthy databases prevent this
+      // structurally, while the runtime boundary must still fail closed.
+      database.prepare("DROP INDEX idx_guided_decisions_one_pending_per_run").run();
+      database.prepare(`
+        INSERT INTO guided_decisions (
+          id, mission_id, run_id, step_id, requested_action_fingerprint,
+          requested_parameters_json, rationale, risk_class, reversibility,
+          status, expires_at, created_at
+        ) VALUES ('decision-guided-duplicate', ?, ?, ?, ?, ?, 'Duplicate fixture',
+          'low', 'Read-only', 'pending', '2099-07-16T10:00:00.000Z', ?)
+      `).run(
+        IDS.mission,
+        IDS.run,
+        IDS.step,
+        FINGERPRINT,
+        canonicalJson(REPRESENTED_INTENT),
+        "2026-07-15T10:00:01.000Z",
+      );
+
+      const response = await fetch(
+        `${url}/api/v2/guided/${IDS.mission}/commander/show-next-step`,
+        mutation("guided-ambiguous-pending-decisions", actionBody()),
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: { code: "guided_pending_decision_conflict", category: "conflict" },
+      });
+      expect(port.calls).toHaveLength(0);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM provider_turns").get()).toEqual({ count: 0 });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM memory_context_packs").get()).toEqual({ count: 0 });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM messages").get()).toEqual({ count: 1 });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM settings
+        WHERE key LIKE 'idempotency.guided-commander.%'
+      `).get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  test("cannot renew a provider reservation after mutation authority is lost", () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    migrateDatabase(database);
+    const repository = new GuidedCommanderRepository(database, {
+      clock: () => new Date(AUTHORITY_NOW),
+    });
+    try {
+      const reserved = repository.reserveProviderMutation({
+        scope: `explain_more:${IDS.mission}`,
+        key: "guided-heartbeat-authority-loss",
+        requestHash: "f".repeat(64),
+        actorId: "operator-test",
+        leaseMs: 30_000,
+        assertMutationAuthority: () => {},
+      });
+      expect(reserved.status).toBe("reserved");
+      if (reserved.status !== "reserved") throw new Error("reservation fixture failed");
+      const before = database.prepare(`
+        SELECT value_json, version, updated_at FROM settings
+        WHERE key LIKE 'idempotency.guided-commander.%'
+      `).get();
+
+      expect(() => repository.renewProviderMutationReservation({
+        scope: `explain_more:${IDS.mission}`,
+        key: "guided-heartbeat-authority-loss",
+        requestHash: "f".repeat(64),
+        ownerToken: reserved.ownerToken,
+        leaseMs: 30_000,
+        assertMutationAuthority: () => {
+          throw new ControlPlaneLeaseError(
+            "lease_fence_invalid",
+            "The provider worker no longer owns this Guided run",
+          );
+        },
+      })).toThrow("no longer owns");
+      expect(database.prepare(`
+        SELECT value_json, version, updated_at FROM settings
+        WHERE key LIKE 'idempotency.guided-commander.%'
+      `).get()).toEqual(before);
+    } finally {
+      database.close();
+    }
+  });
+
   test("requires fresh authority for a memory replay and rechecks it inside the idempotent write transaction", async () => {
     const { database, authority, url } = await memoryApplication();
     const request = mutation("guided-memory-replay-authority", actionBody({
@@ -873,6 +1028,24 @@ describe("Guided Commander durable HTTP boundary", () => {
         SELECT used, influence_summary FROM memory_context_items
         WHERE context_pack_id = ? AND node_id = 'memory-guided-explanation'
       `).get(first.result.contextPackId)).toMatchObject({ used: 1, influence_summary: expect.any(String) });
+      expect(database.prepare(`
+        SELECT used, influence_summary, ignored_reason FROM memory_context_items
+        WHERE context_pack_id = ? AND node_id = 'memory-guided-local-only'
+      `).get(first.result.contextPackId)).toEqual({
+        used: 0,
+        influence_summary: null,
+        ignored_reason: "Memory was withheld from the public provider by the disclosure policy",
+      });
+      const briefingAudit = database.prepare(`
+        SELECT details_json FROM audit_records
+        WHERE action = 'brain.context_hook.invoked' AND resource_id = ?
+      `).get(first.result.contextPackId) as { details_json: string };
+      expect(JSON.parse(briefingAudit.details_json)).toMatchObject({
+        hook: "guided_briefing",
+        status: "ready",
+        contextPackId: first.result.contextPackId,
+        availabilityPolicy: "degraded_allowed",
+      });
       const transcript = await responseJson(await fetch(
         `${url}/api/v2/guided/${IDS.mission}/commander/transcript?runId=${IDS.run}`,
       ));
@@ -883,6 +1056,38 @@ describe("Guided Commander durable HTTP boundary", () => {
         "operator",
         "assistant",
       ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  test("rejects a provider claim that it used memory withheld by disclosure policy", async () => {
+    const { database, port, url } = await application();
+    port.response = () => ({
+      body: "A response that must not be committed.",
+      summary: "Invalid memory attribution",
+      confidence: 0.7,
+      contextUse: [{
+        nodeId: "memory-guided-local-only",
+        used: true,
+        relevanceReason: "Claimed use of private local-only memory",
+        influenceSummary: "This must be rejected because the node was never disclosed",
+      }],
+    });
+    try {
+      const response = await fetch(
+        `${url}/api/v2/guided/${IDS.mission}/commander/explain-more`,
+        mutation("guided-withheld-memory-attribution", actionBody()),
+      );
+      expect(response.status).toBe(502);
+      expect(await response.json()).toMatchObject({
+        error: { code: "invalid_guided_context_use", category: "provider_unavailable" },
+      });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM messages").get()).toEqual({ count: 1 });
+      expect(database.prepare("SELECT status FROM provider_turns").get()).toEqual({ status: "failed" });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM memory_context_items WHERE used = 1
+      `).get()).toEqual({ count: 0 });
     } finally {
       database.close();
     }
@@ -1417,7 +1622,31 @@ describe("Guided Commander durable HTTP boundary", () => {
         })),
       );
       expect(sensitive.status).toBe(422);
-      expect(await sensitive.json()).toMatchObject({ error: { code: "sensitive_material_not_retained" } });
+      expect(await sensitive.json()).toMatchObject({
+        error: {
+          code: "sensitive_material_not_retained",
+          humanMessage: expect.stringContaining("authentication material"),
+          retryable: false,
+          category: "policy_denied",
+          remediation: "Remove the secret and reference the protected credential by an opaque identifier instead.",
+          traceId: expect.any(String),
+        },
+      });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM memory_candidates WHERE title = 'Unsafe candidate'
+      `).get()).toEqual({ count: 0 });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM audit_records
+        WHERE action = 'memory.candidate_created'
+          AND resource_id IN (SELECT id FROM memory_candidates WHERE title = 'Unsafe candidate')
+      `).get()).toEqual({ count: 0 });
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM events
+        WHERE event_type = 'memory.candidate_created'
+          AND json_extract(payload_json, '$.candidateId') IN (
+            SELECT id FROM memory_candidates WHERE title = 'Unsafe candidate'
+          )
+      `).get()).toEqual({ count: 0 });
     } finally {
       database.close();
     }
@@ -1453,6 +1682,131 @@ describe("Guided Commander durable HTTP boundary", () => {
         .toEqual({ status: "pending" });
       expect(database.prepare("SELECT COUNT(*) AS count FROM actions").get()).toEqual({ count: 0 });
       expect(database.prepare("SELECT COUNT(*) AS count FROM tool_calls").get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  test("accepts the OpenRouter planning-only adapter without granting tool or plan authority", async () => {
+    const calls: StructuredJsonCall<unknown>[] = [];
+    const client: StructuredJsonProviderClient = {
+      async callStructuredJson<T>(input: StructuredJsonCall<T>): Promise<StructuredJsonResult<T>> {
+        calls.push(input as StructuredJsonCall<unknown>);
+        const value = input.response.validate({
+          body: "The current step gathers one read-only service observation and remains paused for your decision.",
+          summary: "Explained the exact represented step through OpenRouter",
+          confidence: 0.93,
+          observations: ["No action was executed"],
+          recommendedNextStep: "Review the unchanged represented action card.",
+          contextUse: [{
+            nodeId: "memory-guided-explanation",
+            used: true,
+            relevanceReason: "The confirmed preference applies to this explanation",
+            influenceSummary: "Kept the explanation concise and evidence-led",
+            ignoredReason: "The memory was used, so it was not ignored",
+          }],
+        });
+        return {
+          value,
+          providerId: "openrouter",
+          requestedModel: input.model,
+          returnedModel: "openai/gpt-5.4-mini-20260701",
+          usage: {
+            inputTokens: 10,
+            outputTokens: 5,
+            providerTokens: 15,
+            billedCostUsd: 0.0001,
+            exactTokenUsage: true,
+            exactCostUsage: true,
+          },
+          exposure: input.exposure,
+        };
+      },
+    };
+    const configuration = resolveOpenRouterModelConfiguration({ model: "openai/gpt-5.4-mini" });
+    const port = new OpenRouterGuidedCommanderPort({
+      client,
+      configuration,
+      readinessAttestation: {
+        schemaVersion: "ti-scale.openrouter-model-attestation.v2",
+        providerId: "openrouter",
+        model: configuration.model,
+        modelConfigurationHash: configuration.configurationHash,
+        authenticated: true,
+        keyEligibility: "verified_completion_key",
+        metadataSupportsGuided: true,
+        callable: true,
+        callabilityVerification: "audited_content_free_completion",
+        supportsGuided: true,
+        enforcesAutonomousBoundary: false,
+        reportsExactTokenUsage: true,
+        reportsExactCostUsage: true,
+        contextLength: 128_000,
+        supportedParameters: ["response_format", "structured_outputs", "tool_choice", "tools"],
+        pricing: {
+          promptUsdPerToken: "0.000001",
+          completionUsdPerToken: "0.000002",
+          provenance: "advertised_model_metadata",
+        },
+        completionProbeReceiptId: "exposure-readiness-router-test",
+        attestedAt: AUTHORITY_NOW,
+        expiresAt: "2026-07-15T10:05:00.000Z",
+        latencyMs: 10,
+      },
+      now: () => new Date(AUTHORITY_NOW),
+    });
+    const { database, url } = await application(port);
+    try {
+      const response = await fetch(
+        `${url}/api/v2/guided/${IDS.mission}/commander/explain-more`,
+        mutation("guided-openrouter-compatibility-0001", actionBody()),
+      );
+      expect(response.status).toBe(200);
+      const body = await responseJson(response);
+      expect(body.result.assistantMessage).toMatchObject({
+        body: expect.stringContaining("remains paused"),
+        structuredContent: {
+          executionPerformed: false,
+          planMutated: false,
+          nextConsequentialActionRequiresDecision: true,
+        },
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        model: "openai/gpt-5.4-mini",
+        exposure: {
+          exposureReceiptId: expect.stringMatching(/^exposure_/u),
+          contextPackId: expect.any(String),
+        },
+      });
+      expect(database.prepare(`
+        SELECT provider, model, returned_model, status, input_tokens,
+          output_tokens, total_tokens, billed_cost_usd, exact_token_usage,
+          exact_cost_usage, latency_ms
+        FROM provider_turns
+      `).get()).toEqual({
+        provider: "openrouter",
+        model: "openai/gpt-5.4-mini",
+        returned_model: "openai/gpt-5.4-mini-20260701",
+        status: "completed",
+        input_tokens: 10,
+        output_tokens: 5,
+        total_tokens: 15,
+        billed_cost_usd: 0.0001,
+        exact_token_usage: 1,
+        exact_cost_usage: 1,
+        latency_ms: expect.any(Number),
+      });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM provider_exposure_receipts").get())
+        .toEqual({ count: 1 });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM actions").get()).toEqual({ count: 0 });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM tool_calls").get()).toEqual({ count: 0 });
+      expect(database.prepare("SELECT status FROM runs WHERE id = ?").get(IDS.run))
+        .toEqual({ status: "waiting_guided_decision" });
+      expect(database.prepare("SELECT status FROM plans WHERE id = ?").get(IDS.plan))
+        .toEqual({ status: "active" });
+      expect(database.prepare("SELECT status FROM guided_decisions WHERE id = ?").get(IDS.decision))
+        .toEqual({ status: "pending" });
     } finally {
       database.close();
     }

@@ -215,6 +215,67 @@ describe("ControlPlaneLeaseService", () => {
     }
   });
 
+  test("an old controller may release only its exact lease after either ownership split", () => {
+    for (const split of ["mission", "run"] as const) {
+      const runId = `run-release-after-${split}-transfer`;
+      const database = databaseWithRun(runId);
+      try {
+        const service = new ControlPlaneLeaseService(database);
+        const acquired = service.acquire({
+          runId,
+          controlPlane: "ti_scale",
+          leaseOwner: "v2-worker-a",
+          now: new Date("2026-07-16T12:00:00.000Z"),
+        });
+        if (split === "mission") {
+          database.prepare("UPDATE missions SET control_plane = 'legacy' WHERE id = ?")
+            .run(`mission-${runId}`);
+        } else {
+          database.prepare("UPDATE runs SET control_plane = 'legacy' WHERE id = ?")
+            .run(runId);
+        }
+        const missionBefore = database.prepare("SELECT * FROM missions WHERE id = ?")
+          .get(`mission-${runId}`);
+        const runBefore = database.prepare("SELECT * FROM runs WHERE id = ?").get(runId);
+
+        expectLeaseCode(() => service.assertMutationAuthority({
+          runId,
+          controlPlane: "ti_scale",
+          leaseOwner: "v2-worker-a",
+          leaseToken: acquired.leaseToken!,
+          now: new Date("2026-07-16T12:00:01.000Z"),
+        }), "control_plane_mismatch");
+        expectLeaseCode(() => service.release({
+          runId,
+          controlPlane: "ti_scale",
+          leaseOwner: "v2-worker-a",
+          leaseToken: "another-controller-token",
+          now: new Date("2026-07-16T12:00:01.000Z"),
+        }), "lease_token_invalid");
+        service.release({
+          runId,
+          controlPlane: "ti_scale",
+          leaseOwner: "v2-worker-a",
+          leaseToken: acquired.leaseToken!,
+          now: new Date("2026-07-16T12:00:01.000Z"),
+        });
+
+        expect(database.prepare("SELECT * FROM missions WHERE id = ?")
+          .get(`mission-${runId}`)).toEqual(missionBefore);
+        expect(database.prepare("SELECT * FROM runs WHERE id = ?").get(runId))
+          .toEqual(runBefore);
+        expect(database.prepare(`
+          SELECT released_at, version FROM control_plane_leases WHERE run_id = ?
+        `).get(runId)).toEqual({
+          released_at: "2026-07-16T12:00:01.000Z",
+          version: 2,
+        });
+      } finally {
+        database.close();
+      }
+    }
+  });
+
   test("never creates authority for a missing run or a legacy-owned run", () => {
     const database = databaseWithRun("run-legacy-control", "legacy");
     try {

@@ -35,6 +35,75 @@ function nodeInput(evidenceId: string) {
 }
 
 describe("evidence-backed recon digital twin", () => {
+  test("allows only exact-run observations to source unverified topology", () => {
+    const database = createTestDatabase();
+    try {
+      const insertObservation = (
+        id: string,
+        runId: string,
+        verificationState: "unverified" | "stale" = "unverified",
+      ) => database.prepare(`
+        INSERT INTO observations (
+          id, mission_id, run_id, observation_type, statement,
+          normalized_value_json, confidence, verification_state,
+          source_agent_id, source_tool, first_seen_at, last_seen_at,
+          sensitivity, created_at
+        ) VALUES (?, ?, ?, 'tcp_service_scan', 'Parsed one reviewed service scan',
+          '{}', 0.85, ?, ?, 'kali:nmap-tcp-connect-service-scan', ?, ?,
+          'internal', ?)
+      `).run(id, MISSION_ID, runId, verificationState, AGENT_ONE_ID, NOW, NOW, NOW);
+      insertObservation("observation-topology-current", RUN_ID);
+      insertObservation("observation-topology-stale", RUN_ID, "stale");
+      database.prepare(`
+        INSERT INTO runs (
+          id, mission_id, journey, status, progress, budget_json,
+          budget_usage_json, created_at, updated_at, version
+        ) VALUES ('run-intelligence-second', ?, 'autonomous', 'running', 0,
+          '{}', '{}', ?, ?, 1)
+      `).run(MISSION_ID, NOW, NOW);
+      insertObservation("observation-topology-other-run", "run-intelligence-second");
+      const twin = new ReconDigitalTwinService(database, () => new Date(NOW));
+      const observationInput = (observationId: string, normalizedIdentity: string) => ({
+        ...nodeInput("unused-observation-source"),
+        normalizedIdentity,
+        verificationState: "unverified" as const,
+        evidence: [],
+        provenance: {
+          method: "reviewed_local_nmap_observation",
+          sourceRef: observationId,
+          sourceAgentId: AGENT_ONE_ID,
+          sourceTool: "kali:nmap-tcp-connect-service-scan",
+          observationIds: [observationId],
+        },
+      });
+
+      const node = twin.createNode(observationInput(
+        "observation-topology-current",
+        "run-scoped-observation-node",
+      ));
+      expect(node).toMatchObject({
+        runId: RUN_ID,
+        verificationState: "unverified",
+        evidence: [],
+        provenance: { observationIds: ["observation-topology-current"] },
+      });
+      expect(() => twin.createNode({
+        ...observationInput("observation-topology-current", "verified-without-evidence"),
+        verificationState: "verified",
+      })).toThrow("requires canonical evidence");
+      expect(() => twin.createNode(observationInput(
+        "observation-topology-other-run",
+        "cross-run-observation-node",
+      ))).toThrow("outside the exact mission and run scope");
+      expect(() => twin.createNode(observationInput(
+        "observation-topology-stale",
+        "stale-observation-node",
+      ))).toThrow("only explicitly stale topology");
+    } finally {
+      database.close();
+    }
+  });
+
   test("requires scoped evidence, bounded confidence, and attributable provenance", () => {
     const database = createTestDatabase();
     try {

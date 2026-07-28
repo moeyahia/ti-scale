@@ -83,7 +83,7 @@ const SECRET_PATTERNS: readonly {
   },
   {
     action: "authorization_redacted",
-    pattern: /\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+[^\s,;]+/giu,
+    pattern: /\b(?:authorization|proxy-authorization)\s*:?\s*(?:bearer|basic)\s+[^\s,;]+/giu,
     replacement: "Authorization: [REDACTED]",
   },
   {

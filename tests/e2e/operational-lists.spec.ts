@@ -101,11 +101,18 @@ test(`${TEST_IDS.agents} traverses canonical agent pages and a stable profile li
   await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload({ waitUntil: "domcontentloaded" }));
   expect((await reloadedDetail).status()).toBe(200);
   await expect(page.getByRole("heading", { level: 2, name: fixture.agentNames[0], exact: true })).toBeVisible();
+  const returnedListResponse = apiResponse(page, "/api/v2/agents", (url) => (
+    url.searchParams.get("query") === fixture.token
+    && url.searchParams.get("limit") === "25"
+    && !url.searchParams.has("cursor")
+  ));
   await returnThroughHistory(page, audit, agentListUrl);
+  await expectPage(await returnedListResponse, 25, true);
   await expect(page.getByRole("link", {
     name: `Open agent ${fixture.agentNames[0]} (${fixture.agentIds[0]})`,
     exact: true,
   })).toBeVisible();
+  await audit.waitForPageApiSettlement(page, { quietMs: 1_000 });
   await strictAudit(audit, testInfo);
 });
 
@@ -178,7 +185,7 @@ test(`${TEST_IDS.reports} traverses canonical report pages and a stable detail l
   expect((await detailResponse).status()).toBe(200);
   await expect.poll(() => new URL(page.url()).pathname).toBe(`/reports/${fixture.reportIds[0]}`);
   await expect(page.getByRole("heading", { level: 2, name: fixture.reportTypes[0], exact: true })).toBeVisible();
-  await expect(page.getByText(/Direct download requires a separate authorized artifact-delivery contract\.$/u)).toBeVisible();
+  await expect(page.getByText(/historical report has metadata only and no canonical report-download adapter\.$/u)).toBeVisible();
   const reloadedDetail = apiResponse(page, `/api/v2/reports/${fixture.reportIds[0]}`);
   await audit.withExpectedDocumentNavigationTeardown(page, () => page.reload({ waitUntil: "domcontentloaded" }));
   expect((await reloadedDetail).status()).toBe(200);

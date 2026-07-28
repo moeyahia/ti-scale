@@ -10,15 +10,27 @@ import { RunCockpit } from "../runs/RunWorkspacePage";
 import { DegradedNotice, formatTime, JsonDetails, percent, QueryBoundary, SelectFilter, StreamState, useUrlFilters } from "../runs/OperationalSurface";
 import { GuidedCommanderPanel } from "./GuidedCommanderPanel";
 import { operatorText } from "../../lib/operatorLanguage";
+import { guidedRuntimeCapabilities } from "../../domain/guidedRuntimeCapabilities";
+
+const GUIDED_RUN_STATES = [
+  "planning", "running", "waiting_guided_decision", "blocked", "recovering", "completed", "failed", "cancelled",
+] as const;
 
 export default function GuidedWorkspacePage({ missionId }: { missionId?: string }) { return missionId ? <GuidedMission missionId={missionId} /> : <GuidedPortfolio />; }
 
 function GuidedPortfolio() {
-  const filters = useUrlFilters(); const query = useQuery("guided-runs", (signal) => fetchJourneyRuns("guided", signal), { staleTime: 0 }); const stream = useEventStream();
+  const filters = useUrlFilters();
+  const selectedStatus = GUIDED_RUN_STATES.find((status) => status === filters.values.status);
+  const query = useQuery(
+    `guided-runs:${selectedStatus ?? "operational"}`,
+    (signal) => fetchJourneyRuns("guided", selectedStatus ? { status: selectedStatus } : {}, signal),
+    { staleTime: 0 },
+  );
+  const stream = useEventStream();
   useEffect(() => { if (stream.lastEvent?.journey === "guided") query.refresh(); }, [stream.lastEvent?.id]);
-  const runs = query.data?.runs.filter((run) => !filters.values.status || run.status === filters.values.status);
+  const runs = query.data?.runs;
   return <div className="os-page"><PageHeader eyebrow="Collaborative mission control" title="Guided Workspace" description="Explain, recommend, choose, observe, interpret, record, and advance—one deliberate consequential step at a time." actions={<><StreamState /><ButtonLink href="/missions/new/guided">Start Guided Mission</ButtonLink></>} />
-    <div className="os-filter-bar"><SelectFilter filters={filters} name="status" label="Checkpoint state" options={["planning", "running", "waiting_guided_decision", "blocked", "recovering", "completed", "failed", "cancelled"].map((value) => ({ value, label: value }))} /></div>{query.data?.failures.length ? <DegradedNotice>{query.data.failures.length} Guided mission projection{query.data.failures.length === 1 ? " is" : "s are"} unavailable.</DegradedNotice> : null}
+    <div className="os-filter-bar"><SelectFilter filters={filters} name="status" label="Checkpoint state" options={GUIDED_RUN_STATES.map((value) => ({ value, label: value }))} /></div>{query.data?.failures.length ? <DegradedNotice>{query.data.failures.length} Guided mission projection{query.data.failures.length === 1 ? " is" : "s are"} unavailable.</DegradedNotice> : null}
     <QueryBoundary data={runs} error={query.error} isLoading={query.isLoading} onRetry={query.refresh} emptyTitle="No Guided missions match" emptyDescription="Start a Guided mission or change the checkpoint filter.">{(items) => <div className="os-operation-list">{items.map((run) => <Card key={run.id}><div className="os-operation-main"><div><p className="os-eyebrow">{run.status === "waiting_guided_decision" ? "Waiting for your deliberate step" : run.currentOwnerId ?? "Commander"}</p><h2 aria-label={run.missionName}><AppLink href={`/guided/${encodeURIComponent(run.missionId)}`} aria-label={`Open Guided mission ${run.missionName} (${run.missionId})`}>{run.missionName}</AppLink></h2><p>{run.objective}</p></div><StatusPill status={run.status} /></div><div className="os-operation-metrics"><span><small>Progress</small>{percent(run.progress)}</span><span><small>Checkpoint</small>{run.currentStepId ?? "Planning"}</span><span><small>Last activity</small>{formatTime(run.updatedAt)}</span><span title={run.nextAction ?? undefined}><small>Next</small>{operatorText(run.nextAction, { kind: "next_action", agent: run.currentOwnerId }, "Awaiting plan")}</span></div></Card>)}</div>}</QueryBoundary>
   </div>;
 }
@@ -29,6 +41,7 @@ function GuidedMission({ missionId }: { missionId: string }) {
   const run = mission.data?.runs.find((item) => !["completed", "failed", "cancelled"].includes(item.status)) ?? mission.data?.runs[0];
   const plans = useQuery(`guided-plans:${run?.id ?? "none"}`, (signal) => run ? runtimeV2Api.plans(run.id, signal) : Promise.resolve(undefined), { staleTime: 0 });
   const decisions = useQuery(`guided-current-decision:${run?.id ?? "none"}`, (signal) => run ? runtimeV2Api.decisions({ runId: run.id, status: "pending", limit: 10 }, signal) : Promise.resolve(undefined), { staleTime: 0 });
+  const capabilities = guidedRuntimeCapabilities(readiness.data);
   if (mission.isLoading) return <div className="os-page"><LoadingPanel label="Loading Guided checkpoint" /></div>; if (mission.error && !mission.data) return <div className="os-page"><ErrorPanel error={mission.error} onRetry={mission.refresh} /></div>; if (!mission.data) return null;
   const currentPlan = plans.data?.items.find((plan) => plan.id === run?.currentPlanId) ?? plans.data?.items[0]; const currentStep = currentPlan?.steps.find((step) => step.id === run?.currentStepId) ?? currentPlan?.steps.find((step) => !["completed", "cancelled"].includes(step.status));
   return <div className="os-page os-guided-mission-page"><PageHeader eyebrow="Guided mission" title={mission.data.mission.name} description={mission.data.mission.objective} actions={<><StatusPill status={run?.status ?? "not_started"} /><StreamState /></>} />
@@ -47,7 +60,7 @@ function GuidedMission({ missionId }: { missionId: string }) {
       <section className="os-guided-conversation-column" aria-label="Guided Commander conversation"><GuidedCommanderPanel
         missionId={missionId}
         runId={run.id}
-        executionAvailable={readiness.data?.execution.guided === "ready"}
+        capabilities={capabilities}
         availabilityPending={readiness.isLoading}
         onAdvanced={() => { mission.refresh(); plans.refresh(); decisions.refresh(); }}
       /></section>
@@ -58,7 +71,8 @@ function GuidedMission({ missionId }: { missionId: string }) {
         {decisions.data?.items.map((decision) => <DecisionCard
           key={decision.id}
           decision={decision}
-          runtimeAvailable={readiness.data?.execution.guided === "ready"}
+          runtimeAvailable={capabilities.decisionMutations}
+          toolExecutionAvailable={capabilities.toolDispatch}
           availabilityPending={readiness.isLoading}
           onChanged={() => { decisions.refresh(); mission.refresh(); plans.refresh(); }}
         />)}

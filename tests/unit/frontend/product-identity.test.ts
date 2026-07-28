@@ -60,9 +60,10 @@ describe("Ti-Scale product identity", () => {
     }
   });
 
-  test("uses standalone namespaces and the Ti-Scale vault path", () => {
+  test("uses standalone namespaces and attack-centric vault guidance", () => {
     expect(TI_SCALE_BROWSER_NAMESPACE).toBe("ti-scale");
     expect(source("../../../src/data/api/client.ts")).toContain("ti_scale_csrf=");
-    expect(source("../../../src/features/brain/BrainVaultPage.tsx")).toContain('placeholder="Ti-Scale-Brain"');
+    expect(source("../../../src/features/brain/BrainVaultPage.tsx")).toContain("Attack Knowledge Vault");
+    expect(source("../../../src/features/brain/BrainVaultPage.tsx")).toContain('placeholder="Custom-Research-Vault"');
   });
 });

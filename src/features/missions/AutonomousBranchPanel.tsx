@@ -6,16 +6,30 @@ import {
   fetchMissionIntakeRegistry,
   preflightAutonomousBranch,
 } from "../../data/api/commandOs";
+import { fetchModelCatalog } from "../../data/api/modelConfiguration";
 import { useQuery, useQueryCache } from "../../data/cache/QueryProvider";
 import { runtimeV2Api } from "../../data/api/runtimeV2";
 import type {
   AutonomousBranchMode,
   AutonomousBranchPreflight,
+  AutonomousAgentModelAssignment,
   AutonomousMissionRequest,
+  AutonomousPlanningSelection,
 } from "../../domain/types/commandOs";
 import type { ActionPolicyState, IntakeRegistrySnapshot } from "../../domain/types/intake";
 import type { RuntimeRun } from "../../domain/types/runtimeV2";
 import { Button, Card, ErrorPanel, LoadingPanel, StatusPill } from "../../design-system/components/Primitives";
+import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
+import {
+  MissionAgentModelAssignmentReview,
+  MissionAgentModelAssignments,
+} from "./MissionAgentModelAssignments";
+import {
+  AutonomousPlanningSelectionEditor,
+  AutonomousPlanningSelectionReview,
+} from "./AutonomousPlanningSelection";
+import { resolvedPlanningSelection } from "./autonomousPlanningSelectionState";
+import { filterAgentModelAssignments } from "./missionModelAssignmentState";
 import { KeyValueGrid, useActionState } from "../runs/OperationalSurface";
 import {
   projectAutonomousRegistryFields,
@@ -46,6 +60,8 @@ interface AmendmentForm {
   evidenceStorageBudgetMb: string;
   artifactStorageBudgetMb: string;
   specialistAgentIds: string;
+  agentModelAssignments: readonly AutonomousAgentModelAssignment[];
+  planningSelection: AutonomousPlanningSelection;
   memoryScopes: string;
   contextNodeIds: string;
   registryFields: AutonomousBranchRegistryFields;
@@ -72,6 +88,12 @@ function formFromRequest(request: AutonomousMissionRequest, registry: IntakeRegi
     evidenceStorageBudgetMb: String(request.contract.evidenceStorageBudgetBytes / (1024 * 1024)),
     artifactStorageBudgetMb: String(request.contract.artifactStorageBudgetBytes / (1024 * 1024)),
     specialistAgentIds: request.contract.specialistAgentIds.join("\n"),
+    agentModelAssignments: request.contract.agentModelAssignments.map((assignment) => ({
+      ...assignment,
+    })),
+    planningSelection: resolvedPlanningSelection(
+      request.contract.planningSelection,
+    ),
     memoryScopes: request.contract.memoryScopes.join("\n"),
     contextNodeIds: request.contract.contextNodeIds.join("\n"),
     registryFields: registryFieldsFromAutonomousRequest(request, registry),
@@ -96,6 +118,7 @@ function requestFromForm(
     objective: form.objective.trim(),
     successCriteria: lines(form.successCriteria),
     authorization: {
+      ...base.authorization,
       allowedTargets: lines(form.allowedTargets),
       prohibitedTargets: lines(form.prohibitedTargets),
       authorizationConfirmed: true,
@@ -117,6 +140,10 @@ function requestFromForm(
       evidenceStorageBudgetBytes: numberValue(form.evidenceStorageBudgetMb) * 1024 * 1024,
       artifactStorageBudgetBytes: numberValue(form.artifactStorageBudgetMb) * 1024 * 1024,
       specialistAgentIds: lines(form.specialistAgentIds),
+      agentModelAssignments: form.agentModelAssignments.map((assignment) => ({
+        ...assignment,
+      })),
+      planningSelection: form.planningSelection,
       memoryScopes: lines(form.memoryScopes),
       contextNodeIds: lines(form.contextNodeIds),
     },
@@ -132,7 +159,15 @@ function UnmappedRegistryValues({ label, values }: { readonly label: string; rea
   return <div className="os-validation-summary" role="status"><strong>{label}</strong><p>These historical contract values are not present in the current runtime registry. They remain preserved for server readiness reconciliation and cannot be newly selected here.</p><ul>{values.map((value) => <li key={value} className="os-mono">{value}</li>)}</ul></div>;
 }
 
-function ReadinessReview({ review }: { review: AutonomousBranchPreflight }) {
+function ReadinessReview({
+  review,
+  agents,
+  catalog,
+}: {
+  readonly review: AutonomousBranchPreflight;
+  readonly agents: readonly { id: string; displayName: string; role: string }[];
+  readonly catalog?: import("../../domain/types/modelConfiguration").ModelCatalog;
+}) {
   return <Card className="os-branch-review">
     <div className="os-card-heading"><div><p className="os-eyebrow">Server-issued review</p><h3>Contract v{review.contract.version}</h3></div><StatusPill status={review.preflight.readiness.status} /></div>
     <p className="os-mono os-branch-hash">SHA-256 {review.contract.hash}</p>
@@ -143,6 +178,19 @@ function ReadinessReview({ review }: { review: AutonomousBranchPreflight }) {
       { label: "Context selected", value: review.preflight.context.selectedNodeIds.length },
     ]} />
     <ul className="os-compact-list">{review.preflight.readiness.checks.map((check) => <li key={check.id}><span><strong>{check.label}</strong><small>{check.impact}{check.remediation ? ` · ${check.remediation}` : ""}</small></span><StatusPill status={check.status} /></li>)}</ul>
+    <MissionAgentModelAssignmentReview
+      title="Exact branch model assignments"
+      assignments={review.request.contract.agentModelAssignments}
+      receipts={review.preflight.execution.team.modelAssignments}
+      agents={agents}
+    />
+    <AutonomousPlanningSelectionReview
+      selection={review.request.contract.planningSelection}
+      catalog={catalog}
+      readinessCheck={review.preflight.readiness.checks.find(
+        ({ id }) => id === "contract_planning_selection",
+      )}
+    />
   </Card>;
 }
 
@@ -158,6 +206,11 @@ export function AutonomousBranchPanel({ missionId, selectedRun }: { missionId: s
     "mission-intake:autonomous:custom",
     (signal) => fetchMissionIntakeRegistry("autonomous", "custom", signal),
     { staleTime: 30_000 },
+  );
+  const modelCatalog = useQuery(
+    "model-catalog",
+    fetchModelCatalog,
+    { staleTime: 5_000 },
   );
   const control = useActionState();
   const [mode, setMode] = useState<AutonomousBranchMode>("unchanged_contract");
@@ -193,6 +246,18 @@ export function AutonomousBranchPanel({ missionId, selectedRun }: { missionId: s
     setForm((current) => current ? { ...current, [key]: value } : current);
   };
   const updateRegistryFields = (fields: AutonomousBranchRegistryFields) => updateForm("registryFields", fields);
+  const updateSpecialistIds = (value: string) => {
+    invalidateReview();
+    const selectedAgentIds = lines(value);
+    setForm((current) => current ? {
+      ...current,
+      specialistAgentIds: value,
+      agentModelAssignments: filterAgentModelAssignments(
+        current.agentModelAssignments,
+        selectedAgentIds,
+      ) ?? [],
+    } : current);
+  };
   const refreshRuntime = () => {
     cache.invalidatePrefix("mission-runtime:");
     cache.invalidatePrefix("run:");
@@ -257,8 +322,16 @@ export function AutonomousBranchPanel({ missionId, selectedRun }: { missionId: s
         review: { version: review.contract.version, hash: review.contract.hash },
       }, createKey.current);
       cache.invalidate("ti-scale-overview");
-      cache.invalidatePrefix("mission-runtime:");
-      cache.invalidatePrefix("run:");
+      cache.invalidate(`run:${result.run.id}`);
+      // Establish the exact mission projection before handing the same query
+      // key from the source route to the successor route. A failed projection
+      // must not repeat the already-successful branch mutation; the successor
+      // workspace performs its own bounded authoritative retry.
+      await cache.reconcile(
+        `mission-runtime:${missionId}`,
+        (signal) => runtimeV2Api.mission(missionId, signal),
+        0,
+      ).catch(() => undefined);
       navigation.navigate(safeNextUrl(
         result.nextUrl,
         `/missions/${encodeURIComponent(missionId)}/runs/${encodeURIComponent(result.run.id)}`,
@@ -273,7 +346,17 @@ export function AutonomousBranchPanel({ missionId, selectedRun }: { missionId: s
   if (context.isLoading) return <LoadingPanel label="Loading signed Autonomous contract history" />;
   if (context.error && !context.data) return <ErrorPanel title="Contract branch controls are unavailable" error={context.error} onRetry={context.refresh} />;
   if (!context.data) return null;
-  const source = context.data.sourceRun;
+  const branchContext = context.data;
+  const source = branchContext.sourceRun;
+  const branchAgentIds = lines(form?.specialistAgentIds ?? branchContext.request.contract.specialistAgentIds.join("\n"));
+  const branchAgents = branchAgentIds.map((agentId) => {
+    const candidate = review?.preflight.execution.team.candidates.find((item) => item.id === agentId);
+    return {
+      id: agentId,
+      displayName: candidate?.displayName ?? agentId,
+      role: candidate?.role ?? "Selected specialist",
+    };
+  });
   const canPause = !TERMINAL.has(source.status) && source.status !== "blocked";
   const canCancel = !TERMINAL.has(source.status);
   const readinessReady = Boolean(review && review.preflight.readiness.status !== "blocked" && !review.preflight.readiness.checks.some((check) => check.status === "fail"));
@@ -327,7 +410,7 @@ export function AutonomousBranchPanel({ missionId, selectedRun }: { missionId: s
           <label><span>Prohibited targets · one per line</span><textarea rows={4} value={form.prohibitedTargets} onChange={(event) => updateForm("prohibitedTargets", event.target.value)} /></label>
           <label><span>Authorization time window</span><input value={form.timeWindow} onChange={(event) => updateForm("timeWindow", event.target.value)} /></label>
           <label><span>Data-handling constraint</span><input value={form.dataHandling} onChange={(event) => updateForm("dataHandling", event.target.value)} /></label>
-          <label><span>Destructive-action policy</span><select value={form.destructivePolicy} onChange={(event) => updateForm("destructivePolicy", event.target.value as AmendmentForm["destructivePolicy"])}><option value="prohibited">Prohibited</option><option value="validate_without_executing">Validate the path without executing</option><option value="bounded_lab_only">Named disposable lab targets only</option></select></label>
+          <label><span>Destructive-action policy</span><TitaniumSelect value={form.destructivePolicy} onChange={(event) => updateForm("destructivePolicy", event.target.value as AmendmentForm["destructivePolicy"])}><option value="prohibited">Prohibited</option><option value="validate_without_executing">Validate the path without executing</option><option value="bounded_lab_only">Named disposable lab targets only</option></TitaniumSelect></label>
           {form.destructivePolicy === "bounded_lab_only" && <fieldset className="os-registry-checklist is-wide"><legend>Named bounded destructive targets</legend><p className="os-policy-note">Only exact targets already present in this signed authorization boundary can be selected.</p>{lines(form.allowedTargets).map((target) => <label className="os-check-field" key={target}><input type="checkbox" aria-label={`Bound destructive activity to ${target}`} checked={form.boundedDestructiveTargets.includes(target)} onChange={(event) => updateForm("boundedDestructiveTargets", listToggle(form.boundedDestructiveTargets, target, event.target.checked))} /><span><strong>{target}</strong><small>Exact authorized target · bounded lab-only policy</small></span></label>)}</fieldset>}
           <label><span>Time budget · minutes</span><input type="number" min="1" required value={form.timeBudgetMinutes} onChange={(event) => updateForm("timeBudgetMinutes", event.target.value)} /></label>
           <label><span>Token budget · optional</span><input type="number" min="0" value={form.tokenBudget} onChange={(event) => updateForm("tokenBudget", event.target.value)} /></label>
@@ -337,13 +420,69 @@ export function AutonomousBranchPanel({ missionId, selectedRun }: { missionId: s
           <label><span>Concurrency limit</span><input type="number" min="1" required value={form.concurrencyLimit} onChange={(event) => updateForm("concurrencyLimit", event.target.value)} /></label>
           <label><span>Evidence storage · MiB</span><input type="number" min="1" required value={form.evidenceStorageBudgetMb} onChange={(event) => updateForm("evidenceStorageBudgetMb", event.target.value)} /></label>
           <label><span>Artifact storage · MiB</span><input type="number" min="1" required value={form.artifactStorageBudgetMb} onChange={(event) => updateForm("artifactStorageBudgetMb", event.target.value)} /></label>
-          <label><span>Signed specialist IDs · one per line</span><textarea required rows={4} value={form.specialistAgentIds} onChange={(event) => updateForm("specialistAgentIds", event.target.value)} /></label>
+          <label><span>Signed specialist IDs · one per line</span><textarea required rows={4} value={form.specialistAgentIds} onChange={(event) => updateSpecialistIds(event.target.value)} /></label>
           <label><span>Allowed memory scopes · one per line</span><textarea rows={4} value={form.memoryScopes} onChange={(event) => updateForm("memoryScopes", event.target.value)} /></label>
           <label><span>Exact context-node IDs · one per line</span><textarea rows={4} value={form.contextNodeIds} onChange={(event) => updateForm("contextNodeIds", event.target.value)} /></label>
         </div>
+        <MissionAgentModelAssignments
+          idPrefix="autonomous-branch"
+          agents={branchAgents}
+          selectedAgentIds={branchAgentIds}
+          receipts={review?.preflight.execution.team.modelAssignments ?? []}
+          explicitAssignments={form.agentModelAssignments}
+          baselineAssignments={branchContext.request.contract.agentModelAssignments}
+          baselineSourceLabel="Source signed contract"
+          changedSourceLabel="Branch amendment pending review"
+          catalog={modelCatalog.data}
+          catalogUpdatedAt={modelCatalog.updatedAt}
+          catalogLoading={modelCatalog.isLoading}
+          catalogError={modelCatalog.error}
+          readinessStale={!review}
+          restoreLabel="Restore signed models"
+          restoreControlId="autonomous-branch-model-restore-signed"
+          onAssignmentsChange={(assignments) => updateForm(
+            "agentModelAssignments",
+            assignments ?? [],
+          )}
+          onRestore={() => updateForm(
+            "agentModelAssignments",
+            filterAgentModelAssignments(
+              branchContext.request.contract.agentModelAssignments,
+              branchAgentIds,
+            ) ?? [],
+          )}
+          onRetryCatalog={modelCatalog.refresh}
+        />
+        <AutonomousPlanningSelectionEditor
+          idPrefix="autonomous-branch"
+          selection={form.planningSelection}
+          baselineSelection={resolvedPlanningSelection(
+            branchContext.request.contract.planningSelection,
+          )}
+          agents={review?.preflight.execution.team.candidates ?? branchAgents}
+          catalog={modelCatalog.data}
+          catalogUpdatedAt={modelCatalog.updatedAt}
+          catalogLoading={modelCatalog.isLoading}
+          catalogError={modelCatalog.error}
+          readinessCheck={review?.preflight.readiness.checks.find(
+            ({ id }) => id === "contract_planning_selection",
+          )}
+          readinessStale={!review}
+          onChange={(planningSelection) => updateForm(
+            "planningSelection",
+            planningSelection,
+          )}
+          onRestore={() => updateForm(
+            "planningSelection",
+            resolvedPlanningSelection(
+              branchContext.request.contract.planningSelection,
+            ),
+          )}
+          onRetryCatalog={modelCatalog.refresh}
+        />
         <details className="os-advanced-section"><summary>Action-class policy matrix · {Object.keys(registry.data.actionClasses.classes).length} classes</summary><div className="os-policy-matrix">{Object.values(registry.data.actionClasses.classes).map((action) => {
           const state = form.registryFields.actionPolicyStates[action.id] ?? "inherited_default";
-          return <article key={action.id} className="os-policy-row"><div><strong>{action.label}</strong><p>{action.plainLanguageDescription}</p><small>{action.capability.availableAgentIds.length} ready agents · {action.capability.availableToolIds.length} ready tools · {action.capability.enforcedProviderModelRefs.length} enforcing models</small></div><StatusPill status={action.capability.availability} /><label><span>Mission state</span><select aria-label={`${action.label} branch policy`} value={state} onChange={(event) => updateRegistryFields({ ...form.registryFields, actionPolicyStates: { ...form.registryFields.actionPolicyStates, [action.id]: event.target.value as ActionPolicyState } })}><option value="pre_authorized">Pre-authorized</option><option value="guided_only">Guided only / not autonomous</option><option value="prohibited">Prohibited</option><option value="inherited_default">Inherited default</option></select></label>{action.launchBlockingReasons.length > 0 && <ul>{action.launchBlockingReasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>}</article>;
+          return <article key={action.id} className="os-policy-row"><div><strong>{action.label}</strong><p>{action.plainLanguageDescription}</p><small>{action.capability.availableAgentIds.length} ready agents · {action.capability.availableToolIds.length} ready tools · {action.capability.enforcedProviderModelRefs.length} enforcing models</small></div><StatusPill status={action.capability.availability} /><label><span>Mission state</span><TitaniumSelect aria-label={`${action.label} branch policy`} value={state} onChange={(event) => updateRegistryFields({ ...form.registryFields, actionPolicyStates: { ...form.registryFields.actionPolicyStates, [action.id]: event.target.value as ActionPolicyState } })}><option value="pre_authorized">Pre-authorized</option><option value="guided_only">Guided only / not autonomous</option><option value="prohibited">Prohibited</option><option value="inherited_default">Inherited default</option></TitaniumSelect></label>{action.launchBlockingReasons.length > 0 && <ul>{action.launchBlockingReasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>}</article>;
         })}<UnmappedRegistryValues label="Unmapped allowed action classes" values={form.registryFields.unmatchedAllowedActionClasses} /><UnmappedRegistryValues label="Unmapped prohibited action classes" values={form.registryFields.unmatchedProhibitedActionClasses} /></div></details>
         <details className="os-advanced-section"><summary>Final deliverables · {form.registryFields.deliverableIds.length} selected</summary><div className="os-registry-checklist">{Object.values(registry.data.deliverables.deliverables).map((item) => <label className="os-check-field" key={item.id}><input type="checkbox" aria-label={`Require ${item.label} deliverable`} checked={form.registryFields.deliverableIds.includes(item.id)} onChange={(event) => updateRegistryFields({ ...form.registryFields, deliverableIds: listToggle(form.registryFields.deliverableIds, item.id, event.target.checked) })} /><span><strong>{item.label}</strong><small>{item.purpose}</small><small>{item.capability.availability} · {item.formats.join(", ")}</small></span></label>)}<UnmappedRegistryValues label="Unmapped historical deliverables" values={form.registryFields.unmatchedDeliverables} /></div></details>
         <details className="os-advanced-section"><summary>Evidence requirements · {form.registryFields.evidenceTypeIds.length} selected</summary><div className="os-registry-checklist">{Object.values(registry.data.evidenceTypes.types).map((item) => <label className="os-check-field" key={item.id}><input type="checkbox" aria-label={`Require ${item.label} evidence`} checked={form.registryFields.evidenceTypeIds.includes(item.id)} onChange={(event) => updateRegistryFields({ ...form.registryFields, evidenceTypeIds: listToggle(form.registryFields.evidenceTypeIds, item.id, event.target.checked) })} /><span><strong>{item.label}</strong><small>{item.proves}</small><small>{item.capability.availability} · hash {item.immutableHashRequired ? "required" : "optional"} · custody {item.chainOfCustodyRequired ? "required" : "optional"}</small></span></label>)}<UnmappedRegistryValues label="Unmapped historical evidence requirements" values={form.registryFields.unmatchedEvidenceRequirements} /></div></details>
@@ -354,7 +493,11 @@ export function AutonomousBranchPanel({ missionId, selectedRun }: { missionId: s
     </form>
 
     {reviewError && <ErrorPanel title="Branch preflight did not pass" error={reviewError} />}
-    {review && <ReadinessReview review={review} />}
+    {review && <ReadinessReview
+      review={review}
+      agents={branchAgents}
+      catalog={modelCatalog.data}
+    />}
     {review && <Card className="os-branch-confirmation">
       <label className="os-check"><input type="checkbox" checked={deliberatelyConfirmed} onChange={(event) => setDeliberatelyConfirmed(event.target.checked)} /><span>I reviewed contract v{review.contract.version}, its SHA-256 digest, live readiness, scope, budgets, specialist pool, and safe-stop behavior. Create one separate Autonomous run without routine user-wait states.</span></label>
       <div className="os-branch-actions"><Button type="button" disabled={!canCreate} onClick={() => void create()}>{createPending ? "Creating durable run…" : mode === "contract_amendment" ? `Confirm contract v${review.contract.version} and create run` : `Create run under contract v${review.contract.version}`}</Button></div>

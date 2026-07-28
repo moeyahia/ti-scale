@@ -14,22 +14,19 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createDatabaseConnection, migrateDatabase } from "../../db";
 import type { SqliteDatabase } from "../../db/types";
-import {
-  getMemoryControlPolicy,
-  updateMemoryControlPolicy,
-  type MemoryControlPolicy,
-} from "../MemoryControlPolicy";
 import { MemoryRepository } from "../MemoryRepository";
 import {
   createSecondBrainRouter,
   type MemoryAccessPolicy,
 } from "../SecondBrainRouter";
-import type { MemoryProvenance, MemoryScope, MemorySensitivity } from "../types";
+import type { MemoryNodeType, MemoryProvenance, MemoryScope, MemorySensitivity } from "../types";
 import { ObsidianVaultBridge } from "../../vault/ObsidianVaultBridge";
 import { VaultPathPolicy } from "../../vault/VaultPathPolicy";
 
 const servers: Server[] = [];
 const directories: string[] = [];
+const ATTACK_NODE_A_ID = "mem_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ATTACK_NODE_B_ID = "mem_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
@@ -73,10 +70,11 @@ function addNode(
   title: string,
   body: string,
   sensitivity: MemorySensitivity = "private",
+  nodeType: MemoryNodeType = "technique",
 ) {
   return repository.createNode({
     id,
-    nodeType: "technique",
+    nodeType,
     title,
     summary: `Evidence-backed memory for ${title}`,
     body,
@@ -128,6 +126,24 @@ async function fixture(): Promise<Fixture> {
     "Engagement B private technique title",
     "ENGAGEMENT_B_CANONICAL_PRIVATE_BODY",
   );
+  addNode(
+    repository,
+    ATTACK_NODE_A_ID,
+    { kind: "global" },
+    "Reusable bounded validation technique",
+    "ATTACK_KNOWLEDGE_A_BODY",
+    "private",
+    "attack_technique",
+  );
+  addNode(
+    repository,
+    ATTACK_NODE_B_ID,
+    { kind: "global" },
+    "Reusable technology product",
+    "ATTACK_KNOWLEDGE_B_BODY",
+    "private",
+    "technology_product",
+  );
   repository.createEdge({
     id: "edge-global-to-a",
     sourceNodeId: "node-global",
@@ -170,7 +186,11 @@ async function fixture(): Promise<Fixture> {
   return {
     database,
     repository,
-    bridge: new ObsidianVaultBridge(database, repository, new VaultPathPolicy(vaultRoot)),
+    bridge: new ObsidianVaultBridge(
+      database,
+      repository,
+      new VaultPathPolicy(vaultRoot),
+    ),
     vaultRoot,
     url: `http://127.0.0.1:${port}`,
   };
@@ -295,54 +315,14 @@ function logicalDatabaseMarkerTables(database: SqliteDatabase, marker: string): 
   return matches;
 }
 
-function policyUpdate(
-  current: MemoryControlPolicy,
-  overrides: Partial<Pick<MemoryControlPolicy, "enabled" | "obsidianSyncScope">> = {},
-): Record<string, unknown> {
-  return {
-    enabled: overrides.enabled ?? current.enabled,
-    personalPreferencePolicy: current.personalPreferencePolicy,
-    operationalMemoryEnabled: current.operationalMemoryEnabled,
-    engagementIsolation: true,
-    defaultRetentionDays: current.defaultRetentionDays,
-    autonomousUse: current.autonomousUse,
-    guidedUse: current.guidedUse,
-    obsidianSyncScope: overrides.obsidianSyncScope ?? current.obsidianSyncScope,
-    secretsNeverRetained: true,
-  };
-}
-
-async function portableExport(
-  app: Fixture,
-  connectionId: string,
-  key: string,
-  access?: "all" | "b",
-): Promise<{ readonly request: RequestInit; readonly payload: Record<string, any>; readonly archivePath: string }> {
-  const request: RequestInit = {
-    method: "POST",
-    headers: mutationHeaders(key, access),
-    body: JSON.stringify({ connectionId }),
-  };
-  const response = await fetch(`${app.url}/api/v2/brain/vault/portable-export`, request);
-  expect(response.status).toBe(200);
-  const payload = await responseJson(response);
-  const connection = app.bridge.requireConnection(connectionId);
-  return {
-    request,
-    payload,
-    archivePath: join(connection.vaultPath, ".ti-scale", "exports", String(payload.result.archiveName)),
-  };
-}
-
 describe("Second Brain privacy boundaries", () => {
   test("confirming an imported candidate and then forgetting it erases DB, caches, and the source projection", async () => {
     const app = await fixture();
     try {
       const connection = await connectVault(app, "Forget-Import-Vault", {
         syncScope: {
-          nodeTypes: ["technique"],
-          scopeKinds: ["engagement"],
-          engagementIds: ["eng-a"],
+          nodeTypes: ["attack_technique"],
+          scopeKinds: ["global"],
           sensitivities: ["private"],
           lifecycleStatuses: ["confirmed"],
         },
@@ -350,10 +330,10 @@ describe("Second Brain privacy boundaries", () => {
       const bodyMarker = "FORGET_IMPORTED_BODY_MARKER_8f73e5b2";
       const pathMarker = "forget-imported-path-marker-8f73e5b2";
       const relativePath = `00 Inbox/${pathMarker}.md`;
-      let source = app.bridge.renderNode("node-a").text;
-      source = replaceFirst(source, 'id: "node-a"', 'id: "imported-forget-candidate"');
-      source = replaceFirst(source, "# Engagement A secret technique title", "# Imported memory to forget");
-      source = replaceFirst(source, "ENGAGEMENT_A_CANONICAL_PRIVATE_BODY", bodyMarker);
+      let source = app.bridge.renderNode(ATTACK_NODE_A_ID).text;
+      source = replaceFirst(source, `id: "${ATTACK_NODE_A_ID}"`, 'id: "imported-forget-candidate"');
+      source = replaceFirst(source, "# Reusable bounded validation technique", "# Imported memory to forget");
+      source = replaceFirst(source, "ATTACK_KNOWLEDGE_A_BODY", bodyMarker);
       writeFileSync(join(connection.path, relativePath), source, "utf8");
 
       const imported = await fetch(`${app.url}/api/v2/brain/vault/import`, {
@@ -439,7 +419,7 @@ describe("Second Brain privacy boundaries", () => {
     }
   });
 
-  test("vault and portable exports do not leak an inaccessible outgoing-edge target through a global node", async () => {
+  test("vault exports do not leak an inaccessible outgoing-edge target and portable archives stay disabled", async () => {
     const app = await fixture();
     try {
       const connection = await connectVault(app, "Engagement-B-Only-Export", { access: "b" });
@@ -449,39 +429,38 @@ describe("Second Brain privacy boundaries", () => {
         body: JSON.stringify({ connectionId: connection.id }),
       });
       expect(exported.status).toBe(200);
-      const portable = await portableExport(
-        app,
-        connection.id,
-        "portable-export-engagement-b-0001",
-        "b",
-      );
+      const portable = await fetch(`${app.url}/api/v2/brain/vault/portable-export`, {
+        method: "POST",
+        headers: mutationHeaders("portable-export-engagement-b-0001", "b"),
+        body: JSON.stringify({ connectionId: connection.id }),
+      });
+      expect(portable.status).toBe(409);
       const vaultText = markdownFiles(connection.path)
         .map((path) => readFileSync(path, "utf8"))
         .join("\n");
-      const archiveBytes = readFileSync(portable.archivePath);
       const forbidden = [
-        "node-a",
+        'id: "node-a"',
         "Engagement A secret technique title",
         "ENGAGEMENT_A_CANONICAL_PRIVATE_BODY",
         "ENGAGEMENT_A_PRIVATE_EDGE_EXPLANATION",
       ];
       expect({
         leakedToVault: forbidden.filter((marker) => vaultText.includes(marker)),
-        leakedToPortableArchive: forbidden.filter((marker) => archiveBytes.includes(Buffer.from(marker, "utf8"))),
-      }).toEqual({ leakedToVault: [], leakedToPortableArchive: [] });
+        portableArchiveCreated: existsSync(join(connection.path, ".ti-scale", "exports")),
+      }).toEqual({ leakedToVault: [], portableArchiveCreated: false });
     } finally {
       app.database.close();
     }
   }, 15_000);
 
-  test("connection syncScope governs targeted, bulk, import, sync, portable, and existing projections", async () => {
+  test("connection syncScope governs targeted, bulk, import, sync, and existing projections", async () => {
     const app = await fixture();
     try {
       const connection = await connectVault(app, "Scoped-Vault", { access: "all" });
       const initialB = await fetch(`${app.url}/api/v2/brain/vault/export`, {
         method: "POST",
         headers: mutationHeaders("scope-seed-node-b-0001", "all"),
-        body: JSON.stringify({ connectionId: connection.id, nodeId: "node-b" }),
+        body: JSON.stringify({ connectionId: connection.id, nodeId: ATTACK_NODE_B_ID }),
       });
       expect(initialB.status).toBe(200);
       const initialPayload = await responseJson(initialB);
@@ -495,9 +474,8 @@ describe("Second Brain privacy boundaries", () => {
       expect((await fetch(`${app.url}/api/v2/brain/vault/export`, initialBulkRequest)).status).toBe(200);
 
       const narrowedScope = {
-        nodeTypes: ["technique"],
-        scopeKinds: ["engagement"],
-        engagementIds: ["eng-a"],
+        nodeTypes: ["attack_technique"],
+        scopeKinds: ["global"],
         sensitivities: ["private"],
         lifecycleStatuses: ["confirmed"],
       };
@@ -510,7 +488,7 @@ describe("Second Brain privacy boundaries", () => {
       const targetedExport = await fetch(`${app.url}/api/v2/brain/vault/export`, {
         method: "POST",
         headers: mutationHeaders("scope-targeted-export-denied-0001", "all"),
-        body: JSON.stringify({ connectionId: connection.id, nodeId: "node-b" }),
+        body: JSON.stringify({ connectionId: connection.id, nodeId: ATTACK_NODE_B_ID }),
       });
       const bulkExport = await fetch(`${app.url}/api/v2/brain/vault/export`, {
         method: "POST",
@@ -522,7 +500,7 @@ describe("Second Brain privacy boundaries", () => {
       const targetedSync = await fetch(`${app.url}/api/v2/brain/vault/sync`, {
         method: "POST",
         headers: mutationHeaders("scope-targeted-sync-denied-0001", "all"),
-        body: JSON.stringify({ connectionId: connection.id, nodeId: "node-b" }),
+        body: JSON.stringify({ connectionId: connection.id, nodeId: ATTACK_NODE_B_ID }),
       });
       const bulkSync = await fetch(`${app.url}/api/v2/brain/vault/sync`, {
         method: "POST",
@@ -532,30 +510,23 @@ describe("Second Brain privacy boundaries", () => {
       expect(bulkSync.status).toBe(200);
 
       const importPath = "00 Inbox/outside-connection-scope.md";
-      writeFileSync(join(connection.path, importPath), app.bridge.renderNode("node-b").text, "utf8");
+      writeFileSync(join(connection.path, importPath), app.bridge.renderNode(ATTACK_NODE_B_ID).text, "utf8");
       const imported = await fetch(`${app.url}/api/v2/brain/vault/import`, {
         method: "POST",
         headers: mutationHeaders("scope-import-denied-0001", "all"),
         body: JSON.stringify({ connectionId: connection.id, relativePath: importPath }),
       });
-      const portable = await portableExport(app, connection.id, "scope-portable-0001", "all");
-      const portableBytes = readFileSync(portable.archivePath);
-
       expect({
         targetedExportDenied: targetedExport.status >= 400,
         staleBulkReplayDenied: staleBulkReplay.status === 404,
         targetedSyncDenied: targetedSync.status >= 400,
         importDenied: imported.status >= 400,
-        portableContainsExcludedNode: portableBytes.includes(Buffer.from("node-b", "utf8")),
-        portableContainsExcludedBody: portableBytes.includes(Buffer.from("ENGAGEMENT_B_CANONICAL_PRIVATE_BODY", "utf8")),
         excludedProjectionStillExistsAfterRevocation: existsSync(oldBProjection),
       }).toEqual({
         targetedExportDenied: true,
         staleBulkReplayDenied: true,
         targetedSyncDenied: true,
         importDenied: true,
-        portableContainsExcludedNode: false,
-        portableContainsExcludedBody: false,
         excludedProjectionStillExistsAfterRevocation: false,
       });
     } finally {
@@ -567,10 +538,10 @@ describe("Second Brain privacy boundaries", () => {
     const app = await fixture();
     try {
       const connection = await connectVault(app, "Crafted-Existing-Id-Vault");
-      const relativePath = "41 Attack Paths/crafted-existing-id.md";
-      let crafted = app.bridge.renderNode("node-a").text;
-      crafted = replaceFirst(crafted, 'id: "node-a"', 'id: "node-b"');
-      crafted = replaceFirst(crafted, "ENGAGEMENT_A_CANONICAL_PRIVATE_BODY", "ATTACKER_CONTROLLED_NOTE_BODY");
+      const relativePath = "42 Techniques and Procedures/crafted-existing-id.md";
+      let crafted = app.bridge.renderNode(ATTACK_NODE_A_ID).text;
+      crafted = replaceFirst(crafted, `id: "${ATTACK_NODE_A_ID}"`, 'id: "node-b"');
+      crafted = replaceFirst(crafted, "ATTACK_KNOWLEDGE_A_BODY", "ATTACKER_CONTROLLED_NOTE_BODY");
       writeFileSync(join(connection.path, relativePath), crafted, "utf8");
 
       const response = await fetch(`${app.url}/api/v2/brain/vault/import`, {
@@ -603,94 +574,27 @@ describe("Second Brain privacy boundaries", () => {
     }
   });
 
-  test("portable replay and download fail closed after Memory Control disables Obsidian sync", async () => {
+  test("portable archive creation is unavailable through both HTTP and direct bridge composition", async () => {
     const app = await fixture();
     try {
-      const connection = await connectVault(app, "Portable-Policy-Revocation");
-      const portable = await portableExport(app, connection.id, "portable-policy-revoke-0001");
-      const current = getMemoryControlPolicy(app.database);
-      updateMemoryControlPolicy({
-        database: app.database,
-        expectedVersion: current.version,
-        actor: "operator:test",
-        policy: policyUpdate(current, { obsidianSyncScope: "disabled" }),
-      });
-      const replay = await fetch(`${app.url}/api/v2/brain/vault/portable-export`, portable.request);
-      const download = await fetch(`${app.url}${portable.payload.result.downloadUrl}`);
-      expect({ replay: replay.status, download: download.status }).toEqual({ replay: 404, download: 404 });
-    } finally {
-      app.database.close();
-    }
-  });
-
-  test("portable replay and download fail closed after connection syncScope narrows", async () => {
-    const app = await fixture();
-    try {
-      const connection = await connectVault(app, "Portable-Scope-Revocation");
-      const portable = await portableExport(app, connection.id, "portable-scope-revoke-0001");
-      app.database.prepare(`
-        UPDATE vault_connections SET sync_scope_json = ?, updated_at = ? WHERE id = ?
-      `).run(JSON.stringify({ engagementIds: ["eng-b"], scopeKinds: ["engagement"] }), new Date().toISOString(), connection.id);
-      const replay = await fetch(`${app.url}/api/v2/brain/vault/portable-export`, portable.request);
-      const download = await fetch(`${app.url}${portable.payload.result.downloadUrl}`);
-      expect({ replay: replay.status, download: download.status }).toEqual({ replay: 404, download: 404 });
-    } finally {
-      app.database.close();
-    }
-  });
-
-  test("portable replay and download are revoked after a retained node is corrected", async () => {
-    const app = await fixture();
-    try {
-      const connection = await connectVault(app, "Portable-Correction-Revocation");
-      const portable = await portableExport(app, connection.id, "portable-correction-revoke-0001");
-      app.repository.correctNode("node-a", {
-        body: "Operator-corrected canonical body with the stale material removed.",
-        authorType: "operator",
-        authorId: "operator:test",
-        changeReason: "Redact stale memory from future projections",
-      });
-      const replay = await fetch(`${app.url}/api/v2/brain/vault/portable-export`, portable.request);
-      const download = await fetch(`${app.url}${portable.payload.result.downloadUrl}`);
-      expect({ replay: replay.status, download: download.status }).toEqual({ replay: 404, download: 404 });
-    } finally {
-      app.database.close();
-    }
-  });
-
-  test("forgetting revokes portable replay/download and physically removes every managed archive containing the node", async () => {
-    const app = await fixture();
-    try {
-      const connection = await connectVault(app, "Portable-Forget-Revocation");
-      const portable = await portableExport(app, connection.id, "portable-forget-revoke-0001");
-      expect(existsSync(portable.archivePath)).toBe(true);
-      const current = app.repository.requireNode("node-a");
-      const forgotten = await fetch(`${app.url}/api/v2/brain/nodes/node-a/forget`, {
+      const connection = await connectVault(app, "Portable-Disabled");
+      const response = await fetch(`${app.url}/api/v2/brain/vault/portable-export`, {
         method: "POST",
-        headers: mutationHeaders("forget-portable-node-0001"),
-        body: JSON.stringify({ expectedVersion: current.version, reason: "Erase node and every managed export" }),
+        headers: mutationHeaders("portable-disabled-0001"),
+        body: JSON.stringify({ connectionId: connection.id }),
       });
-      expect(forgotten.status).toBe(200);
-      const replay = await fetch(`${app.url}/api/v2/brain/vault/portable-export`, portable.request);
-      const download = await fetch(`${app.url}${portable.payload.result.downloadUrl}`);
-      expect({
-        replayDenied: replay.status >= 400,
-        download: download.status,
-        archiveStillExists: existsSync(portable.archivePath),
-      }).toEqual({ replayDenied: true, download: 404, archiveStillExists: false });
-    } finally {
-      app.database.close();
-    }
-  }, 15_000);
-
-  test("direct bridge/CLI-style portable archives are also physically removed by forgetting", async () => {
-    const app = await fixture();
-    try {
-      const connection = await connectVault(app, "Portable-Direct-Forget");
-      const direct = await app.bridge.createPortableExport(connection.id, ["node-a"], "operator:cli-test");
-      expect(existsSync(direct.archivePath)).toBe(true);
-      app.bridge.forgetMemory("node-a", "operator:test", "Erase all managed portable copies");
-      expect(existsSync(direct.archivePath)).toBe(false);
+      expect(response.status).toBe(409);
+      await expect(
+        app.bridge.createPortableExport(
+          connection.id,
+          [ATTACK_NODE_A_ID],
+          "operator:cli-test",
+        ),
+      ).rejects.toThrow(
+        "Portable Vault ZIP creation is disabled by operator no-backup policy",
+      );
+      expect(existsSync(join(connection.path, ".ti-scale", "exports")))
+        .toBe(false);
     } finally {
       app.database.close();
     }

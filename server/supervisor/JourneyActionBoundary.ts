@@ -28,6 +28,13 @@ function targetAllowed(target: string, allowedTargets: readonly string[]): boole
   return allowedTargets.some((candidate) => candidate.trim() === normalized);
 }
 
+function isReviewedLocalProcessAction(action: Readonly<ActionIntent>): boolean {
+  const value = action.arguments;
+  return value.executionBinding === "reviewed_local_process"
+    && typeof value.toolId === "string"
+    && value.toolId === action.actionType;
+}
+
 export function enforceJourneyActionBoundary(input: {
   journey: Journey;
   action: Readonly<ActionIntent>;
@@ -46,13 +53,18 @@ export function enforceJourneyActionBoundary(input: {
       };
     }
     const actionType = input.action.actionType.trim().toLowerCase();
+    const governedAction = isReviewedLocalProcessAction(input.action)
+      ? input.action.actionClass?.trim().toLowerCase() || actionType
+      : actionType;
     const prohibited = (contract.prohibitedActionTypes ?? []).map((value) => value.trim().toLowerCase());
     const allowed = contract.allowedActionTypes.map((value) => value.trim().toLowerCase());
-    if (prohibited.includes(actionType) || !allowed.includes(actionType)) {
+    if (prohibited.includes(governedAction) || !allowed.includes(governedAction)) {
       return {
         allowed: false,
         reason: "autonomous_action_not_allowed",
-        humanMessage: "The action type is outside the signed Autonomous contract.",
+        humanMessage: isReviewedLocalProcessAction(input.action)
+          ? "The action class is outside the signed Autonomous contract."
+          : "The action type is outside the signed Autonomous contract.",
       };
     }
     if (!targetAllowed(input.action.target, contract.allowedTargets)) {

@@ -37,3 +37,29 @@ export function verifiedEvidenceSql(alias = "e"): string {
     AND ${evidenceRecordSql(evidence)}
   `;
 }
+
+/**
+ * Canonical report eligibility is stricter than the historical evidence
+ * compatibility predicate. A report may assert an item as verified only when
+ * its immutable custody history records both acquisition and verification.
+ *
+ * Keep this separate from `verifiedEvidenceSql`: older read paths may still
+ * need to surface records that predate complete custody, but those records
+ * must remain review-only until reconciliation appends the missing events.
+ */
+export function custodyCompleteVerifiedEvidenceSql(alias = "e"): string {
+  const evidence = evidenceAlias(alias);
+  return `
+    ${verifiedEvidenceSql(evidence)}
+    AND EXISTS (
+      SELECT 1 FROM evidence_chain_events evidence_acquisition
+      WHERE evidence_acquisition.evidence_id = ${evidence}.id
+        AND evidence_acquisition.event_type = 'acquired'
+    )
+    AND EXISTS (
+      SELECT 1 FROM evidence_chain_events evidence_verification
+      WHERE evidence_verification.evidence_id = ${evidence}.id
+        AND evidence_verification.event_type = 'verified'
+    )
+  `;
+}

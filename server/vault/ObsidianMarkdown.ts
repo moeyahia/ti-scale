@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import type { MemoryEdge, MemoryNode, ProvenanceSource } from "../memory/types";
 import {
+  isAttackCentricReusableNodeType,
   MEMORY_EDGE_TYPES,
   validateConfidence,
   validateEdgeType,
@@ -8,13 +10,79 @@ import {
   validateScope,
   validateSensitivity,
 } from "../memory/index";
-import type { VaultNote, VaultNoteAttachment, VaultNoteEdge } from "./types";
+import type {
+  VaultNote,
+  VaultNoteAttachment,
+  VaultNoteEdge,
+  VaultPrivateProvenanceSummary,
+} from "./types";
+import {
+  canonicalReusableKnowledgeOutcomeTags,
+  isReusableKnowledgeOutcomeTag,
+  type ReusableKnowledgeOutcomeTag,
+} from "../domain/reusable-knowledge-outcomes";
+import {
+  historicalReportedOutcomeTag,
+  isHistoricalReportedOutcomeClassification,
+  type HistoricalReportedOutcomeSummary,
+} from "../domain/historical-reported-outcomes";
 import { safeVaultSegment } from "./VaultPathPolicy";
+import {
+  ATTACK_BRAIN_ATLAS_VAULT_FOLDERS,
+  attackBrainAtlasMapping,
+  operatorProfileBrainAtlasMapping,
+} from "./AttackBrainAtlasMappingRegistry";
+import { OPERATOR_PROFILE_VAULT_FOLDER } from "./OperatorProfileVaultProjection";
 
 const EDGE_MARKER = /<!--\s*ti-scale-edge:([a-z_]+):([A-Za-z0-9._:-]+)\s*-->/g;
 const WIKILINK = /\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]/g;
 const OBSIDIAN_ATTACHMENT = /!\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\](?:\s*<!--\s*ti-scale-attachment:([A-Za-z0-9._:-]+):([a-f0-9]{64})\s*-->)?/giu;
 const MARKDOWN_ATTACHMENT = /!\[[^\]]*\]\(([^)\s]+)\)/gu;
+const PRIVATE_PROVENANCE_SECTION_MARKER = /<!--\s*ti-scale-private-provenance-summary:v1:(\d+):(\d+):([a-f0-9]{64}):(complete|truncated)\s*-->/gu;
+const PRIVATE_PROVENANCE_ID = /^msrc_[A-Za-z0-9._:-]+$/u;
+
+export const PRIVATE_PROVENANCE_SCHEMA = "ti-scale/private-provenance/v1" as const;
+export const MAX_PROJECTED_PRIVATE_PROVENANCE_IDS = 32;
+
+export interface PrivateProvenanceProjection {
+  readonly ids: readonly string[];
+  readonly summary: VaultPrivateProvenanceSummary;
+}
+
+function compareUtf8(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+/**
+ * Produce a stable, bounded view of opaque source-custody row IDs. The digest
+ * binds the complete canonical set, including IDs omitted from Markdown.
+ */
+export function projectPrivateProvenanceIds(ids: readonly string[]): PrivateProvenanceProjection {
+  const canonical = [...ids];
+  if (canonical.some((id) => !PRIVATE_PROVENANCE_ID.test(id))) {
+    throw new TypeError("Canonical private provenance reference is malformed");
+  }
+  canonical.sort(compareUtf8);
+  if (canonical.some((id, index) => index > 0 && id === canonical[index - 1])) {
+    throw new TypeError("Canonical private provenance references must be unique");
+  }
+  const sha256 = createHash("sha256")
+    .update(`${PRIVATE_PROVENANCE_SCHEMA}\n`, "utf8")
+    .update(canonical.join("\n"), "utf8")
+    .update("\n", "utf8")
+    .digest("hex");
+  const projectedIds = canonical.slice(0, MAX_PROJECTED_PRIVATE_PROVENANCE_IDS);
+  return {
+    ids: projectedIds,
+    summary: {
+      schema: PRIVATE_PROVENANCE_SCHEMA,
+      total: canonical.length,
+      projected: projectedIds.length,
+      sha256,
+      truncated: canonical.length > projectedIds.length,
+    },
+  };
+}
 
 /**
  * Stable V2.4 human-facing vault taxonomy. These directories are created for
@@ -24,33 +92,7 @@ const MARKDOWN_ATTACHMENT = /!\[[^\]]*\]\(([^)\s]+)\)/gu;
  */
 export const OBSIDIAN_V2_4_VAULT_FOLDERS = [
   "00 Inbox",
-  "10 Operator",
-  "20 Engagements",
-  "21 Missions",
-  "22 Runs",
-  "30 Assets",
-  "31 Network Topology",
-  "32 Applications and Services",
-  "33 Identities and Trusts",
-  "40 Attack Plans",
-  "41 Attack Paths",
-  "42 Attack Attempts",
-  "43 Scripts",
-  "44 CVEs and Advisories",
-  "50 Evidence",
-  "51 Findings",
-  "52 Web Captures",
-  "53 Artifacts",
-  "60 Failures and Recoveries",
-  "61 Logs and Timelines",
-  "70 Lessons",
-  "71 Research Campaigns",
-  "72 Experiments",
-  "73 Strategies",
-  "80 Agents",
-  "81 Tools and MCP",
-  "90 Reports",
-  "99 System",
+  ...ATTACK_BRAIN_ATLAS_VAULT_FOLDERS,
   "Attachments",
 ] as const;
 
@@ -198,6 +240,69 @@ function stringList(properties: Record<string, unknown>, key: string): string[] 
   return value as string[];
 }
 
+function privateProvenanceSummary(
+  properties: Record<string, unknown>,
+  privateProvenanceIds: readonly string[],
+): VaultPrivateProvenanceSummary | undefined {
+  const keys = [
+    "private_provenance_schema",
+    "private_provenance_total",
+    "private_provenance_projected",
+    "private_provenance_sha256",
+    "private_provenance_truncated",
+  ] as const;
+  const present = keys.filter((key) => properties[key] !== undefined);
+  if (present.length === 0) return undefined;
+  if (present.length !== keys.length) {
+    throw new Error("YAML private provenance summary is incomplete");
+  }
+  const schema = requiredString(properties, "private_provenance_schema");
+  if (schema !== PRIVATE_PROVENANCE_SCHEMA) {
+    throw new Error("YAML private provenance schema is unsupported");
+  }
+  const total = properties.private_provenance_total;
+  const projected = properties.private_provenance_projected;
+  const sha256 = requiredString(properties, "private_provenance_sha256");
+  const truncated = properties.private_provenance_truncated;
+  if (!Number.isSafeInteger(total) || Number(total) < 0) {
+    throw new Error("YAML private_provenance_total is invalid");
+  }
+  if (!Number.isSafeInteger(projected) || Number(projected) < 0) {
+    throw new Error("YAML private_provenance_projected is invalid");
+  }
+  if (!/^[a-f0-9]{64}$/u.test(sha256)) {
+    throw new Error("YAML private_provenance_sha256 is invalid");
+  }
+  if (typeof truncated !== "boolean") {
+    throw new Error("YAML private_provenance_truncated is invalid");
+  }
+  const canonicalVisible = projectPrivateProvenanceIds(privateProvenanceIds);
+  if (
+    canonicalVisible.ids.length !== privateProvenanceIds.length
+    || canonicalVisible.ids.some((id, index) => id !== privateProvenanceIds[index])
+  ) {
+    throw new Error("YAML private provenance references are not in canonical order");
+  }
+  if (
+    Number(projected) !== privateProvenanceIds.length
+    || Number(projected) > MAX_PROJECTED_PRIVATE_PROVENANCE_IDS
+    || Number(total) < Number(projected)
+    || truncated !== (Number(total) > Number(projected))
+  ) {
+    throw new Error("YAML private provenance summary counts are inconsistent");
+  }
+  if (!truncated && (Number(total) !== privateProvenanceIds.length || sha256 !== canonicalVisible.summary.sha256)) {
+    throw new Error("YAML private provenance digest does not match its complete reference set");
+  }
+  return {
+    schema: PRIVATE_PROVENANCE_SCHEMA,
+    total: Number(total),
+    projected: Number(projected),
+    sha256,
+    truncated,
+  };
+}
+
 function stripManagedAttachmentReferences(source: string): string {
   OBSIDIAN_ATTACHMENT.lastIndex = 0;
   let stripped = source.replace(OBSIDIAN_ATTACHMENT, (match, relativePath: string) => (
@@ -211,7 +316,7 @@ function stripManagedAttachmentReferences(source: string): string {
 }
 
 function notePath(node: Pick<MemoryNode, "id" | "title" | "nodeType">): string {
-  const folder: Record<MemoryNode["nodeType"], string> = {
+  const operationalFolder: Partial<Record<MemoryNode["nodeType"], string>> = {
     operator: "10 Operator",
     preference: "10 Operator",
     mission: "21 Missions",
@@ -239,8 +344,15 @@ function notePath(node: Pick<MemoryNode, "id" | "title" | "nodeType">): string {
     decision: "40 Attack Plans",
     source: "00 Inbox",
   };
+  const operatorPreferenceDomain = node.nodeType === "entity"
+    && node.id.startsWith("mem_prefdomain_");
+  const folder = operatorPreferenceDomain
+    ? OPERATOR_PROFILE_VAULT_FOLDER
+    : isAttackCentricReusableNodeType(node.nodeType)
+    ? attackBrainAtlasMapping(node.nodeType).folder
+    : operationalFolder[node.nodeType] ?? "00 Inbox";
   const slug = safeVaultSegment(node.title, "memory");
-  return `${folder[node.nodeType]}/${slug}--${safeVaultSegment(node.id, "node")}.md`;
+  return `${folder}/${slug}--${safeVaultSegment(node.id, "node")}.md`;
 }
 
 export function vaultRelativePath(node: Pick<MemoryNode, "id" | "title" | "nodeType">): string {
@@ -249,7 +361,9 @@ export function vaultRelativePath(node: Pick<MemoryNode, "id" | "title" | "nodeT
 
 export function renderObsidianNote(
   node: MemoryNode,
-  sources: readonly Pick<ProvenanceSource, "sourceId">[],
+  sources: readonly (Pick<ProvenanceSource, "sourceId"> & {
+    readonly privateProvenanceId?: string;
+  })[],
   edges: readonly {
     readonly edge: MemoryEdge;
     readonly target: MemoryNode;
@@ -267,7 +381,25 @@ export function renderObsidianNote(
     /** Preserve a connection's already-synchronized legacy projection path. */
     readonly relativePath?: string;
   }[] = [],
+  outcomeTags: readonly ReusableKnowledgeOutcomeTag[] = [],
+  reportedOutcome?: HistoricalReportedOutcomeSummary,
 ): string {
+  const attackKnowledge = isAttackCentricReusableNodeType(node.nodeType);
+  const operatorProfileAtlas = attackKnowledge
+    ? undefined
+    : operatorProfileBrainAtlasMapping(node);
+  const brainRegion = attackKnowledge
+    ? attackBrainAtlasMapping(node.nodeType).region
+    : operatorProfileAtlas?.region;
+  const privateProvenance = attackKnowledge
+    ? projectPrivateProvenanceIds(sources.map((source) => {
+      if (!source.privateProvenanceId) {
+        throw new TypeError("Reusable attack knowledge requires canonical private provenance references");
+      }
+      return source.privateProvenanceId;
+    }))
+    : undefined;
+  const canonicalOutcomeTags = canonicalReusableKnowledgeOutcomeTags(outcomeTags);
   const edgeLines = edges.flatMap(({ edge, target, relativePath }) => {
     const targetPath = normalizeObsidianWikilinkTarget(relativePath ?? notePath(target));
     if (!targetPath) return [];
@@ -289,6 +421,12 @@ export function renderObsidianNote(
     "---",
     `id: ${yamlString(node.id)}`,
     `type: ${yamlString(node.nodeType)}`,
+    ...(operatorProfileAtlas
+      ? [`operator_profile_class: ${yamlString(operatorProfileAtlas.profileClass)}`]
+      : []),
+    ...(brainRegion
+      ? [`brain_region: ${yamlString(brainRegion)}`]
+      : []),
     `status: ${yamlString(node.lifecycleStatus)}`,
     `scope: ${yamlString(node.scope.kind)}`,
     ...(node.scope.engagementId ? [`engagement_id: ${yamlString(node.scope.engagementId)}`] : []),
@@ -303,15 +441,55 @@ export function renderObsidianNote(
     `created_at: ${yamlString(node.createdAt)}`,
     `updated_at: ${yamlString(node.updatedAt)}`,
     ...(node.expiresAt ? [`expires_at: ${yamlString(node.expiresAt)}`] : []),
-    ...yamlList("source_ids", sources.map((source) => source.sourceId)),
+    ...(canonicalOutcomeTags.length > 0
+      ? yamlList("outcome_tags", canonicalOutcomeTags)
+      : []),
+    ...(reportedOutcome ? [
+      `reported_outcome: ${yamlString(reportedOutcome.classification)}`,
+      `reported_outcome_confidence: ${reportedOutcome.classificationConfidence}`,
+      `reported_outcome_claim_count: ${reportedOutcome.claimCount}`,
+      `reported_outcome_source_count: ${reportedOutcome.sourceCount}`,
+      `reported_outcome_policy: ${yamlString(reportedOutcome.policyVersion)}`,
+    ] : []),
+    // Reusable attack knowledge never exposes a mission path, run ID, target
+    // locator, or evidence ID. High-fanout custody remains complete in SQLite;
+    // this Markdown projection is bounded and bound to the full set by digest.
+    ...(privateProvenance ? [
+      `private_provenance_schema: ${yamlString(privateProvenance.summary.schema)}`,
+      `private_provenance_total: ${privateProvenance.summary.total}`,
+      `private_provenance_projected: ${privateProvenance.summary.projected}`,
+      `private_provenance_sha256: ${yamlString(privateProvenance.summary.sha256)}`,
+      `private_provenance_truncated: ${privateProvenance.summary.truncated}`,
+    ] : []),
+    ...yamlList(
+      "private_provenance_ids",
+      privateProvenance?.ids ?? [],
+    ),
+    ...yamlList("source_ids", attackKnowledge ? [] : sources.map((source) => source.sourceId)),
     ...yamlList("attachment_ids", attachments.map((attachment) => attachment.artifactId)),
     ...yamlList("aliases", [node.id]),
-    ...yamlList("tags", [`ti-scale/${node.nodeType}`, `ti-scale/${node.lifecycleStatus}`]),
+    ...yamlList("tags", [
+      `ti-scale/${node.nodeType}`,
+      `ti-scale/${node.lifecycleStatus}`,
+      ...canonicalOutcomeTags.map((tag) => `ti-scale/outcome/${tag}`),
+      ...(reportedOutcome ? [historicalReportedOutcomeTag(reportedOutcome.classification)] : []),
+    ]),
     "---",
     "",
     `# ${escapeObsidianSingleLineText(node.title)}`,
     "",
     node.body,
+    ...(privateProvenance ? [
+      "",
+      `<!-- ti-scale-private-provenance-summary:v1:${privateProvenance.summary.total}:${privateProvenance.summary.projected}:${privateProvenance.summary.sha256}:${privateProvenance.summary.truncated ? "truncated" : "complete"} -->`,
+      "## Private provenance",
+      "",
+      `- Canonical SQLite source records: ${privateProvenance.summary.total}`,
+      `- Opaque references projected here: ${privateProvenance.summary.projected}`,
+      `- Projection truncated: ${privateProvenance.summary.truncated ? "yes" : "no"}`,
+      `- Full-set SHA-256: \`${privateProvenance.summary.sha256}\``,
+      "- Full private source custody remains canonical and queryable in the local Ti-Scale database.",
+    ] : []),
     ...(attachments.length > 0 ? [
       "",
       "## Attachments",
@@ -332,6 +510,37 @@ export function parseObsidianNote(source: string): VaultNote {
   const { properties, markdown } = parseFrontmatter(source);
   const id = requiredString(properties, "id");
   const nodeType = validateNodeType(requiredString(properties, "type"));
+  const operatorProfileClass = properties.operator_profile_class === undefined
+    ? undefined
+    : requiredString(properties, "operator_profile_class");
+  const operatorProfileAtlas = operatorProfileBrainAtlasMapping({ id, nodeType });
+  if (operatorProfileClass !== undefined) {
+    if (!operatorProfileAtlas || operatorProfileClass !== operatorProfileAtlas.profileClass) {
+      throw new Error("YAML operator_profile_class is not a valid consent-bound Operator Profile classification");
+    }
+  }
+  const brainRegion = properties.brain_region === undefined
+    ? undefined
+    : requiredString(properties, "brain_region");
+  if (brainRegion !== undefined) {
+    if (isAttackCentricReusableNodeType(nodeType)) {
+      if (brainRegion !== attackBrainAtlasMapping(nodeType).region) {
+        throw new Error("YAML brain_region does not match the reusable attack-knowledge taxonomy");
+      }
+    } else if (
+      !operatorProfileAtlas
+      || operatorProfileClass !== operatorProfileAtlas.profileClass
+      || brainRegion !== operatorProfileAtlas.region
+    ) {
+      throw new Error("YAML brain_region is permitted only for reusable attack knowledge or an explicit Operator Profile classification");
+    }
+  }
+  if (operatorProfileClass !== undefined && brainRegion === undefined) {
+    throw new Error("YAML Operator Profile classification requires its canonical brain_region");
+  }
+  if (isAttackCentricReusableNodeType(nodeType) && operatorProfileClass !== undefined) {
+    throw new Error("Reusable attack knowledge cannot claim an Operator Profile classification");
+  }
   const lifecycleStatus = validateLifecycle(requiredString(properties, "status"));
   const scope = validateScope({
     kind: requiredString(properties, "scope") as "global" | "engagement" | "mission",
@@ -348,12 +557,74 @@ export function parseObsidianNote(source: string): VaultNote {
   if (!["operator", "agent", "system", "import"].includes(authorType)) throw new Error("YAML author is invalid");
   const version = properties.version;
   if (!Number.isSafeInteger(version) || Number(version) < 1) throw new Error("YAML version is invalid");
+  const rawOutcomeTags = stringList(properties, "outcome_tags");
+  if (rawOutcomeTags.some((tag) => !isReusableKnowledgeOutcomeTag(tag))) {
+    throw new Error("YAML outcome_tags contains an unsupported outcome classification");
+  }
+  const outcomeTags = canonicalReusableKnowledgeOutcomeTags(
+    rawOutcomeTags as ReusableKnowledgeOutcomeTag[],
+  );
+  const rawReportedOutcome = properties.reported_outcome;
+  let reportedOutcome: HistoricalReportedOutcomeSummary | undefined;
+  if (rawReportedOutcome !== undefined) {
+    if (!isHistoricalReportedOutcomeClassification(rawReportedOutcome)) {
+      throw new Error("YAML reported_outcome contains an unsupported historical classification");
+    }
+    const reportedConfidence = properties.reported_outcome_confidence;
+    const claimCount = properties.reported_outcome_claim_count;
+    const sourceCount = properties.reported_outcome_source_count;
+    const policyVersion = properties.reported_outcome_policy;
+    if (
+      typeof reportedConfidence !== "number"
+      || !Number.isFinite(reportedConfidence)
+      || reportedConfidence < 0
+      || reportedConfidence > 1
+      || !Number.isSafeInteger(claimCount)
+      || Number(claimCount) < 1
+      || !Number.isSafeInteger(sourceCount)
+      || Number(sourceCount) < 1
+      || typeof policyVersion !== "string"
+      || !policyVersion.trim()
+      || policyVersion.length > 128
+    ) {
+      throw new Error("YAML historical reported-outcome summary is invalid");
+    }
+    reportedOutcome = {
+      classification: rawReportedOutcome,
+      classificationConfidence: reportedConfidence,
+      claimCount: Number(claimCount),
+      sourceCount: Number(sourceCount),
+      policyVersion,
+    };
+  }
+  const privateProvenanceIds = stringList(properties, "private_provenance_ids");
+  const provenanceSummary = privateProvenanceSummary(properties, privateProvenanceIds);
   const heading = /^#\s+(.+)$/m.exec(markdown);
   if (!heading) throw new Error("Obsidian note requires a level-one title");
   const relationshipsIndex = markdown.search(/^## Relationships\s*$/m);
   const attachmentsIndex = markdown.search(/^## Attachments\s*$/m);
+  PRIVATE_PROVENANCE_SECTION_MARKER.lastIndex = 0;
+  const provenanceMarkers = [...markdown.matchAll(PRIVATE_PROVENANCE_SECTION_MARKER)];
+  PRIVATE_PROVENANCE_SECTION_MARKER.lastIndex = 0;
+  if (provenanceSummary) {
+    if (provenanceMarkers.length !== 1) {
+      throw new Error("Managed private provenance Markdown summary is missing or duplicated");
+    }
+    const marker = provenanceMarkers[0]!;
+    if (
+      Number(marker[1]) !== provenanceSummary.total
+      || Number(marker[2]) !== provenanceSummary.projected
+      || marker[3] !== provenanceSummary.sha256
+      || (marker[4] === "truncated") !== provenanceSummary.truncated
+    ) {
+      throw new Error("Managed private provenance Markdown summary does not match YAML");
+    }
+  } else if (provenanceMarkers.length > 0) {
+    throw new Error("Managed private provenance Markdown summary has no YAML metadata");
+  }
+  const provenanceIndex = provenanceMarkers[0]?.index ?? -1;
   const afterHeading = markdown.slice((heading.index ?? 0) + heading[0].length).replace(/^\s*\n/, "");
-  const sectionIndexes = [relationshipsIndex, attachmentsIndex].filter((index) => index >= 0);
+  const sectionIndexes = [relationshipsIndex, attachmentsIndex, provenanceIndex].filter((index) => index >= 0);
   const firstGeneratedSection = sectionIndexes.length > 0 ? Math.min(...sectionIndexes) : -1;
   const bodySource = (firstGeneratedSection >= 0
     ? markdown.slice((heading.index ?? 0) + heading[0].length, firstGeneratedSection)
@@ -396,6 +667,10 @@ export function parseObsidianNote(source: string): VaultNote {
   return {
     id,
     nodeType,
+    ...(brainRegion ? { brainRegion } : {}),
+    ...(operatorProfileClass && operatorProfileAtlas
+      ? { operatorProfileClass: operatorProfileAtlas.profileClass }
+      : {}),
     lifecycleStatus,
     scope,
     sensitivity,
@@ -410,9 +685,13 @@ export function parseObsidianNote(source: string): VaultNote {
     createdAt: requiredString(properties, "created_at"),
     updatedAt: requiredString(properties, "updated_at"),
     ...(properties.expires_at ? { expiresAt: requiredString(properties, "expires_at") } : {}),
+    privateProvenanceIds,
+    ...(provenanceSummary ? { privateProvenanceSummary: provenanceSummary } : {}),
     sourceIds: stringList(properties, "source_ids"),
     aliases: stringList(properties, "aliases"),
     tags: stringList(properties, "tags"),
+    outcomeTags,
+    ...(reportedOutcome ? { reportedOutcome } : {}),
     edges,
     attachments: [...attachments.values()],
   };

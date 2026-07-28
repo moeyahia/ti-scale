@@ -21,8 +21,8 @@ describe("V2 mutation-authority inventory", () => {
     const report = auditMutationAuthorityInventory(discovery.routes);
     expect(() => assertMutationAuthorityInventory(report)).not.toThrow();
     expect(report).toMatchObject({
-      inventoryCount: 77,
-      declarationCount: 89,
+      inventoryCount: 98,
+      declarationCount: 114,
       duplicateInventoryKeys: [],
       unclassifiedDeclarations: [],
       staleInventoryRecords: [],
@@ -35,6 +35,7 @@ describe("V2 mutation-authority inventory", () => {
       record.controlPlaneEnforcement,
     ]));
     expect(byKey.get("POST /api/v2/runs/:runId/intelligence/metrics/recompute")).toBe("ownership_fenced");
+    expect(byKey.get("POST /api/v2/reports/runs/:runId/generate")).toBe("read_only_import_compatible");
     for (const key of [
       "POST /api/v2/runs/:runId/intelligence/attack-attempts",
       "POST /api/v2/runs/:runId/intelligence/attack-attempts/:attemptId/transition",
@@ -42,6 +43,9 @@ describe("V2 mutation-authority inventory", () => {
       "PUT /api/v2/runs/:runId/plan-changes/:requestId",
       "POST /api/v2/runs/:runId/plan-changes/:requestId/apply",
       "POST /api/v2/runs/:runId/plan-changes/:requestId/reject",
+      "POST /api/v2/runs/:runId/plan-changes/:requestId/resolve-inflight",
+      "POST /api/v2/runs/:runId/plan-changes/:requestId/inflight-resolution/finalize",
+      "POST /api/v2/missions/:missionId/intelligence/cves/:recordId/review",
       "POST /api/v2/guided/:missionId/commander/explain-more",
       "POST /api/v2/guided/:missionId/commander/show-next-step",
       "POST /api/v2/guided/:missionId/commander/interpret-result",
@@ -62,6 +66,7 @@ describe("V2 mutation-authority inventory", () => {
       "POST /api/v2/operational-truth/missions/:missionId/findings/:findingId/verify",
       "POST /api/v2/operational-truth/missions/:missionId/runs/:runId/failure-diagnoses",
       "POST /api/v2/operational-truth/missions/:missionId/runs/:runId/failure-diagnoses/:diagnosisId/resolve",
+      "POST /api/v2/runs/:runId/operational-hazards/retry-authorizations",
     ]) expect(byKey.get(key), key).toBe("lease_fenced");
   });
 
@@ -100,6 +105,7 @@ describe("V2 mutation-authority inventory", () => {
     expect(exceptions).toEqual([
       "DELETE /api/v2/auth/session",
       "POST /api/v2/auth/session",
+      "POST /api/v2/brain/attack-knowledge/bundles/:fingerprint/preview",
       "POST /api/v2/missions/autonomous/preflight",
       "POST /api/v2/registries/intake/resolve",
     ]);

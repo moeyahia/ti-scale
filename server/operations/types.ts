@@ -55,6 +55,12 @@ export interface OperationsRouterDependencies {
   readonly maximumSecureExportBytes?: number;
   readonly maximumSecureExportRecords?: number;
   /**
+   * Optional absolute Ti-Scale-owned root for generated Markdown/JSON reports.
+   * Production derives a namespaced sibling of the canonical database when
+   * omitted; in-memory tests must inject an explicit root.
+   */
+  readonly reportArtifactRoot?: string;
+  /**
    * Optional test/host override. Production creates the same local-only
    * service from the canonical V2 database when this is omitted.
    */
@@ -258,6 +264,8 @@ export interface RecoveryMutationProjection {
     readonly agentId: string | null;
     readonly assignmentId: string | null;
     readonly providerId: string | null;
+    readonly modelId: string | null;
+    readonly modelConfigurationHash: string | null;
     readonly providerRouteVersion: number | null;
   };
   readonly run: {
@@ -304,7 +312,12 @@ export interface RunRecoveryProjection {
   }[];
   readonly providerCandidates: readonly {
     readonly providerId: string;
-    readonly status: "healthy";
+    readonly modelId: string | null;
+    readonly modelConfigurationHash: string | null;
+    readonly status: "healthy" | "degraded" | "unhealthy" | "unknown" | "missing";
+    readonly eligibility: "compatible" | "unavailable" | "stale" | "budget_incompatible" | "enforcement_incompatible";
+    readonly enabled: boolean;
+    readonly reason: string;
     readonly supportsGuided: boolean;
     readonly enforcesAutonomousBoundary: boolean;
     readonly reportsExactTokenUsage: boolean;

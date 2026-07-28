@@ -26,6 +26,7 @@ function isAbortError(error: unknown): boolean {
 export class QueryCache {
   private readonly entries = new Map<string, CacheEntry>();
   private readonly listeners = new Map<string, Set<() => void>>();
+  private readonly invalidationVersions = new Map<string, number>();
   private suspended = false;
 
   subscribe(key: string, listener: () => void): () => void {
@@ -65,6 +66,7 @@ export class QueryCache {
     const current = this.read<T>(key);
     if (!force && current?.data !== undefined && Date.now() - current.updatedAt < staleTime) return current.data;
     if (current?.promise) return current.promise;
+    const invalidationVersion = this.invalidationVersions.get(key) ?? 0;
     const controller = new AbortController();
     const promise = Promise.resolve().then(() => {
       // pagehide can occur between fetch() and this microtask. Refuse to invoke
@@ -75,30 +77,44 @@ export class QueryCache {
       }
       return loader(controller.signal);
     });
-    this.entries.set(key, { ...current, promise, controller, updatedAt: current?.updatedAt ?? 0 });
+    // A new canonical read owns the visible request state. Retaining a prior
+    // error here leaves its retry action active while the retry is already in
+    // flight and prevents no-data consumers from rendering their named loading
+    // state. The catch path below restores the new failure (or the prior error
+    // for an abort), so clearing it for the bounded request is lossless.
+    this.entries.set(key, {
+      ...current,
+      error: undefined,
+      promise,
+      controller,
+      updatedAt: current?.updatedAt ?? 0,
+    });
     this.notify(key);
     try {
       const data = await promise;
       // An aborted/stale request must never overwrite a replacement request.
       if (this.read<T>(key)?.promise === promise) {
-        this.entries.set(key, { data, updatedAt: Date.now() });
+        const invalidatedWhilePending = (this.invalidationVersions.get(key) ?? 0) !== invalidationVersion;
+        this.entries.set(key, { data, updatedAt: invalidatedWhilePending ? 0 : Date.now() });
         this.notify(key);
       }
       return data;
     } catch (error) {
       if (this.read<T>(key)?.promise === promise) {
+        const invalidatedWhilePending = (this.invalidationVersions.get(key) ?? 0) !== invalidationVersion;
         this.entries.set(key, isAbortError(error) || controller.signal.aborted
           ? {
               data: current?.data,
               error: current?.error,
-              updatedAt: current?.updatedAt ?? 0,
+              updatedAt: invalidatedWhilePending ? 0 : current?.updatedAt ?? 0,
             }
           : {
               data: current?.data,
               error: error instanceof Error ? error : new Error("Query failed"),
-              // A failed event-driven refresh must not become a render/retry loop.
-              // The caller can retry explicitly or on the next invalidation.
-              updatedAt: Date.now(),
+              // A failed refresh must never make retained data look newly
+              // authoritative. Preserve the original snapshot age, or the
+              // invalidated state, so fail-closed consumers can retire it.
+              updatedAt: invalidatedWhilePending ? 0 : current?.updatedAt ?? 0,
             });
         this.notify(key);
       }
@@ -110,11 +126,28 @@ export class QueryCache {
     if ((this.listeners.get(key)?.size ?? 0) > 0) return;
     const current = this.entries.get(key);
     if (!current?.promise || !current.controller) return;
-    current.controller.abort();
-    this.entries.set(key, {
-      data: current.data,
-      error: current.error,
-      updatedAt: current.updatedAt,
+    const pendingPromise = current.promise;
+    const pendingController = current.controller;
+    queueMicrotask(() => {
+      // A keyed route transition temporarily removes the old page subscriber
+      // before mounting the successor page against the same canonical query.
+      // Give that synchronous handoff one microtask to complete. Truly unused
+      // work is still cancelled immediately afterwards.
+      if ((this.listeners.get(key)?.size ?? 0) > 0) return;
+      const latest = this.entries.get(key);
+      if (
+        latest?.promise !== pendingPromise
+        || latest.controller !== pendingController
+      ) {
+        return;
+      }
+      pendingController.abort();
+      if (this.entries.get(key)?.promise !== pendingPromise) return;
+      this.entries.set(key, {
+        data: latest.data,
+        error: latest.error,
+        updatedAt: latest.updatedAt,
+      });
     });
   }
 
@@ -153,8 +186,10 @@ export class QueryCache {
   }
 
   invalidate(key: string): void {
+    this.invalidationVersions.set(key, (this.invalidationVersions.get(key) ?? 0) + 1);
     const current = this.entries.get(key);
-    if (current) this.entries.set(key, { ...current, updatedAt: 0 });
+    if (current) this.entries.set(key, { ...current, error: undefined, updatedAt: 0 });
+    else this.entries.set(key, { updatedAt: 0 });
     this.notify(key);
   }
 
@@ -216,6 +251,7 @@ export function useQueryCache(): QueryCache {
 export interface QueryResult<T> {
   data?: T;
   error?: Error;
+  readonly updatedAt: number | null;
   isLoading: boolean;
   isRefreshing: boolean;
   refresh: () => void;
@@ -246,7 +282,7 @@ export function useQuery<T>(
     const unsubscribe = cache.subscribe(key, () => {
       const current = cache.read<T>(key);
       render((value) => value + 1);
-      if (current?.updatedAt === 0 && !current.promise) run(true);
+      if (current?.updatedAt === 0 && !current.promise && !current.error) run(true);
     });
     run(false);
     return () => {
@@ -255,11 +291,16 @@ export function useQuery<T>(
   }, [cache, key, run]);
 
   const entry = cache.read<T>(key);
+  // `null` is a legitimate, fully loaded API result (for example an optional
+  // model resolution that does not exist yet). Only `undefined` means the
+  // cache has no authoritative value.
+  const hasData = entry?.data !== undefined;
   return {
     data: entry?.data,
     error: entry?.error,
-    isLoading: !entry?.data && !entry?.error,
-    isRefreshing: Boolean(entry?.data && entry?.promise),
+    updatedAt: entry?.updatedAt ?? null,
+    isLoading: !hasData && !entry?.error,
+    isRefreshing: Boolean(hasData && entry?.promise),
     refresh: () => { run(true); },
     reconcile: async () => {
       await cache.reconcile(key, (signal) => loaderRef.current(signal), staleTime);

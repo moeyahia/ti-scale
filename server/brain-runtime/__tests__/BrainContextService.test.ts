@@ -1,17 +1,24 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDatabaseConnection, migrateDatabase } from "../../db";
 import {
+  getMemoryControlPolicy,
   MemoryRepository,
   SecondBrainService,
   type CreateMemoryNodeInput,
+  updateMemoryControlPolicy,
 } from "../../memory";
 import {
   BRAIN_LIFECYCLE_HOOKS,
   BrainContextHookError,
   BrainContextService,
+  brainContextServiceCompositionReceiptValid,
+  CanonicalMissionMemoryGraph,
+  canonicalMissionMemoryNodeId,
+  canonicalRunMemoryNodeId,
   listBrainLifecycleHookDefinitions,
   retrieveMissionBrainContext,
 } from "../index";
@@ -105,11 +112,150 @@ function createMemory(
   });
 }
 
+function connectHealthyVaultWithCurrentNodes(
+  db: ReturnType<typeof database>,
+  nodeIds: readonly string[],
+  input: {
+    readonly connectionId?: string;
+    readonly vaultPath?: string;
+    readonly now?: string;
+  } = {},
+): void {
+  const connectionId =
+    input.connectionId ?? "vault-brain-context-attack-knowledge";
+  const vaultPath = input.vaultPath ?? `/tmp/${connectionId}`;
+  const now = input.now ?? "2026-07-16T12:00:00.000Z";
+  db.prepare(`
+    INSERT INTO vault_connections (
+      id, vault_path, display_name, status, sync_scope_json,
+      permission_granted_at, last_sync_at, created_at, updated_at
+    ) VALUES (?, ?, 'Brain context attack knowledge Vault', 'connected', '{}',
+      ?, ?, ?, ?)
+  `).run(
+    connectionId,
+    vaultPath,
+    now,
+    now,
+    now,
+    now,
+  );
+  db.prepare(`
+    INSERT INTO audit_records (
+      id, actor_type, actor_id, action, resource_type, resource_id,
+      reason, details_json, record_hash, occurred_at
+    ) VALUES (?, 'operator', 'operator-test', 'vault.health.verified',
+      'vault_connection', ?, 'Test round trip passed', ?, ?, ?)
+  `).run(
+    `audit-${connectionId}`,
+    connectionId,
+    JSON.stringify({
+      connectionId,
+      connectionUpdatedAt: now,
+      pathFingerprint: createHash("sha256")
+        .update(`vault-path:${vaultPath}`, "utf8")
+        .digest("hex"),
+      checks: { write: true, read: true, rename: true, delete: true },
+    }),
+    "f".repeat(64),
+    now,
+  );
+  const insertSync = db.prepare(`
+    INSERT INTO vault_sync_state (
+      id, connection_id, node_id, relative_path, database_version,
+      vault_content_hash, database_content_hash, status,
+      last_scanned_at, last_synced_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'synced', ?, ?)
+  `);
+  for (const nodeId of nodeIds) {
+    const current = db.prepare(`
+      SELECT node.version, version.content_hash
+      FROM memory_nodes node
+      JOIN memory_versions version
+        ON version.node_id = node.id AND version.version = node.version
+      WHERE node.id = ?
+    `).get(nodeId) as {
+      readonly version: number;
+      readonly content_hash: string;
+    };
+    insertSync.run(
+      `sync-${nodeId}`,
+      connectionId,
+      nodeId,
+      `30 Attack Knowledge/${nodeId}.md`,
+      current.version,
+      current.content_hash,
+      current.content_hash,
+      now,
+      now,
+    );
+  }
+}
+
+function createConfirmedPreferenceProfile(
+  db: ReturnType<typeof database>,
+  repository: MemoryRepository,
+  input: {
+    readonly nodeId: string;
+    readonly operatorId: string;
+    readonly preferenceKey:
+      | "autonomy.default_posture"
+      | "communication.technical_readability"
+      | "communication.evidence_first";
+    readonly scope: { readonly kind: "global" } | {
+      readonly kind: "engagement";
+      readonly engagementId: string;
+    };
+    readonly value: Readonly<Record<string, unknown>>;
+    readonly appliesTo: readonly string[];
+    readonly version?: number;
+    readonly expiresAt?: string;
+  },
+): void {
+  const confirmedAt = "2026-07-16T12:00:00.000Z";
+  createMemory(repository, {
+    id: input.nodeId,
+    nodeType: "preference",
+    scope: input.scope,
+    sensitivity: "private",
+    confidence: 1,
+    lifecycleStatus: "confirmed",
+    confirmationState: "confirmed",
+    authorType: "operator",
+    authorId: input.operatorId,
+    retentionPolicy: { allowAutonomous: true, allowGuided: true },
+    ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+  });
+  db.prepare(`
+    INSERT INTO preference_profiles (
+      id, operator_id, scope, engagement_id, mission_type, preference_key,
+      value_json, confirmation_state, confidence, source_node_id,
+      consent_policy, version, confirmed_at, expires_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'autonomous', ?, ?, 'confirmed', 1, ?,
+      'explicit_operator_confirmation', ?, ?, ?, ?, ?)
+  `).run(
+    `profile-${input.nodeId}`,
+    input.operatorId,
+    input.scope.kind,
+    input.scope.kind === "engagement" ? input.scope.engagementId : null,
+    input.preferenceKey,
+    JSON.stringify({
+      value: input.value,
+      appliesTo: input.appliesTo,
+    }),
+    input.nodeId,
+    input.version ?? 1,
+    confirmedAt,
+    input.expiresAt ?? null,
+    confirmedAt,
+    confirmedAt,
+  );
+}
+
 function service(db: ReturnType<typeof database>, availability?: () => {
   available: boolean;
   code?: string;
   explanation?: string;
-}) {
+}, resolveExistingVaultPath: (vaultPath: string) => string = (vaultPath) => vaultPath) {
   const repository = new MemoryRepository(db, {
     clock: () => new Date("2026-07-16T12:00:00.000Z"),
   });
@@ -120,21 +266,377 @@ function service(db: ReturnType<typeof database>, availability?: () => {
       database: db,
       secondBrain,
       ...(availability ? { availability } : {}),
+      resolveExistingVaultPath,
+      clock: () => new Date("2026-07-16T12:00:00.000Z"),
     }),
   };
 }
 
 describe("BrainContextService lifecycle boundary", () => {
+  test("attests the exact local database and active health-verified Vault set without exposing paths", () => {
+    const db = database();
+    try {
+      const { runtime } = service(db);
+      const now = new Date("2026-07-16T12:00:00.000Z");
+      expect(runtime.inspectComposition(now)).toBeUndefined();
+
+      connectHealthyVaultWithCurrentNodes(db, []);
+      const receipt = runtime.inspectComposition(now);
+      expect(receipt).toMatchObject({
+        serviceId: "ti-scale.local-second-brain-context.v1",
+        activeVaultCount: 1,
+        localOnly: true,
+        userOwned: true,
+        targetInteraction: false,
+        executionAuthority: "none",
+      });
+      expect(brainContextServiceCompositionReceiptValid(receipt!, now)).toBe(true);
+      expect(JSON.stringify(receipt)).not.toContain("/tmp/");
+      expect(receipt?.databaseIdentitySha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(receipt?.activeVaultSetSha256).toMatch(/^[a-f0-9]{64}$/);
+
+      db.prepare(`
+        UPDATE vault_connections
+        SET vault_path = ?, updated_at = ?
+        WHERE id = 'vault-brain-context-attack-knowledge'
+      `).run("/tmp/a-different-user-owned-vault", "2026-07-16T12:00:01.000Z");
+      const changed = runtime.inspectComposition(now);
+      expect(changed).toBeUndefined();
+      expect(brainContextServiceCompositionReceiptValid(
+        receipt!,
+        new Date("2026-07-16T12:01:00.000Z"),
+      )).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("hashes only the exact usable Vaults in a mixed healthy and unreachable set", () => {
+    const db = database();
+    try {
+      connectHealthyVaultWithCurrentNodes(db, [], {
+        connectionId: "vault-healthy",
+        vaultPath: "/tmp/vault-healthy",
+      });
+      connectHealthyVaultWithCurrentNodes(db, [], {
+        connectionId: "vault-unreachable",
+        vaultPath: "/tmp/vault-unreachable",
+      });
+      const { runtime: mixed } = service(
+        db,
+        undefined,
+        (path) => {
+          if (path.endsWith("unreachable")) throw new Error("removed");
+          return path;
+        },
+      );
+      const now = new Date("2026-07-16T12:00:00.000Z");
+      const mixedReceipt = mixed.inspectComposition(now);
+      expect(mixedReceipt?.activeVaultCount).toBe(1);
+
+      db.prepare(`
+        UPDATE vault_connections SET status = 'disconnected'
+        WHERE id = 'vault-unreachable'
+      `).run();
+      const { runtime: healthyOnly } = service(db);
+      const healthyOnlyReceipt = healthyOnly.inspectComposition(now);
+      expect(healthyOnlyReceipt?.activeVaultCount).toBe(1);
+      expect(mixedReceipt?.activeVaultSetSha256)
+        .toBe(healthyOnlyReceipt?.activeVaultSetSha256);
+      expect(JSON.stringify(mixedReceipt)).not.toContain("/tmp/");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("seeds current creator-owned lifecycle preferences without broadening an exact Autonomous whitelist", () => {
+    const db = database();
+    try {
+      const scope = seedScope(db, "lifecycle-preferences", "autonomous");
+      db.prepare(`
+        UPDATE missions SET memory_policy_json = ? WHERE id = ?
+      `).run(JSON.stringify({
+        allowedScopes: ["confirmed_preferences", "verified_lessons"],
+        exactContextNodeIds: [],
+      }), scope.missionId);
+      const { repository, runtime } = service(db);
+      createConfirmedPreferenceProfile(db, repository, {
+        nodeId: "preference-autonomy",
+        operatorId: "operator",
+        preferenceKey: "autonomy.default_posture",
+        scope: { kind: "global" },
+        value: {
+          posture: "high_autonomy",
+          boundary: "signed_contract_and_platform_policy",
+        },
+        appliesTo: ["autonomy_presentation"],
+      });
+      createConfirmedPreferenceProfile(db, repository, {
+        nodeId: "preference-readable-global",
+        operatorId: "operator",
+        preferenceKey: "communication.technical_readability",
+        scope: { kind: "global" },
+        value: { style: "technical_readable" },
+        appliesTo: ["reports"],
+      });
+      createConfirmedPreferenceProfile(db, repository, {
+        nodeId: "preference-readable-engagement",
+        operatorId: "operator",
+        preferenceKey: "communication.technical_readability",
+        scope: { kind: "engagement", engagementId: scope.engagementId },
+        value: { style: "technical_readable" },
+        appliesTo: ["reports"],
+        version: 2,
+      });
+      createConfirmedPreferenceProfile(db, repository, {
+        nodeId: "preference-evidence",
+        operatorId: "operator",
+        preferenceKey: "communication.evidence_first",
+        scope: { kind: "global" },
+        value: { rawLogs: "not_automatically_evidence" },
+        appliesTo: ["evidence_presentation", "reports"],
+      });
+      createConfirmedPreferenceProfile(db, repository, {
+        nodeId: "preference-expired",
+        operatorId: "operator",
+        preferenceKey: "communication.evidence_first",
+        scope: { kind: "global" },
+        value: { rawLogs: "not_automatically_evidence" },
+        appliesTo: ["evidence_presentation", "reports"],
+        version: 2,
+        expiresAt: "2026-07-17T00:00:00.000Z",
+      });
+
+      const resolved = runtime.resolveLifecyclePreferenceNodeIds({
+        missionId: scope.missionId,
+        operatorId: "operator",
+        journey: "autonomous",
+        hook: "intake",
+        preferenceKeys: [
+          "autonomy.default_posture",
+          "communication.technical_readability",
+          "communication.evidence_first",
+        ],
+      });
+      expect([...resolved]).toEqual([
+        "preference-autonomy",
+        "preference-readable-engagement",
+        "preference-evidence",
+      ]);
+
+      const seeded = retrieveMissionBrainContext({
+        brainContext: runtime,
+        hook: "intake",
+        journey: "autonomous",
+        missionId: scope.missionId,
+        actorId: "operator",
+        actorType: "operator",
+        query: "Authorized mission intake",
+        queryRedacted: "Authorized mission intake",
+        memoryPolicy: {
+          allowedScopes: ["confirmed_preferences", "verified_lessons"],
+          exactContextNodeIds: [],
+        },
+        lifecyclePreferenceNodeIds: resolved,
+      });
+      expect(seeded.items.map(({ node }) => node.id)).toEqual(expect.arrayContaining([
+        "preference-autonomy",
+        "preference-readable-engagement",
+        "preference-evidence",
+      ]));
+      expect(seeded.contextPack.scopePolicy.exactNodeIdsOnly).not.toBe(true);
+
+      createMemory(repository, {
+        id: "signed-exact-lesson",
+        nodeType: "lesson",
+        scope: { kind: "global" },
+        sensitivity: "private",
+        lifecycleStatus: "verified",
+        confirmationState: "not_required",
+        authorType: "system",
+        authorId: "lesson-reviewer",
+      });
+      db.prepare(`
+        UPDATE missions SET memory_policy_json = ? WHERE id = ?
+      `).run(JSON.stringify({
+        allowedScopes: ["confirmed_preferences", "verified_lessons"],
+        exactContextNodeIds: ["signed-exact-lesson"],
+      }), scope.missionId);
+      expect([...runtime.resolveLifecyclePreferenceNodeIds({
+        missionId: scope.missionId,
+        operatorId: "operator",
+        journey: "autonomous",
+        hook: "intake",
+        preferenceKeys: ["autonomy.default_posture"],
+      })]).toEqual([]);
+
+      const exact = retrieveMissionBrainContext({
+        brainContext: runtime,
+        hook: "intake",
+        journey: "autonomous",
+        missionId: scope.missionId,
+        actorId: "operator",
+        actorType: "operator",
+        query: "Authorized mission intake",
+        queryRedacted: "Authorized mission intake",
+        memoryPolicy: {
+          allowedScopes: ["confirmed_preferences", "verified_lessons"],
+          exactContextNodeIds: ["signed-exact-lesson"],
+        },
+        // A stale resolver result still cannot broaden this later exact policy.
+        lifecyclePreferenceNodeIds: resolved,
+      });
+      expect(exact.items.map(({ node }) => node.id)).toEqual(["signed-exact-lesson"]);
+      expect(exact.contextPack.scopePolicy.exactNodeIdsOnly).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("uses only current canonical Guided mission and run anchors", () => {
+    const db = database();
+    try {
+      const scope = seedScope(db, "canonical-guided", "guided");
+      const other = seedScope(db, "canonical-other", "guided");
+      const { repository, runtime } = service(db);
+      createMemory(repository, {
+        id: "restricted-imported-other-mission",
+        nodeType: "artifact",
+        scope: { kind: "mission", engagementId: other.engagementId, missionId: other.missionId },
+        sensitivity: "restricted",
+        lifecycleStatus: "verified",
+        confirmationState: "not_required",
+        title: "Canonical guided mission plan step",
+      });
+      const graph = new CanonicalMissionMemoryGraph(db, {
+        clock: () => new Date("2026-07-16T12:00:00.000Z"),
+      }).ensureRun(scope.runId);
+
+      expect(graph).toMatchObject({
+        missionNodeId: canonicalMissionMemoryNodeId(scope.missionId),
+        runNodeId: canonicalRunMemoryNodeId(scope.runId),
+      });
+      expect(graph.nodeIds).toHaveLength(2);
+      expect(db.prepare(`
+        SELECT edge_type, COUNT(*) AS count FROM memory_edges
+        WHERE source_node_id = ? GROUP BY edge_type ORDER BY edge_type
+      `).all(graph.runNodeId!)).toEqual([{ edge_type: "belongs_to", count: 1 }]);
+
+      const planning = retrieveMissionBrainContext({
+        brainContext: runtime,
+        hook: "planning",
+        journey: "guided",
+        missionId: scope.missionId,
+        runId: scope.runId,
+        actorId: "guided-planner",
+        actorType: "agent",
+        query: "bounded current planning context",
+        queryRedacted: "bounded current planning context",
+        memoryPolicy: { preferenceUse: "confirmed_or_consent_governed" },
+        canonicalContextNodeIds: graph.nodeIds,
+      });
+      expect(planning.status).toBe("ready");
+      expect(planning.items.map(({ node }) => node.id)).toEqual(expect.arrayContaining([
+        graph.missionNodeId,
+        graph.runNodeId!,
+      ]));
+      expect(planning.items.map(({ node }) => node.id)).not.toContain("restricted-imported-other-mission");
+
+      const toolSelection = retrieveMissionBrainContext({
+        brainContext: runtime,
+        hook: "tool_selection",
+        journey: "guided",
+        missionId: scope.missionId,
+        runId: scope.runId,
+        stepId: scope.stepId,
+        actorId: "guided-specialist",
+        actorType: "agent",
+        query: "current represented step",
+        queryRedacted: "current represented step",
+        memoryPolicy: { preferenceUse: "confirmed_or_consent_governed" },
+        canonicalContextNodeIds: graph.nodeIds,
+      });
+      // Mission/run anchors are not fabricated into a step-specific tool
+      // recommendation. Until an eligible tool, failure, or step memory
+      // exists, the persisted result must remain truthfully empty.
+      expect(toolSelection.status).toBe("no_relevant_memory");
+      expect(toolSelection.items).toEqual([]);
+
+      // Idempotent replay creates neither duplicate nodes nor duplicate edges.
+      new CanonicalMissionMemoryGraph(db).ensureRun(scope.runId);
+      expect(db.prepare(`SELECT COUNT(*) AS count FROM memory_nodes WHERE mission_id = ?`).get(scope.missionId))
+        .toEqual({ count: 2 });
+      expect(db.prepare(`SELECT COUNT(*) AS count FROM memory_edges WHERE mission_id = ?`).get(scope.missionId))
+        .toEqual({ count: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("keeps hooks usable when canonical anchors are forgotten or operational retention is disabled", () => {
+    const db = database();
+    try {
+      const scope = seedScope(db, "canonical-forgotten", "guided");
+      const { repository, runtime } = service(db);
+      const graph = new CanonicalMissionMemoryGraph(db, {
+        clock: () => new Date("2026-07-16T12:00:00.000Z"),
+      });
+      const initial = graph.ensureRun(scope.runId);
+      repository.forgetNode(initial.runNodeId!, "operator-test", "Exercise run-anchor forgetting");
+      const forgotten = graph.ensureRun(scope.runId);
+      expect(forgotten.status).toBe("forgotten");
+      expect(forgotten.nodeIds).toEqual([initial.missionNodeId]);
+      expect(() => retrieveMissionBrainContext({
+        brainContext: runtime,
+        hook: "planning",
+        journey: "guided",
+        missionId: scope.missionId,
+        runId: scope.runId,
+        actorId: "guided-planner",
+        actorType: "agent",
+        query: "current mission after a forgotten run anchor",
+        queryRedacted: "current mission after a forgotten run anchor",
+        memoryPolicy: { preferenceUse: "confirmed_or_consent_governed" },
+        canonicalContextNodeIds: forgotten.nodeIds,
+      })).not.toThrow();
+
+      const control = getMemoryControlPolicy(db);
+      updateMemoryControlPolicy({
+        database: db,
+        expectedVersion: control.version,
+        actor: "operator-test",
+        now: "2026-07-16T12:00:00.000Z",
+        policy: { ...control, operationalMemoryEnabled: false },
+      });
+      const disabled = graph.ensureRun(scope.runId);
+      expect(disabled).toMatchObject({ status: "skipped_by_policy", nodeIds: [] });
+    } finally {
+      db.close();
+    }
+  });
+
   test("registers every required lifecycle point with bounded typed policies", () => {
     const definitions = listBrainLifecycleHookDefinitions();
     expect(definitions.map(({ hook }) => hook)).toEqual([...BRAIN_LIFECYCLE_HOOKS]);
-    expect(definitions).toHaveLength(13);
+    expect(definitions).toHaveLength(14);
     for (const definition of definitions) {
       expect(definition.defaultContextBudget).toBeGreaterThan(0);
       expect(definition.defaultContextBudget).toBeLessThanOrEqual(definition.maximumContextBudget);
       expect(definition.defaultLimit).toBeLessThanOrEqual(definition.maximumLimit);
       expect(definition.maximumSensitivity).not.toBe("restricted");
       expect(definition.allowedNodeTypes.length).toBeGreaterThan(0);
+    }
+    const byHook = new Map(definitions.map((item) => [item.hook, item]));
+    for (const hook of ["planning", "guided_briefing", "tool_selection", "attack_attempt", "failure", "replan"] as const) {
+      expect(byHook.get(hook)?.allowedNodeTypes).toEqual(expect.arrayContaining([
+        "technology_product",
+        "attack_procedure",
+        "procedure_version",
+        "operational_hazard",
+        "target_state_transition",
+        "recovery_pattern",
+        "health_check",
+      ]));
     }
   });
 
@@ -382,7 +884,9 @@ describe("BrainContextService lifecycle boundary", () => {
       expect(globalResult.items).toEqual([]);
       expect(globalResult.contextPack.scopePolicy).toMatchObject({
         allowGlobal: true,
-        allowedScopeClasses: ["confirmed_preferences", "verified_lessons", "engagement_memory"],
+        allowedScopeClasses: [
+          "confirmed_preferences", "verified_lessons", "confirmed_attack_knowledge", "verified_attack_knowledge", "engagement_memory",
+        ],
       });
       expect(() => runtime.retrieve({
         ...common,
@@ -452,6 +956,7 @@ describe("BrainContextService lifecycle boundary", () => {
         confirmationState: "not_required",
         title: "Bounded planning strategy",
       });
+      const canonical = new CanonicalMissionMemoryGraph(db).ensureRun(scope.runId);
       const result = retrieveMissionBrainContext({
         brainContext: runtime,
         hook: "planning",
@@ -463,6 +968,7 @@ describe("BrainContextService lifecycle boundary", () => {
         query: "bounded planning strategy",
         queryRedacted: "bounded planning strategy",
         memoryPolicy: { exactContextNodeIds: [], allowedScopes: [] },
+        canonicalContextNodeIds: canonical.nodeIds,
       });
       expect(result.status).toBe("no_relevant_memory");
       expect(result.items).toEqual([]);
@@ -511,7 +1017,9 @@ describe("BrainContextService lifecycle boundary", () => {
       expect(result.items).toEqual([]);
       expect(result.contextPack.scopePolicy).toMatchObject({
         allowGlobal: true,
-        allowedScopeClasses: ["confirmed_preferences", "verified_lessons", "engagement_memory"],
+        allowedScopeClasses: [
+          "confirmed_preferences", "verified_lessons", "confirmed_attack_knowledge", "verified_attack_knowledge", "engagement_memory",
+        ],
       });
     } finally {
       db.close();
@@ -593,6 +1101,85 @@ describe("BrainContextService lifecycle boundary", () => {
     }
   });
 
+  test("separates confirmed attack hypotheses from verified attack execution knowledge", () => {
+    const db = database();
+    try {
+      const scope = seedScope(db, "attack-knowledge-authority", "autonomous");
+      const { repository, runtime } = service(db);
+      createMemory(repository, {
+        id: `mem_${"a".repeat(32)}`,
+        nodeType: "attack_procedure",
+        scope: { kind: "global" },
+        sensitivity: "internal",
+        lifecycleStatus: "confirmed",
+        confirmationState: "confirmed",
+        title: "Evidence-backed service fingerprint procedure",
+        retentionPolicy: { allowAutonomous: true },
+      });
+      createMemory(repository, {
+        id: `mem_${"b".repeat(32)}`,
+        nodeType: "attack_procedure",
+        scope: { kind: "global" },
+        sensitivity: "internal",
+        lifecycleStatus: "verified",
+        confirmationState: "confirmed",
+        title: "Verified service fingerprint procedure",
+        retentionPolicy: { allowAutonomous: true },
+      });
+      connectHealthyVaultWithCurrentNodes(db, [
+        `mem_${"a".repeat(32)}`,
+        `mem_${"b".repeat(32)}`,
+      ]);
+
+      const confirmedPlanning = runtime.retrieve({
+        hook: "planning",
+        journey: "autonomous",
+        missionId: scope.missionId,
+        runId: scope.runId,
+        actorId: "planner-agent",
+        actorType: "agent",
+        availabilityPolicy: "required",
+        query: "service fingerprint procedure",
+        queryRedacted: "service fingerprint procedure",
+        allowGlobal: true,
+        allowedScopeClasses: ["confirmed_attack_knowledge"],
+        exactNodeIds: [
+          `mem_${"a".repeat(32)}`,
+          `mem_${"b".repeat(32)}`,
+        ],
+        exactNodeIdsOnly: true,
+      });
+      expect(confirmedPlanning.items.map((item) => item.node.id).sort()).toEqual([
+        `mem_${"a".repeat(32)}`,
+        `mem_${"b".repeat(32)}`,
+      ]);
+
+      const verifiedOnly = runtime.retrieve({
+        hook: "planning",
+        journey: "autonomous",
+        missionId: scope.missionId,
+        runId: scope.runId,
+        actorId: "planner-agent",
+        actorType: "agent",
+        availabilityPolicy: "required",
+        query: "service fingerprint procedure",
+        queryRedacted: "service fingerprint procedure",
+        allowGlobal: true,
+        allowedScopeClasses: ["verified_attack_knowledge"],
+        exactNodeIds: [
+          `mem_${"a".repeat(32)}`,
+          `mem_${"b".repeat(32)}`,
+        ],
+        exactNodeIdsOnly: true,
+      });
+      expect(verifiedOnly.items.map((item) => item.node.id)).toEqual([
+        `mem_${"b".repeat(32)}`,
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
   test("fails closed when a signed applicable exact Autonomous memory node is unavailable", () => {
     const db = database();
     try {
@@ -656,6 +1243,7 @@ describe("BrainContextService lifecycle boundary", () => {
       });
       expect(result.items.map((item) => item.node.id)).toEqual(["memory-exact-mission-lesson"]);
       expect(result.contextPack.scopePolicy.allowedScopeClasses).toEqual(["verified_lessons"]);
+      expect(result.contextPack.scopePolicy.exactNodeIdsOnly).toBe(true);
     } finally {
       db.close();
     }

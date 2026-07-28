@@ -112,16 +112,16 @@ describe("Memory Inbox mutation contract", () => {
       nextCursor: "next-page",
       onChange: () => undefined,
     }));
-    expect(firstPage).toMatch(/<button[^>]*disabled=""[^>]*>First page<\/button>/);
-    expect(firstPage).toMatch(/<button(?![^>]*disabled)[^>]*>Next page<\/button>/);
+    expect(firstPage).toMatch(/<button[^>]*aria-label="First page"[^>]*disabled=""/);
+    expect(firstPage).toMatch(/<button(?![^>]*disabled)[^>]*aria-label="Next page"/);
 
     const terminalPage = renderToStaticMarkup(CursorControls({
       cursor: "current-page",
       nextCursor: null,
       onChange: () => undefined,
     }));
-    expect(terminalPage).toMatch(/<button(?![^>]*disabled)[^>]*>First page<\/button>/);
-    expect(terminalPage).toMatch(/<button[^>]*disabled=""[^>]*>Next page<\/button>/);
+    expect(terminalPage).toMatch(/<button(?![^>]*disabled)[^>]*aria-label="First page"/);
+    expect(terminalPage).toMatch(/<button[^>]*aria-label="Next page"[^>]*disabled=""/);
   });
 
   test("keeps ordinary rejection distinct from reject-and-do-not-relearn", async () => {

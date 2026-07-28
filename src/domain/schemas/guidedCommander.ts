@@ -98,6 +98,14 @@ export function parseGuidedTranscript(payload: unknown): GuidedTranscript {
   ) {
     throw new Error("Guided observation verification state is invalid");
   }
+  const reviewKind = observation?.reviewKind;
+  if (
+    observation
+    && reviewKind !== "ingestion_attestation"
+    && reviewKind !== "semantic_interpretation"
+  ) {
+    throw new Error("Guided observation review kind is invalid");
+  }
   return {
     schemaVersion: "2.4",
     mission: {
@@ -123,7 +131,8 @@ export function parseGuidedTranscript(payload: unknown): GuidedTranscript {
       fileName: nullableString(observation.fileName, "observation.fileName"),
       byteSize: number(observation.byteSize, "observation.byteSize"),
       redactionCount: number(observation.redactionCount, "observation.redactionCount"),
-      interpretationSummary: nonEmpty(observation.interpretationSummary, "observation.interpretationSummary"),
+      reviewSummary: nonEmpty(observation.reviewSummary, "observation.reviewSummary"),
+      reviewKind: reviewKind as "ingestion_attestation" | "semantic_interpretation",
       verificationState: verificationState as "unverified" | "verified" | "disputed" | "rejected",
       acquiredAt: nonEmpty(observation.acquiredAt, "observation.acquiredAt"),
     } : null,

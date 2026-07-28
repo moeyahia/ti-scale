@@ -1,6 +1,7 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { useEventStream } from "../../data/events/EventStreamProvider";
 import { Button, Card, EmptyState, ErrorPanel, LoadingPanel, StatusPill } from "../../design-system/components/Primitives";
+import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
 import { AppLink, useNavigation } from "../../app/router/navigation";
 
 export function formatTime(value: string | null | undefined): string {
@@ -20,8 +21,8 @@ export function percent(value: number | null | undefined, fractional = true): st
   return `${Math.round((fractional ? value * 100 : value))}%`;
 }
 
-export function JsonDetails({ value, label = "Technical detail" }: { value: unknown; label?: string }) {
-  return <details className="os-raw-details"><summary>{label}</summary><pre>{JSON.stringify(value, null, 2)}</pre></details>;
+export function JsonDetails({ value, label = "Technical detail", id }: { value: unknown; label?: string; id?: string }) {
+  return <details id={id} className="os-raw-details"><summary>{label}</summary><pre>{JSON.stringify(value, null, 2)}</pre></details>;
 }
 
 export function StreamState() {
@@ -104,9 +105,9 @@ export function SelectFilter({ filters, name, label, options, resetKeys = [], de
   resetKeys?: readonly string[];
   defaultLabel?: string;
 }) {
-  return <label><span>{label}</span><select value={filters.values[name] ?? ""} onChange={(event) => filters.set(
+  return <label><span>{label}</span><TitaniumSelect value={filters.values[name] ?? ""} onChange={(event) => filters.set(
     buildSelectFilterPatch(name, event.target.value, resetKeys),
-  )}><option value="">{defaultLabel}</option>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>;
+  )}><option value="">{defaultLabel}</option>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</TitaniumSelect></label>;
 }
 
 export function buildSelectFilterPatch(

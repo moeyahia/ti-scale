@@ -14,6 +14,8 @@ import {
   type BrainHomeInboxFixture,
 } from "./support/brainHomeInboxFixture";
 import { canonicalFixtureNamespace } from "./support/fixtureNamespace";
+import { readTitaniumOptions, selectTitaniumOption } from "./support/titaniumSelect";
+import { MEMORY_NODE_TYPES, type MemoryNodeType } from "../../src/domain/types/brain";
 
 const TEST_IDS = {
   homeNavigation: "e2e.brain-home.navigation-and-populated",
@@ -37,14 +39,12 @@ const BRAIN_TABS = [
   { name: "Controls", href: "/brain/control", heading: "Memory Control Center" },
   { name: "Obsidian Vault", href: "/brain/vault", heading: "Obsidian Vault" },
 ] as const;
-const NODE_TYPES = [
-  "operator", "preference", "mission", "run", "plan", "phase", "step", "agent",
-  "tool", "mcp_capability", "tactic", "technique", "procedure", "target", "asset",
-  "entity", "decision", "evidence", "finding", "artifact", "failure", "recovery",
-  "evaluation", "lesson", "report", "source",
-] as const;
 const LIFECYCLES = ["candidate", "confirmed", "verified", "disputed", "stale", "superseded"] as const;
 const SENSITIVITIES = ["public", "internal", "private", "restricted"] as const;
+
+function nodeTypeLabel(type: MemoryNodeType): string {
+  return type.replaceAll("_", " ");
+}
 
 let fixture: BrainHomeInboxFixture;
 
@@ -94,6 +94,12 @@ async function strictAudit(audit: BrowserAudit, testInfo: TestInfo): Promise<voi
   expect(audit.unexpected, "Second Brain controls emitted an unexpected browser, console, network, or server failure").toEqual([]);
   expect(audit.degradedApi, "Second Brain source coverage requires the mounted V2 API").toEqual([]);
   await audit.assertClean(testInfo);
+}
+
+async function expectSelectedTitaniumValue(control: Locator, value: string): Promise<void> {
+  const selected = (await readTitaniumOptions(control)).filter((option) => option.selected);
+  expect(selected).toHaveLength(1);
+  expect(selected[0]?.value).toBe(value);
 }
 
 async function activate(control: Locator, input: "keyboard" | "pointer"): Promise<void> {
@@ -188,17 +194,28 @@ test(`${TEST_IDS.homeNavigation} traverses every Second Brain home link against 
   expect(summaryResponse.status()).toBe(200);
   expect(nodesResponse.status()).toBe(200);
   const summaryPayload = await summaryResponse.json() as {
-    counts: { confirmed: number; verified: number; candidates: number; edges: number };
+    counts: {
+      confirmed: number;
+      verified: number;
+      candidateNodes: number;
+      pendingReviews: number;
+      candidates: number;
+      edges: number;
+    };
     health: { database: string; fts: string };
   };
   expect(summaryPayload.counts.confirmed).toBeGreaterThanOrEqual(1);
   expect(summaryPayload.counts.verified).toBeGreaterThanOrEqual(1);
-  expect(summaryPayload.counts.candidates).toBeGreaterThanOrEqual(4);
+  expect(summaryPayload.counts.candidateNodes).toBeGreaterThanOrEqual(1);
+  expect(summaryPayload.counts.pendingReviews).toBeGreaterThanOrEqual(4);
+  expect(summaryPayload.counts.candidates).toBe(summaryPayload.counts.pendingReviews);
   expect(summaryPayload.counts.edges).toBeGreaterThanOrEqual(1);
   expect(summaryPayload.health).toEqual({ database: "healthy", fts: "healthy" });
   await expectHeading(page, "Second Brain");
   await expect(page.getByRole("region", { name: "Memory health", exact: true })).toContainText("Confirmed");
   await expect(page.getByRole("region", { name: "Memory health", exact: true })).toContainText("Verified");
+  await expect(page.getByRole("region", { name: "Memory health", exact: true })).toContainText("Candidate nodes");
+  await expect(page.getByRole("region", { name: "Memory health", exact: true })).toContainText("Inbox reviews");
   await expect(page.getByRole("heading", { name: "Canonical memory health", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Obsidian vault", exact: true })).toBeVisible();
 
@@ -250,6 +267,10 @@ test(`${TEST_IDS.homeNavigation} traverses every Second Brain home link against 
 });
 
 test(`${TEST_IDS.homeSearch} exercises every home search option and a stable node deep link`, async ({ page }, testInfo) => {
+  // This is an exhaustive registry audit rather than a representative sample:
+  // every canonical memory-node type must complete a real filtered API read
+  // through alternating pointer and keyboard input.
+  test.slow();
   const audit = new BrowserAudit(page, { allowEventStreamNavigationAbort: true });
   const initialNodes = brainRead(page, "/api/v2/brain/nodes");
   await page.goto("/brain", { waitUntil: "domcontentloaded" });
@@ -267,38 +288,41 @@ test(`${TEST_IDS.homeSearch} exercises every home search option and a stable nod
   await expect(page.getByRole("link", { name: `Open memory ${fixture.primaryNodeTitle} (${fixture.primaryNodeId})`, exact: true })).toBeVisible();
 
   const nodeType = page.getByRole("combobox", { name: "Node type", exact: true });
-  await expect(nodeType.locator("option").first()).toBeAttached();
-  expect(await nodeType.locator("option").allTextContents()).toEqual([
-    "All types",
-    ...NODE_TYPES.map((type) => type.replaceAll("_", " ")),
+  expect((await readTitaniumOptions(nodeType)).map(({ value, label, disabled }) => ({ value, label, disabled }))).toEqual([
+    { value: "", label: "All types", disabled: false },
+    ...MEMORY_NODE_TYPES.map((type) => ({ value: type, label: nodeTypeLabel(type), disabled: false })),
   ]);
-  for (const type of NODE_TYPES) {
+  for (const [index, type] of MEMORY_NODE_TYPES.entries()) {
     const response = brainRead(page, "/api/v2/brain/nodes", (url) => url.searchParams.get("nodeType") === type);
-    await nodeType.selectOption(type);
+    await selectTitaniumOption(nodeType, type, index % 2 === 0 ? "pointer" : "keyboard");
     expect((await response).status()).toBe(200);
-    await expect(nodeType).toHaveValue(type);
+    await expectSelectedTitaniumValue(nodeType, type);
   }
-  await nodeType.selectOption("");
+  await selectTitaniumOption(nodeType, "", "keyboard");
 
   const lifecycle = page.getByRole("combobox", { name: "Lifecycle", exact: true });
-  expect(await lifecycle.locator("option").allTextContents()).toEqual(["All active states", ...LIFECYCLES]);
-  for (const status of LIFECYCLES) {
+  expect((await readTitaniumOptions(lifecycle)).map(({ value, label, disabled }) => ({ value, label, disabled }))).toEqual([
+    { value: "", label: "All active states", disabled: false },
+    ...LIFECYCLES.map((status) => ({ value: status, label: status, disabled: false })),
+  ]);
+  for (const [index, status] of LIFECYCLES.entries()) {
     const response = brainRead(page, "/api/v2/brain/nodes", (url) => url.searchParams.get("status") === status);
-    await lifecycle.selectOption(status);
+    await selectTitaniumOption(lifecycle, status, index % 2 === 0 ? "keyboard" : "pointer");
     expect((await response).status()).toBe(200);
-    await expect(lifecycle).toHaveValue(status);
   }
-  await lifecycle.selectOption("");
+  await selectTitaniumOption(lifecycle, "", "pointer");
 
   const sensitivity = page.getByRole("combobox", { name: "Sensitivity", exact: true });
-  expect(await sensitivity.locator("option").allTextContents()).toEqual(["Permitted levels", ...SENSITIVITIES]);
-  for (const level of SENSITIVITIES) {
+  expect((await readTitaniumOptions(sensitivity)).map(({ value, label, disabled }) => ({ value, label, disabled }))).toEqual([
+    { value: "", label: "Permitted levels", disabled: false },
+    ...SENSITIVITIES.map((level) => ({ value: level, label: level, disabled: false })),
+  ]);
+  for (const [index, level] of SENSITIVITIES.entries()) {
     const response = brainRead(page, "/api/v2/brain/nodes", (url) => url.searchParams.get("sensitivity") === level);
-    await sensitivity.selectOption(level);
+    await selectTitaniumOption(sensitivity, level, index % 2 === 0 ? "pointer" : "keyboard");
     expect((await response).status()).toBe(200);
-    await expect(sensitivity).toHaveValue(level);
   }
-  await sensitivity.selectOption("");
+  await selectTitaniumOption(sensitivity, "", "keyboard");
   await expect(page.getByRole("link", { name: `Open memory ${fixture.primaryNodeTitle} (${fixture.primaryNodeId})`, exact: true })).toBeVisible();
 
   const detailResponse = page.waitForResponse((response) => response.request().method() === "GET"
@@ -365,7 +389,10 @@ test(`${TEST_IDS.homePagination} preserves home filters through cursor, reload, 
   await expectHeading(page, "Second Brain");
   await traverseHistoryTo(page, audit, firstUrl, "back");
   await expect(page.getByLabel("Search title, summary, and note text", { exact: true })).toHaveValue(fixture.paginationToken);
-  await expect(page.getByRole("combobox", { name: "Sensitivity", exact: true })).toHaveValue("internal");
+  await expectSelectedTitaniumValue(
+    page.getByRole("combobox", { name: "Sensitivity", exact: true }),
+    "internal",
+  );
   await traverseHistoryTo(page, audit, secondUrl, "forward");
   await activate(page.getByRole("button", { name: "First page", exact: true }), "keyboard");
   await expect(page).toHaveURL(firstUrl);
@@ -622,21 +649,20 @@ test(`${TEST_IDS.inboxEdit} discards transient edits then confirms a scoped, sen
   await expect(card.getByRole("textbox", { name: "Summary", exact: true })).toHaveValue("Reviewable edited memory candidate with exact-run provenance.");
 
   const sensitivity = card.getByRole("combobox", { name: "Sensitivity", exact: true });
-  expect(await sensitivity.locator("option").allTextContents()).toEqual([...SENSITIVITIES]);
-  for (const level of SENSITIVITIES) {
-    await sensitivity.selectOption(level);
-    await expect(sensitivity).toHaveValue(level);
+  expect((await readTitaniumOptions(sensitivity)).map((option) => option.label)).toEqual([...SENSITIVITIES]);
+  for (const [index, level] of SENSITIVITIES.entries()) {
+    await selectTitaniumOption(sensitivity, level, index % 2 === 0 ? "pointer" : "keyboard");
   }
 
   const scope = card.getByRole("combobox", { name: "Scope", exact: true });
-  expect(await scope.locator("option").allTextContents()).toEqual(["Global", "Engagement", "Mission"]);
-  await scope.selectOption("global");
+  expect((await readTitaniumOptions(scope)).map((option) => option.label)).toEqual(["Global", "Engagement", "Mission"]);
+  await selectTitaniumOption(scope, "global", "keyboard");
   await expect(card.getByRole("textbox", { name: "Engagement ID", exact: true })).toHaveCount(0);
   await expect(card.getByRole("textbox", { name: "Mission ID", exact: true })).toHaveCount(0);
-  await scope.selectOption("engagement");
+  await selectTitaniumOption(scope, "engagement", "pointer");
   await card.getByRole("textbox", { name: "Engagement ID", exact: true }).fill(fixture.engagementId);
   await expect(card.getByRole("textbox", { name: "Mission ID", exact: true })).toHaveCount(0);
-  await scope.selectOption("mission");
+  await selectTitaniumOption(scope, "mission", "keyboard");
   await card.getByRole("textbox", { name: "Engagement ID", exact: true }).fill(fixture.engagementId);
   await card.getByRole("textbox", { name: "Mission ID", exact: true }).fill(fixture.missionId);
 
@@ -646,7 +672,7 @@ test(`${TEST_IDS.inboxEdit} discards transient edits then confirms a scoped, sen
   await card.getByRole("textbox", { name: "Title", exact: true }).fill(editedTitle);
   await card.getByRole("textbox", { name: "Summary", exact: true }).fill(editedSummary);
   await card.getByRole("textbox", { name: "Note body", exact: true }).fill(editedBody);
-  await sensitivity.selectOption("restricted");
+  await selectTitaniumOption(sensitivity, "restricted", "keyboard");
 
   const requestPromise = candidateRequest(page, fixture.editedCandidateId, "confirm");
   const mutation = candidateMutation(page, fixture.editedCandidateId, "confirm");

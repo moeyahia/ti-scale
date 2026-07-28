@@ -29,7 +29,7 @@
               { "required": ["locator"] }
             ],
             "properties": {
-              "role": { "enum": ["application", "button", "link", "checkbox", "radio", "combobox", "listbox", "textbox", "option", "tab", "menuitem", "slider"] },
+              "role": { "enum": ["application", "button", "link", "checkbox", "radio", "combobox", "listbox", "textbox", "option", "tab", "menuitem", "spinbutton", "slider"] },
               "locator": { "enum": ["native-date-input", "native-summary"] },
               "name": { "type": "string", "minLength": 1 },
               "match": { "enum": ["exact", "regex"] }
@@ -37,6 +37,12 @@
             "additionalProperties": false
           },
           "controlType": { "type": "string", "minLength": 1 },
+          "requiredModalities": {
+            "oneOf": [
+              { "const": ["pointer", "keyboard"] },
+              { "const": ["assertion"] }
+            ]
+          },
           "options": { "type": "array", "items": { "type": "string" } },
           "keyboardAction": { "type": "string", "minLength": 1 },
           "pointerAction": { "type": "string", "minLength": 1 },
@@ -65,7 +71,11 @@
         "additionalProperties": false
       }
     },
-    "knownGaps": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+    "knownGaps": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "pattern": "\\S" }
+    }
   },
   "additionalProperties": false
 }

@@ -2,7 +2,16 @@ import { createHash } from "node:crypto";
 import type { SqliteDatabase } from "../db";
 import { inImmediateTransaction } from "../db";
 import type { EventRepository } from "../events";
-import { MemoryRepository } from "../memory";
+import {
+  MemoryRepository,
+  terminalAttackKnowledgeReviewRetentionPolicy,
+  type ContextPackItemDisposition,
+  type MemoryNode,
+} from "../memory";
+import {
+  CanonicalMissionMemoryGraph,
+  type BrainContextResult,
+} from "../brain-runtime";
 import { evidenceRecordSql, verifiedEvidenceSql } from "../domain/evidence-semantics";
 import {
   findRejectableSecrets,
@@ -20,6 +29,11 @@ import {
   RunComparisonService,
   type StoredRunComparison,
 } from "./RunComparisonService";
+import {
+  CANONICAL_REPORT_ARTIFACT_COMMITMENT_SCHEMA_VERSION,
+  CANONICAL_REPORT_ARTIFACT_TYPES,
+  type CanonicalReportArtifactCommitment,
+} from "../reports";
 
 export type EvaluatedTerminalStatus = "completed" | "failed" | "cancelled";
 
@@ -28,6 +42,26 @@ export interface RecordRunEvaluationInput {
   readonly terminalStatus: EvaluatedTerminalStatus;
   readonly createdBy: string;
   readonly outcome?: MissionCompletionEvaluation;
+  readonly terminalLessonMemoryApplication?: TerminalLessonMemoryApplication;
+  /**
+   * Accepted only inside the compensated Autonomous terminal closeout.
+   * The closeout owner must materialize and verify this exact artifact pair
+   * before its outer transaction is allowed to commit.
+   */
+  readonly terminalReportCommitment?: CanonicalReportArtifactCommitment;
+}
+
+export interface TerminalLessonMemoryApplication {
+  readonly contextPackId: string;
+  readonly candidateStatementHash: string;
+  readonly disposition:
+    | "propose"
+    | "reuse_verified_lesson"
+    | "reuse_verified_lesson_with_contradiction";
+  readonly reusedLessonId?: string;
+  readonly usedNodeIds: readonly string[];
+  readonly contradictionNodeIds: readonly string[];
+  readonly contextDispositions: readonly ContextPackItemDisposition[];
 }
 
 export interface StoredRunEvaluation {
@@ -95,9 +129,39 @@ interface AggregateRow {
   readonly with_progress?: number | null;
 }
 
+function validateTerminalReportCommitment(
+  commitment: CanonicalReportArtifactCommitment | undefined,
+  run: RunRow,
+  terminalStatus: EvaluatedTerminalStatus,
+): CanonicalReportArtifactCommitment | undefined {
+  if (!commitment) return undefined;
+  const expectedTypes = [
+    CANONICAL_REPORT_ARTIFACT_TYPES.markdown,
+    CANONICAL_REPORT_ARTIFACT_TYPES.json,
+  ] as const;
+  if (
+    run.journey !== "autonomous"
+    || terminalStatus === "cancelled"
+    || commitment.schemaVersion !== CANONICAL_REPORT_ARTIFACT_COMMITMENT_SCHEMA_VERSION
+    || commitment.runId !== run.id
+    || !Number.isSafeInteger(commitment.reportVersion)
+    || commitment.reportVersion < 1
+    || commitment.reportVersion > 999
+    || !Array.isArray(commitment.artifactTypes)
+    || commitment.artifactTypes.length !== expectedTypes.length
+    || commitment.artifactTypes.some((type, index) => type !== expectedTypes[index])
+  ) {
+    throw new Error("Terminal report commitment does not match the canonical Autonomous report boundary");
+  }
+  return commitment;
+}
+
 interface ServiceOptions {
   readonly clock?: () => Date;
   readonly events?: EventRepository;
+  readonly memoryGraph?: CanonicalMissionMemoryGraph;
+  /** Called only after the evaluation transaction commits. */
+  readonly projectMemoryNodes?: (nodeIds: readonly string[]) => void;
 }
 
 interface EvaluationCalculation {
@@ -105,6 +169,19 @@ interface EvaluationCalculation {
   readonly metrics: Record<string, number | string | null>;
   readonly retrospective: string;
   readonly evidenceCoverage: number;
+}
+
+interface TerminalLessonCandidate {
+  readonly statement: string;
+  readonly statementHash: string;
+  readonly lessonType: "attack_chain" | "failed_attempt";
+  readonly domain: string;
+}
+
+interface ReviewedLessonMatch {
+  readonly lessonId: string;
+  readonly node: MemoryNode;
+  readonly rank: number;
 }
 
 const AUTHORING_AGENT = "run-evaluator";
@@ -130,6 +207,10 @@ function sha256(value: string): string {
 
 function stableId(prefix: string, value: string): string {
   return `${prefix}_${sha256(value).slice(0, 32)}`;
+}
+
+function completedConfidence(status: EvaluatedTerminalStatus): number {
+  return status === "completed" ? 0.75 : 0.6;
 }
 
 function parseJsonObject(value: string): Record<string, unknown> {
@@ -162,6 +243,27 @@ function safeActionDomain(actionClasses: readonly string[]): string {
     if (joined.includes(signal)) return label;
   }
   return "specialist execution";
+}
+
+function normalizeLessonStatement(value: string): string {
+  return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US");
+}
+
+function terminalLessonCandidate(
+  actionClasses: readonly string[],
+  terminalStatus: Exclude<EvaluatedTerminalStatus, "cancelled">,
+): TerminalLessonCandidate {
+  const domain = safeActionDomain(actionClasses);
+  const statement = terminalStatus === "completed"
+    ? `For comparable authorized ${domain} work, use bounded specialist steps and require verified evidence before declaring success.`
+    : `For comparable authorized ${domain} work, do not repeat a failed action unless the failure category or execution conditions materially change.`;
+  assertReusableStatementIsSafe(statement);
+  return {
+    statement,
+    statementHash: sha256(normalizeLessonStatement(statement)),
+    lessonType: terminalStatus === "completed" ? "attack_chain" : "failed_attempt",
+    domain,
+  };
 }
 
 function assertReusableStatementIsSafe(statement: string): void {
@@ -205,6 +307,7 @@ function evaluationFromRow(
  */
 export class RunLearningService {
   readonly #memory: MemoryRepository;
+  readonly #memoryGraph: CanonicalMissionMemoryGraph;
   readonly #comparisons: RunComparisonService;
   readonly #clock: () => Date;
 
@@ -214,7 +317,166 @@ export class RunLearningService {
   ) {
     this.#clock = options.clock ?? (() => new Date());
     this.#memory = new MemoryRepository(database, { clock: this.#clock });
+    this.#memoryGraph = options.memoryGraph ?? new CanonicalMissionMemoryGraph(database, { clock: this.#clock });
     this.#comparisons = new RunComparisonService(database);
+  }
+
+  /**
+   * Apply only independently reviewed, evidence-linked lesson memory to the
+   * deterministic terminal candidate. Retrieval is not treated as influence:
+   * this compiler accounts for every Context Pack item and selects only the
+   * exact reviewed lesson that prevents a duplicate plus any explicit,
+   * evidence-linked failure contradiction connected to that lesson.
+   *
+   * No provider is called, no fuzzy semantic judgment is made, and no lesson
+   * lifecycle is changed.
+   */
+  compileTerminalLessonMemoryApplication(input: {
+    readonly runId: string;
+    readonly terminalStatus: Exclude<EvaluatedTerminalStatus, "cancelled">;
+    readonly context: BrainContextResult;
+  }): TerminalLessonMemoryApplication {
+    const run = this.database.prepare(`
+      SELECT r.id, r.mission_id, r.journey, r.status, m.engagement_id,
+        r.started_at, r.ended_at, r.created_at, r.retry_count, r.replan_count,
+        r.budget_json, r.budget_usage_json
+      FROM runs r JOIN missions m ON m.id = r.mission_id WHERE r.id = ?
+    `).get(input.runId) as RunRow | undefined;
+    if (!run) throw new Error(`Cannot apply lesson memory to missing run: ${input.runId}`);
+    if (run.journey !== "autonomous") {
+      throw new Error("Terminal lesson memory application is reserved for Autonomous runs");
+    }
+    if (
+      input.context.hook !== "lesson_proposal"
+      || input.context.contextPack.runId !== run.id
+      || input.context.contextPack.missionId !== run.mission_id
+      || input.context.contextPack.journey !== "autonomous"
+      || input.context.contextPack.scopePolicy.journey !== "autonomous"
+      || input.context.contextPack.scopePolicy.missionId !== run.mission_id
+      || (
+        run.engagement_id !== null
+        && input.context.contextPack.scopePolicy.engagementId !== run.engagement_id
+      )
+    ) {
+      throw new Error("Lesson Context Pack does not match the terminal Autonomous run scope");
+    }
+
+    const actionClasses = (this.database.prepare(`
+      SELECT DISTINCT action_class FROM actions WHERE run_id = ? ORDER BY action_class
+    `).all(run.id) as Array<{ action_class: string }>).map((row) => row.action_class);
+    const candidate = terminalLessonCandidate(actionClasses, input.terminalStatus);
+    const ignoredReasons = new Map<string, string>();
+    const matches: ReviewedLessonMatch[] = [];
+
+    input.context.items.forEach((item, rank) => {
+      const node = item.node;
+      const eligibility = this.#reviewedLessonMatch({
+        node,
+        rank,
+        run,
+        candidate,
+        allowGlobal: input.context.contextPack.scopePolicy.allowGlobal === true,
+      });
+      if (eligibility.match) {
+        matches.push(eligibility.match);
+      } else {
+        ignoredReasons.set(node.id, eligibility.reason);
+      }
+    });
+
+    matches.sort((left, right) => {
+      const scopeRank = (node: MemoryNode): number =>
+        node.scope.kind === "mission" ? 0 : node.scope.kind === "engagement" ? 1 : 2;
+      return scopeRank(left.node) - scopeRank(right.node)
+        || left.rank - right.rank
+        || left.lessonId.localeCompare(right.lessonId);
+    });
+    const selected = matches[0];
+    for (const duplicate of matches.slice(1)) {
+      ignoredReasons.set(
+        duplicate.node.id,
+        "A more specific independently reviewed lesson supplied the exact duplicate-prevention basis.",
+      );
+    }
+
+    const contradictionNodeIds: string[] = [];
+    if (selected) {
+      const contextFailures = new Map(input.context.items
+        .filter(({ node }) => node.nodeType === "failure" || node.nodeType === "failure_mode")
+        .map(({ node }) => [node.id, node] as const));
+      for (const edge of this.#memory.listEdges(selected.node.id)) {
+        if (
+          edge.edgeType !== "contradicts"
+          || (edge.lifecycleStatus !== "confirmed" && edge.lifecycleStatus !== "verified")
+          || edge.provenance.sources.length === 0
+          || !this.#scopeApplies(edge.scope, run, input.context.contextPack.scopePolicy.allowGlobal === true)
+        ) continue;
+        const otherNodeId = edge.sourceNodeId === selected.node.id
+          ? edge.targetNodeId
+          : edge.sourceNodeId;
+        const failure = contextFailures.get(otherNodeId);
+        if (
+          !failure
+          || !this.#eligibleAutonomousNode(
+            failure,
+            run,
+            input.context.contextPack.scopePolicy.allowGlobal === true,
+          )
+          || !this.#nodeHasCanonicalEvidenceLink(failure.id)
+        ) continue;
+        contradictionNodeIds.push(failure.id);
+      }
+    }
+    contradictionNodeIds.sort();
+
+    const selectedNodeIds = new Set([
+      ...(selected ? [selected.node.id] : []),
+      ...contradictionNodeIds,
+    ]);
+    const contradictionSet = new Set(contradictionNodeIds);
+    const contextDispositions: ContextPackItemDisposition[] = input.context.items.map((item) => {
+      if (selected?.node.id === item.node.id) {
+        return {
+          nodeId: item.node.id,
+          used: true,
+          relevanceReason: item.relevanceReason,
+          influenceSummary: contradictionNodeIds.length > 0
+            ? "An exact independently reviewed lesson suppressed a duplicate candidate while its explicit failure contradiction remained visible for human review."
+            : "An exact independently reviewed lesson suppressed a duplicate candidate and retained the current run as additional support.",
+        };
+      }
+      if (contradictionSet.has(item.node.id)) {
+        return {
+          nodeId: item.node.id,
+          used: true,
+          relevanceReason: item.relevanceReason,
+          influenceSummary: "An explicit evidence-linked failure contradiction was preserved; it did not demote, promote, or rewrite the reviewed lesson.",
+        };
+      }
+      return {
+        nodeId: item.node.id,
+        used: false,
+        relevanceReason: item.relevanceReason,
+        ignoredReason: ignoredReasons.get(item.node.id)
+          ?? (selectedNodeIds.size > 0
+            ? "This item did not supply the exact reviewed lesson or an explicit evidence-linked contradiction used by the deterministic decision."
+            : "This item did not provide an exact independently reviewed, evidence-linked lesson match for deterministic deduplication."),
+      };
+    });
+
+    return {
+      contextPackId: input.context.contextPack.id,
+      candidateStatementHash: candidate.statementHash,
+      disposition: selected
+        ? contradictionNodeIds.length > 0
+          ? "reuse_verified_lesson_with_contradiction"
+          : "reuse_verified_lesson"
+        : "propose",
+      ...(selected ? { reusedLessonId: selected.lessonId } : {}),
+      usedNodeIds: [...selectedNodeIds].sort(),
+      contradictionNodeIds,
+      contextDispositions,
+    };
   }
 
   recordTerminalEvaluation(input: RecordRunEvaluationInput): StoredRunEvaluation {
@@ -233,6 +495,7 @@ export class RunLearningService {
       const prior = this.database.prepare("SELECT * FROM run_evaluations WHERE run_id = ?")
         .get(input.runId) as EvaluationRow | undefined;
       if (prior) {
+        this.#memoryGraph.ensureEvaluation(prior.id);
         const comparison = this.#comparisons.record({
           evaluationId: prior.id,
           runId: run.id,
@@ -249,8 +512,18 @@ export class RunLearningService {
         return evaluationFromRow(prior, input.terminalStatus, comparison, this.#lessonIdsForRun(input.runId));
       }
 
+      const reportCommitment = validateTerminalReportCommitment(
+        input.terminalReportCommitment,
+        run,
+        input.terminalStatus,
+      );
       const now = this.#clock().toISOString();
-      const calculated = this.#calculate(run, input.outcome, input.terminalStatus);
+      const calculated = this.#calculate(
+        run,
+        input.outcome,
+        input.terminalStatus,
+        reportCommitment,
+      );
       const evaluationId = stableId("eval", run.id);
       this.database.prepare(`
         INSERT INTO run_evaluations (
@@ -283,20 +556,27 @@ export class RunLearningService {
         evidenceCoverage: calculated.evidenceCoverage,
       });
 
-      const evaluationNodeId = this.#persistEvaluationNode({
-        evaluationId,
-        run,
-        calculated,
-        now,
-      });
-      const proposedLessonIds = this.#proposeLessons({
-        evaluationId,
-        evaluationNodeId,
-        run,
-        terminalStatus: input.terminalStatus,
-        evidenceCoverage: calculated.evidenceCoverage,
-        now,
-      });
+      const graph = this.#memoryGraph.ensureEvaluation(evaluationId);
+      const proposedLessonIds = graph.status === "materialized" && graph.evaluationNodeId
+        ? this.#proposeLessons({
+            evaluationId,
+            evaluationNodeId: graph.evaluationNodeId,
+            run,
+            terminalStatus: input.terminalStatus,
+            evidenceCoverage: calculated.evidenceCoverage,
+            now,
+            memoryApplication: input.terminalLessonMemoryApplication,
+          })
+        : [];
+      const reusableTerminalNodeIds = proposedLessonIds.length > 0
+        ? this.#persistReusableTerminalAttackKnowledge({
+            evaluationId,
+            run,
+            terminalStatus: input.terminalStatus,
+            proposedLessonIds,
+            now,
+          })
+        : [];
 
       this.options.events?.append({
         missionId: run.mission_id,
@@ -313,6 +593,9 @@ export class RunLearningService {
           comparisonStatus: comparison.status,
           comparisonBasis: comparison.basis,
           proposedLessonIds: [...proposedLessonIds],
+          reusableTerminalNodeIds: [...reusableTerminalNodeIds],
+          lessonMemoryDisposition: input.terminalLessonMemoryApplication?.disposition ?? "not_applied",
+          reusedLessonId: input.terminalLessonMemoryApplication?.reusedLessonId ?? null,
         },
       });
 
@@ -322,10 +605,409 @@ export class RunLearningService {
     });
   }
 
+  /**
+   * Project the privacy-safe terminal graph only from an explicit post-commit
+   * boundary. MissionRuntimeEngine invokes this through a durable continuation
+   * so a process crash between the canonical commit and the optional Vault
+   * handoff is restart-safe. A sink may throw before accepting the handoff, or
+   * it may isolate optional filesystem failures by persisting a degraded Vault
+   * audit for later repair/reconciliation. Either outcome leaves the terminal
+   * evaluation and canonical memory graph committed and authoritative.
+   */
+  projectTerminalMemory(runId: string): readonly string[] {
+    if (this.database.inTransaction) {
+      throw new Error("Terminal memory projection requires a committed database boundary");
+    }
+    const evaluation = this.database.prepare(`
+      SELECT id FROM run_evaluations WHERE run_id = ?
+    `).get(runId) as { id: string } | undefined;
+    if (!evaluation) throw new Error(`Cannot project missing run evaluation: ${runId}`);
+
+    const graph = this.#memoryGraph.ensureEvaluation(evaluation.id);
+    const nodeIds = new Set(graph.nodeIds);
+    for (const lessonId of this.#lessonIdsForRun(runId)) {
+      const nodeId = canonicalLessonMemoryNodeId(lessonId);
+      // Forgotten nodes remain tombstoned and must never be recreated or
+      // exported by replay/reconciliation.
+      if (this.#memory.getNode(nodeId)) nodeIds.add(nodeId);
+    }
+    for (const nodeId of this.#reusableTerminalNodeIds(evaluation.id, runId)) {
+      nodeIds.add(nodeId);
+    }
+    for (const nodeId of this.#usedPlanningAttackProcedureNodeIds(runId)) {
+      nodeIds.add(nodeId);
+    }
+    const selected = [...nodeIds];
+    if (selected.length > 0) this.options.projectMemoryNodes?.(selected);
+    return selected;
+  }
+
+  #usedPlanningAttackProcedureNodeIds(runId: string): readonly string[] {
+    return (this.database.prepare(`
+      SELECT DISTINCT node.id
+      FROM memory_context_packs pack
+      JOIN memory_context_items item ON item.context_pack_id = pack.id
+      JOIN memory_nodes node ON node.id = item.node_id
+      WHERE pack.run_id = ?
+        AND pack.journey = 'autonomous'
+        AND pack.purpose LIKE 'Mission planning:%'
+        AND item.used = 1
+        AND length(trim(COALESCE(item.influence_summary, ''))) > 0
+        AND node.node_type = 'attack_procedure'
+        AND node.scope = 'global'
+        AND node.engagement_id IS NULL
+        AND node.mission_id IS NULL
+        AND node.lifecycle_status IN ('confirmed', 'verified')
+        AND node.confirmation_state = 'confirmed'
+        AND (node.expires_at IS NULL OR node.expires_at > ?)
+      ORDER BY node.id
+    `).all(runId, this.#clock().toISOString()) as Array<{ id: string }>).map(({ id }) => id);
+  }
+
+  #persistReusableTerminalAttackKnowledge(input: {
+    evaluationId: string;
+    run: RunRow;
+    terminalStatus: EvaluatedTerminalStatus;
+    proposedLessonIds: readonly string[];
+    now: string;
+  }): readonly string[] {
+    if (input.run.journey !== "autonomous" || input.terminalStatus === "cancelled") return [];
+    const procedureNodeIds = this.#usedPlanningAttackProcedureNodeIds(input.run.id);
+    if (procedureNodeIds.length === 0) return [];
+
+    const retainedNodeIds = new Set<string>();
+    for (const procedureNodeId of procedureNodeIds) {
+      const outcomeNodeId = stableId(
+        "mem",
+        `terminal-attack-outcome\n${input.evaluationId}\n${procedureNodeId}\n${input.terminalStatus}`,
+      );
+      if (!this.#memory.getNode(outcomeNodeId, true)) {
+        const completed = input.terminalStatus === "completed";
+        this.#memory.createNode({
+          id: outcomeNodeId,
+          nodeType: "outcome",
+          title: completed
+            ? "Candidate bounded procedure outcome"
+            : "Candidate failed procedure outcome",
+          summary: completed
+            ? "A reviewed procedure contributed to a bounded run that completed with verified retained evidence."
+            : "A reviewed procedure was used during planning, but the bounded run did not complete successfully.",
+          body: completed
+            ? "Reuse remains conditional on a matching product, version, prerequisites, authorization, and independent review of this candidate."
+            : "Do not treat this as a successful technique. Reuse requires an independently reviewed cause and materially changed conditions.",
+          scope: { kind: "global" },
+          sensitivity: "private",
+          confidence: completed ? 0.75 : 0.6,
+          lifecycleStatus: "candidate",
+          confirmationState: "pending",
+          provenance: {
+            method: "derived",
+            explanation: "Generalized from the canonical terminal evaluation after a confirmed attack procedure was attributed as used during planning.",
+            sources: [{
+              sourceType: "run_evaluation",
+              sourceId: input.evaluationId,
+              acquiredAt: input.now,
+            }],
+          },
+          authorType: "agent",
+          authorId: AUTHORING_AGENT,
+          retentionPolicy: terminalAttackKnowledgeReviewRetentionPolicy(),
+        });
+      }
+      const outcomeNode = this.#memory.getNode(outcomeNodeId);
+      if (!outcomeNode || outcomeNode.lifecycleStatus !== "candidate") continue;
+      retainedNodeIds.add(outcomeNodeId);
+
+      const outcomeEdgeId = stableId(
+        "medge",
+        `${procedureNodeId}\nproduces_outcome\n${outcomeNodeId}`,
+      );
+      if (!this.database.prepare("SELECT 1 FROM memory_edges WHERE id = ?").get(outcomeEdgeId)) {
+        this.#memory.createEdge({
+          id: outcomeEdgeId,
+          sourceNodeId: procedureNodeId,
+          targetNodeId: outcomeNodeId,
+          edgeType: "produces_outcome",
+          title: "Produced reviewable outcome",
+          summary: "The reviewed procedure is linked to a generalized terminal outcome pending operator review.",
+          scope: { kind: "global" },
+          sensitivity: "private",
+          confidence: completedConfidence(input.terminalStatus),
+          lifecycleStatus: "candidate",
+          provenance: {
+            method: "derived",
+            explanation: "The link exists only because the procedure was persisted as used in the Autonomous planning Context Pack.",
+            sources: [{
+              sourceType: "run_evaluation",
+              sourceId: input.evaluationId,
+              acquiredAt: input.now,
+            }],
+          },
+          explanation: "Connects a reviewed reusable procedure to its generalized, untrusted terminal outcome.",
+          authorType: "agent",
+          authorId: AUTHORING_AGENT,
+        });
+      }
+    }
+
+    for (const lessonId of input.proposedLessonIds) {
+      const lessonNodeId = stableId(
+        "mem",
+        `terminal-attack-lesson\n${input.evaluationId}\n${lessonId}`,
+      );
+      if (!this.#memory.getNode(lessonNodeId, true)) {
+        this.#memory.createNode({
+          id: lessonNodeId,
+          nodeType: "attack_lesson",
+          title: "Candidate reusable attack lesson",
+          summary: input.terminalStatus === "completed"
+            ? "Keep the reviewed procedure bounded and require verified retained evidence before declaring success."
+            : "Do not repeat the reviewed procedure until the failure cause is independently reviewed and execution conditions materially change.",
+          body: "This generalized lesson is pending operator review and cannot influence Autonomous or Guided execution in its current state.",
+          scope: { kind: "global" },
+          sensitivity: "private",
+          confidence: input.terminalStatus === "completed" ? 0.75 : 0.6,
+          lifecycleStatus: "candidate",
+          confirmationState: "pending",
+          provenance: {
+            method: "derived",
+            explanation: "Generalized from an evidence-gated private lesson proposal without copying mission, target, or engagement content.",
+            sources: [{
+              sourceType: "lesson",
+              sourceId: lessonId,
+              acquiredAt: input.now,
+            }],
+          },
+          authorType: "agent",
+          authorId: AUTHORING_AGENT,
+          retentionPolicy: terminalAttackKnowledgeReviewRetentionPolicy(),
+        });
+      }
+      const lessonNode = this.#memory.getNode(lessonNodeId);
+      if (!lessonNode || lessonNode.lifecycleStatus !== "candidate") continue;
+      retainedNodeIds.add(lessonNodeId);
+
+      for (const procedureNodeId of procedureNodeIds) {
+        const lessonEdgeId = stableId(
+          "medge",
+          `${lessonNodeId}\nimproves\n${procedureNodeId}`,
+        );
+        if (this.database.prepare("SELECT 1 FROM memory_edges WHERE id = ?").get(lessonEdgeId)) continue;
+        this.#memory.createEdge({
+          id: lessonEdgeId,
+          sourceNodeId: lessonNodeId,
+          targetNodeId: procedureNodeId,
+          edgeType: "improves",
+          title: "Proposes a bounded procedure improvement",
+          summary: "The candidate lesson proposes a reviewable execution constraint for the reviewed procedure.",
+          scope: { kind: "global" },
+          sensitivity: "private",
+          confidence: completedConfidence(input.terminalStatus),
+          lifecycleStatus: "candidate",
+          provenance: {
+            method: "derived",
+            explanation: "The candidate lesson and procedure are linked only after persisted planning attribution and terminal evaluation.",
+            sources: [{
+              sourceType: "lesson",
+              sourceId: lessonId,
+              acquiredAt: input.now,
+            }],
+          },
+          explanation: "Keeps a proposed improvement visibly untrusted until independent operator review.",
+          authorType: "agent",
+          authorId: AUTHORING_AGENT,
+        });
+      }
+    }
+    return [...retainedNodeIds].sort();
+  }
+
+  #reusableTerminalNodeIds(evaluationId: string, runId: string): readonly string[] {
+    const sourceIds = [evaluationId, ...this.#lessonIdsForRun(runId)];
+    if (sourceIds.length === 0) return [];
+    return (this.database.prepare(`
+      SELECT DISTINCT node.id
+      FROM memory_nodes node
+      JOIN memory_sources source ON source.node_id = node.id
+      WHERE node.node_type IN ('outcome', 'attack_lesson')
+        AND node.lifecycle_status != 'forgotten'
+        AND source.source_id IN (${sourceIds.map(() => "?").join(",")})
+      ORDER BY node.id
+    `).all(...sourceIds) as Array<{ id: string }>).map(({ id }) => id);
+  }
+
+  #reviewedLessonMatch(input: {
+    node: MemoryNode;
+    rank: number;
+    run: RunRow;
+    candidate: TerminalLessonCandidate;
+    allowGlobal: boolean;
+  }): { match?: ReviewedLessonMatch; reason: string } {
+    if (input.node.nodeType !== "lesson") {
+      return {
+        reason: input.node.nodeType === "failure" || input.node.nodeType === "failure_mode"
+          ? "Failure memory is applied only through an explicit confirmed or verified contradiction to the selected reviewed lesson."
+          : "Only canonical lesson nodes can suppress a terminal lesson candidate.",
+      };
+    }
+    if (!this.#eligibleAutonomousNode(input.node, input.run, input.allowGlobal)) {
+      return {
+        reason: "The lesson is no longer confirmed or verified, scope-safe, current, unexpired, and approved for Autonomous use.",
+      };
+    }
+    if (input.node.lifecycleStatus !== "verified") {
+      return {
+        reason: "A confirmed memory may inform review, but only an independently verified lesson can suppress a new lesson candidate.",
+      };
+    }
+    const lessonSourceIds = input.node.provenance.sources
+      .filter(({ sourceType }) => sourceType === "lesson")
+      .map(({ sourceId }) => sourceId)
+      .sort();
+    for (const lessonId of lessonSourceIds) {
+      if (canonicalLessonMemoryNodeId(lessonId) !== input.node.id) continue;
+      const lesson = this.database.prepare(`
+        SELECT l.id, l.statement, l.lesson_type, l.status, l.applicability_scope,
+          l.engagement_id, l.mission_id, l.authoring_agent_id, l.reviewed_by
+        FROM lessons l
+        WHERE l.id = ? AND l.status = 'verified'
+          AND l.reviewed_by IS NOT NULL
+          AND (l.authoring_agent_id IS NULL OR l.reviewed_by != l.authoring_agent_id)
+          AND EXISTS (
+            SELECT 1
+            FROM lesson_evidence le
+            LEFT JOIN evidence e ON e.id = le.evidence_id
+            WHERE le.lesson_id = l.id AND le.relationship = 'supports'
+              AND (
+                (le.evidence_id IS NOT NULL AND ${verifiedEvidenceSql("e")})
+                OR (
+                  le.run_id IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1 FROM run_evaluations evaluation
+                    WHERE evaluation.run_id = le.run_id
+                  )
+                )
+              )
+          )
+      `).get(lessonId) as {
+        id: string;
+        statement: string;
+        lesson_type: string;
+        status: string;
+        applicability_scope: string;
+        engagement_id: string | null;
+        mission_id: string | null;
+        authoring_agent_id: string | null;
+        reviewed_by: string;
+      } | undefined;
+      if (!lesson) continue;
+      if (
+        lesson.lesson_type !== input.candidate.lessonType
+        || normalizeLessonStatement(lesson.statement)
+          !== normalizeLessonStatement(input.candidate.statement)
+        || normalizeLessonStatement(input.node.summary)
+          !== normalizeLessonStatement(input.candidate.statement)
+      ) continue;
+      const rowScopeMatches = input.node.scope.kind === "global"
+        ? lesson.applicability_scope === "global"
+          && lesson.engagement_id === null
+          && lesson.mission_id === null
+        : input.node.scope.kind === "engagement"
+          ? lesson.engagement_id === input.node.scope.engagementId
+          : lesson.mission_id === input.node.scope.missionId;
+      if (!rowScopeMatches) continue;
+      return {
+        match: { lessonId: lesson.id, node: input.node, rank: input.rank },
+        reason: "",
+      };
+    }
+    return {
+      reason: "The lesson is not an exact independently reviewed, evidence-linked match for this deterministic candidate.",
+    };
+  }
+
+  #eligibleAutonomousNode(node: MemoryNode, run: RunRow, allowGlobal: boolean): boolean {
+    const current = this.#memory.getNode(node.id);
+    if (
+      !current
+      || current.version !== node.version
+      || current.lifecycleStatus !== node.lifecycleStatus
+      || (node.lifecycleStatus !== "confirmed" && node.lifecycleStatus !== "verified")
+      || (
+        node.confirmationState !== "confirmed"
+        && node.confirmationState !== "not_required"
+      )
+      || node.retentionPolicy.allowAutonomous !== true
+      || (
+        Array.isArray(node.retentionPolicy.journeys)
+        && !node.retentionPolicy.journeys.includes("autonomous")
+      )
+      || (
+        node.expiresAt !== undefined
+        && Date.parse(node.expiresAt) <= this.#clock().getTime()
+      )
+    ) return false;
+    return this.#scopeApplies(node.scope, run, allowGlobal);
+  }
+
+  #scopeApplies(scope: MemoryNode["scope"], run: RunRow, allowGlobal: boolean): boolean {
+    if (scope.kind === "global") return allowGlobal;
+    if (scope.kind === "engagement") {
+      return run.engagement_id !== null && scope.engagementId === run.engagement_id;
+    }
+    return scope.missionId === run.mission_id;
+  }
+
+  #nodeHasCanonicalEvidenceLink(nodeId: string): boolean {
+    const direct = this.database.prepare(`
+      SELECT 1
+      FROM memory_sources source
+      WHERE source.node_id = ?
+        AND (
+          EXISTS (
+            SELECT 1 FROM evidence e
+            WHERE (e.id = source.evidence_id OR e.id = source.source_id)
+              AND ${verifiedEvidenceSql("e")}
+          )
+          OR (
+            source.source_type = 'run_evaluation'
+            AND EXISTS (
+              SELECT 1 FROM run_evaluations evaluation
+              WHERE evaluation.id = source.source_id
+            )
+          )
+          OR (
+            source.source_type = 'failure_diagnosis'
+            AND EXISTS (
+              SELECT 1 FROM failure_diagnoses diagnosis
+              WHERE diagnosis.id = source.source_id
+            )
+          )
+        )
+      LIMIT 1
+    `).get(nodeId);
+    if (direct) return true;
+    for (const edge of this.#memory.listEdges(nodeId)) {
+      if (
+        (edge.edgeType !== "supports" && edge.edgeType !== "verified_by")
+        || edge.lifecycleStatus !== "verified"
+        || edge.provenance.sources.length === 0
+      ) continue;
+      const relatedId = edge.sourceNodeId === nodeId ? edge.targetNodeId : edge.sourceNodeId;
+      const related = this.#memory.getNode(relatedId);
+      if (
+        related?.lifecycleStatus === "verified"
+        && (related.nodeType === "evidence" || related.nodeType === "evaluation")
+      ) return true;
+    }
+    return false;
+  }
+
   #calculate(
     run: RunRow,
     outcome: MissionCompletionEvaluation | undefined,
     terminalStatus: EvaluatedTerminalStatus,
+    reportCommitment: CanonicalReportArtifactCommitment | undefined,
   ): EvaluationCalculation {
     const actions = this.database.prepare(`
       SELECT COUNT(*) AS count,
@@ -424,7 +1106,8 @@ export class RunLearningService {
       SELECT
         SUM(event_type LIKE 'policy.%' AND event_type NOT LIKE '%.allowed') AS denied,
         SUM(event_type LIKE 'run.recovery%' OR
-          (event_type = 'run.state_changed' AND payload_json LIKE '%\"recovering\"%')) AS retries,
+          (event_type = 'run.state_changed'
+            AND json_extract(payload_json, '$.to') = 'recovering')) AS retries,
         SUM(event_type = 'run.state_changed' AND payload_json LIKE '%waiting_guided_decision%') AS corrections
       FROM events WHERE run_id = ?
     `).get(run.id) as AggregateRow;
@@ -434,11 +1117,27 @@ export class RunLearningService {
 
     const artifacts = this.database.prepare(`
       SELECT COUNT(*) AS count,
-        SUM(artifact_type IN ('mission_report', 'report')) AS reports
+        SUM(artifact_type IN (?, ?)) AS reports
       FROM artifacts WHERE run_id = ?
-    `).get(run.id) as AggregateRow;
-    const artifactCount = count(artifacts.count);
-    const reportCount = count(artifacts.reports);
+    `).get(
+      CANONICAL_REPORT_ARTIFACT_TYPES.markdown,
+      CANONICAL_REPORT_ARTIFACT_TYPES.json,
+      run.id,
+    ) as AggregateRow;
+    const existingReportTypes = new Set((this.database.prepare(`
+      SELECT artifact_type FROM artifacts
+      WHERE run_id = ? AND artifact_type IN (?, ?)
+        AND json_extract(metadata_json, '$.reportVersion') = ?
+    `).all(
+      run.id,
+      CANONICAL_REPORT_ARTIFACT_TYPES.markdown,
+      CANONICAL_REPORT_ARTIFACT_TYPES.json,
+      reportCommitment?.reportVersion ?? -1,
+    ) as Array<{ readonly artifact_type: string }>).map(({ artifact_type }) => artifact_type));
+    const committedMissingReportCount = reportCommitment?.artifactTypes
+      .filter((artifactType) => !existingReportTypes.has(artifactType)).length ?? 0;
+    const artifactCount = count(artifacts.count) + committedMissingReportCount;
+    const reportCount = count(artifacts.reports) + committedMissingReportCount;
 
     const criteria = outcome?.criteria ?? [];
     const satisfiedCriteria = criteria.filter((criterion) => criterion.satisfied).length;
@@ -447,12 +1146,32 @@ export class RunLearningService {
     `).all(run.id) as Array<{ id: string }>).map((row) => row.id));
     const evidenceBackedCriteria = criteria.filter((criterion) =>
       criterion.satisfied && criterion.evidenceIds.some((evidenceId) => verifiedIds.has(evidenceId))).length;
+    // Objective completion and objective verification are deliberately
+    // separate. A bounded "check whether" Guided step can finish when its
+    // exact action and terminal tool receipt answer the question, even when
+    // policy retains the raw output only as an Engagement Log. That is valid
+    // workflow completion, but it is not verified-evidence completion.
+    const objectiveCompleted = terminalStatus === "completed"
+      && outcome?.success === true
+      && (criteria.length === 0 || satisfiedCriteria === criteria.length);
     const successCriteriaCoverage = criteria.length > 0
       ? ratio(satisfiedCriteria, criteria.length)
-      : terminalStatus === "completed" ? 1 : 0;
+      : objectiveCompleted ? 1 : 0;
     const evidenceCoverage = criteria.length > 0
       ? ratio(evidenceBackedCriteria, criteria.length)
       : ratio(verifiedEvidenceCount, Math.max(1, evidenceCount));
+    const verifiedObjectiveCompletion = criteria.length > 0
+      ? objectiveCompleted && evidenceBackedCriteria === criteria.length ? 1 : 0
+      : null;
+    const completionBasis = !objectiveCompleted
+      ? outcome ? "outcome_not_completed" : "outcome_not_evaluated"
+      : criteria.length === 0
+        ? "explicit_outcome_without_criteria"
+        : evidenceBackedCriteria === criteria.length
+          ? "verified_evidence"
+          : evidenceBackedCriteria > 0
+            ? "partially_verified_evidence"
+            : "canonical_result_without_verified_evidence";
 
     const budget = parseJsonObject(run.budget_json);
     const usage = parseJsonObject(run.budget_usage_json);
@@ -505,7 +1224,8 @@ export class RunLearningService {
       : null;
 
     const scores: Record<string, number | null> = {
-      objectiveCompletion: terminalStatus === "completed" && outcome?.success !== false ? 1 : 0,
+      objectiveCompletion: objectiveCompleted ? 1 : 0,
+      verifiedObjectiveCompletion,
       successCriteriaCoverage,
       evidenceQuality,
       findingQuality,
@@ -520,11 +1240,12 @@ export class RunLearningService {
       retryAvoidance: Number((1 - retryRate).toFixed(4)),
       recoveryQuality,
       delegationQuality: assignmentCount > 0 ? ratio(completedAssignments, assignmentCount) : null,
-      reportQuality: artifactCount > 0 ? ratio(reportCount, 1) : null,
+      reportQuality: reportCount > 0 ? ratio(reportCount, 2) : null,
       uncertaintyCalibration: criteria.length > 0 ? evidenceCoverage : null,
     };
     const metrics: Record<string, number | string | null> = {
       terminalStatus,
+      completionBasis,
       durationMs,
       timeToFirstMeaningfulEvidenceMs,
       actionCount,
@@ -574,46 +1295,15 @@ export class RunLearningService {
     const retrospective = [
       `${run.journey === "autonomous" ? "Autonomous" : "Guided"} run ended ${terminalStatus}.`,
       `${satisfiedCriteria}/${criteria.length} evaluated success criteria were satisfied; ${evidenceBackedCriteria}/${criteria.length} were backed by verified retained evidence.`,
+      objectiveCompleted
+        ? verifiedObjectiveCompletion === 1
+          ? "The completed objective is linked to verified retained evidence."
+          : "The objective is workflow-complete from a canonical result only; no verified retained evidence supports a stronger claim, and Engagement Log output was not counted as evidence."
+        : "No successful objective completion was recorded by the outcome evaluator.",
       `${succeededActions}/${actionCount} actions succeeded, with ${Math.round(repeatedActionRate * 100)}% repeated-action rate and ${run.retry_count + actionRetries} retries.`,
       `${policyViolationCount} policy violations and ${operatorCorrectionCount} operator corrections were recorded.`,
     ].join(" ");
     return { scores, metrics, retrospective, evidenceCoverage };
-  }
-
-  #persistEvaluationNode(input: {
-    evaluationId: string;
-    run: RunRow;
-    calculated: EvaluationCalculation;
-    now: string;
-  }): string {
-    const nodeId = stableId("mem_eval", input.evaluationId);
-    if (this.#memory.getNode(nodeId, true)) return nodeId;
-    this.#memory.createNode({
-      id: nodeId,
-      nodeType: "evaluation",
-      title: `${input.run.journey === "autonomous" ? "Autonomous" : "Guided"} run evaluation`,
-      summary: input.calculated.retrospective,
-      body: "Evidence-gated terminal assessment. Open the linked canonical evaluation for complete metrics.",
-      scope: { kind: "mission", missionId: input.run.mission_id },
-      sensitivity: "private",
-      confidence: 1,
-      lifecycleStatus: "verified",
-      confirmationState: "not_required",
-      provenance: {
-        method: "derived",
-        explanation: "Calculated from canonical run, action, evidence, finding, policy and journey records.",
-        sources: [{
-          sourceType: "run_evaluation",
-          sourceId: input.evaluationId,
-          acquiredAt: input.now,
-          sourceHash: sha256(JSON.stringify(input.calculated)),
-        }],
-      },
-      authorType: "agent",
-      authorId: AUTHORING_AGENT,
-      retentionPolicy: { allowAutonomous: true, allowGuided: true },
-    });
-    return nodeId;
   }
 
   #proposeLessons(input: {
@@ -623,6 +1313,7 @@ export class RunLearningService {
     terminalStatus: EvaluatedTerminalStatus;
     evidenceCoverage: number;
     now: string;
+    memoryApplication?: TerminalLessonMemoryApplication;
   }): string[] {
     if (input.terminalStatus === "cancelled") return [];
     const verifiedEvidenceIds = (this.database.prepare(`
@@ -633,17 +1324,38 @@ export class RunLearningService {
     const actionClasses = (this.database.prepare(`
       SELECT DISTINCT action_class FROM actions WHERE run_id = ? ORDER BY action_class
     `).all(input.run.id) as Array<{ action_class: string }>).map((row) => row.action_class);
-    const domain = safeActionDomain(actionClasses);
-    const statement = input.terminalStatus === "completed"
-      ? `For comparable authorized ${domain} work, use bounded specialist steps and require verified evidence before declaring success.`
-      : `For comparable authorized ${domain} work, do not repeat a failed action unless the failure category or execution conditions materially change.`;
-    assertReusableStatementIsSafe(statement);
+    const candidate = terminalLessonCandidate(actionClasses, input.terminalStatus);
+    const { domain, statement, lessonType } = candidate;
+    if (
+      input.memoryApplication
+      && input.memoryApplication.candidateStatementHash !== candidate.statementHash
+    ) {
+      throw new Error("Terminal lesson memory application no longer matches the canonical candidate");
+    }
+    if (
+      input.memoryApplication?.disposition === "reuse_verified_lesson"
+      || input.memoryApplication?.disposition === "reuse_verified_lesson_with_contradiction"
+    ) {
+      if (!input.memoryApplication.reusedLessonId) {
+        throw new Error("A reused terminal lesson application requires a reviewed lesson ID");
+      }
+      this.#reuseReviewedLesson({
+        evaluationId: input.evaluationId,
+        evaluationNodeId: input.evaluationNodeId,
+        run: input.run,
+        now: input.now,
+        statement,
+        lessonType,
+        verifiedEvidenceIds,
+        application: input.memoryApplication,
+      });
+      return [];
+    }
 
     const applicabilityScope = input.run.engagement_id ? "engagement" : "mission";
     const engagementId = input.run.engagement_id;
     const missionId = input.run.engagement_id ? null : input.run.mission_id;
     const scopeKey = input.run.engagement_id ?? input.run.mission_id;
-    const lessonType = input.terminalStatus === "completed" ? "attack_chain" : "failed_attempt";
     const lessonId = stableId("lesson", `${lessonType}\n${applicabilityScope}\n${scopeKey}\n${statement.toLocaleLowerCase("en-US")}`);
     const existing = this.database.prepare(`
       SELECT id, status FROM lessons
@@ -745,6 +1457,141 @@ export class RunLearningService {
       });
     }
     return [effectiveLessonId];
+  }
+
+  #reuseReviewedLesson(input: {
+    evaluationId: string;
+    evaluationNodeId: string;
+    run: RunRow;
+    now: string;
+    statement: string;
+    lessonType: TerminalLessonCandidate["lessonType"];
+    verifiedEvidenceIds: readonly string[];
+    application: TerminalLessonMemoryApplication;
+  }): void {
+    const lesson = this.database.prepare(`
+      SELECT id, statement, lesson_type, status, authoring_agent_id, reviewed_by
+      FROM lessons
+      WHERE id = ? AND status = 'verified'
+        AND reviewed_by IS NOT NULL
+        AND (authoring_agent_id IS NULL OR reviewed_by != authoring_agent_id)
+        AND EXISTS (
+          SELECT 1 FROM lesson_evidence
+          WHERE lesson_id = lessons.id AND relationship = 'supports'
+        )
+    `).get(input.application.reusedLessonId) as {
+      id: string;
+      statement: string;
+      lesson_type: string;
+      status: string;
+      authoring_agent_id: string | null;
+      reviewed_by: string;
+    } | undefined;
+    const lessonNodeId = canonicalLessonMemoryNodeId(input.application.reusedLessonId!);
+    const lessonNode = this.#memory.getNode(lessonNodeId);
+    const contextPack = this.database.prepare(`
+      SELECT mission_id, run_id, journey
+      FROM memory_context_packs WHERE id = ?
+    `).get(input.application.contextPackId) as {
+      mission_id: string | null;
+      run_id: string | null;
+      journey: string;
+    } | undefined;
+    if (
+      !lesson
+      || lesson.lesson_type !== input.lessonType
+      || normalizeLessonStatement(lesson.statement) !== normalizeLessonStatement(input.statement)
+      || !lessonNode
+      || lessonNode.lifecycleStatus !== "verified"
+      || lessonNode.retentionPolicy.allowAutonomous !== true
+      || !input.application.usedNodeIds.includes(lessonNodeId)
+      || !contextPack
+      || contextPack.mission_id !== input.run.mission_id
+      || contextPack.run_id !== input.run.id
+      || contextPack.journey !== "autonomous"
+    ) {
+      throw new Error("The reviewed lesson reuse decision is stale or no longer evidence-linked");
+    }
+
+    this.#linkLessonSupport(lesson.id, input.run.id, null, input.now);
+    for (const evidenceId of input.verifiedEvidenceIds) {
+      this.#linkLessonSupport(lesson.id, null, evidenceId, input.now);
+    }
+
+    const usageId = stableId(
+      "lusage",
+      `${lesson.id}\n${input.run.id}\n${input.application.contextPackId}\nterminal_deduplication`,
+    );
+    if (!this.database.prepare("SELECT 1 FROM lesson_usage WHERE id = ?").get(usageId)) {
+      this.database.prepare(`
+        INSERT INTO lesson_usage (
+          id, lesson_id, mission_id, run_id, context_pack_id,
+          influence_summary, outcome, measured_impact_json, used_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?)
+      `).run(
+        usageId,
+        lesson.id,
+        input.run.mission_id,
+        input.run.id,
+        input.application.contextPackId,
+        input.application.contradictionNodeIds.length > 0
+          ? "Suppressed an exact duplicate candidate while preserving explicit failure contradiction context for independent review."
+          : "Suppressed an exact duplicate candidate and reused the independently reviewed lesson.",
+        input.application.contradictionNodeIds.length > 0
+          ? "duplicate_suppressed_with_contradiction_preserved"
+          : "duplicate_suppressed",
+        input.now,
+      );
+    }
+
+    const edgeId = stableId("medge", `${lessonNodeId}\nused_in\n${input.evaluationNodeId}`);
+    if (!this.database.prepare("SELECT 1 FROM memory_edges WHERE id = ?").get(edgeId)) {
+      this.#memory.createEdge({
+        id: edgeId,
+        sourceNodeId: lessonNodeId,
+        targetNodeId: input.evaluationNodeId,
+        edgeType: "used_in",
+        title: "Reviewed lesson reused",
+        summary: "An independently reviewed lesson prevented a duplicate terminal candidate.",
+        scope: input.run.engagement_id
+          ? { kind: "engagement", engagementId: input.run.engagement_id }
+          : { kind: "mission", missionId: input.run.mission_id },
+        sensitivity: "private",
+        confidence: 1,
+        lifecycleStatus: "verified",
+        provenance: {
+          method: "derived",
+          explanation: "Deterministic exact-statement deduplication reused an independently reviewed evidence-linked lesson.",
+          sources: [{
+            sourceType: "run_evaluation",
+            sourceId: input.evaluationId,
+            acquiredAt: input.now,
+          }],
+        },
+        explanation: "The reviewed lesson influenced terminal learning by preventing a duplicate proposal; its status was not changed.",
+        authorType: "system",
+        authorId: AUTHORING_AGENT,
+      });
+    }
+
+    this.options.events?.append({
+      missionId: input.run.mission_id,
+      runId: input.run.id,
+      journey: input.run.journey,
+      eventType: "learning.lesson_reused",
+      actorType: "agent",
+      actorId: AUTHORING_AGENT,
+      summary: input.application.contradictionNodeIds.length > 0
+        ? "Reused a reviewed lesson and preserved explicit failure contradiction context"
+        : "Reused a reviewed lesson instead of proposing a duplicate",
+      payload: {
+        lessonId: lesson.id,
+        evaluationId: input.evaluationId,
+        contextPackId: input.application.contextPackId,
+        contradictionNodeIds: [...input.application.contradictionNodeIds],
+        lifecycleChanged: false,
+      },
+    });
   }
 
   #retainCompletedAttackChain(input: {

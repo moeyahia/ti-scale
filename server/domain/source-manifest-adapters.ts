@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   ACTION_CLASS_IDS,
   DELIVERABLE_IDS,
@@ -33,20 +34,251 @@ export interface RuntimeCapabilityManifest {
   readonly deliverableIds?: readonly string[];
 }
 
+export interface RuntimeAdapterAttestation {
+  readonly schemaVersion: "ti-scale.runtime-adapter-attestation.v1";
+  readonly source: "autonomous_runtime_composition";
+  readonly toolId: string;
+  readonly dependencyId?: string;
+  readonly parentBindingSha256?: string;
+  readonly executionJourneys: readonly ("autonomous" | "guided")[];
+  readonly binding: Readonly<{
+    readonly configurationSha256: string;
+    readonly providerReceiptSha256: string;
+    readonly localManifestSha256: string;
+    readonly componentReceiptSha256s: readonly string[];
+  }>;
+  readonly bindingSha256: string;
+  readonly observedAt: string;
+  readonly expiresAt: string;
+  readonly receiptSha256: string;
+}
+
+export type RuntimeAdapterAttestationInput = Readonly<
+  Omit<RuntimeAdapterAttestation, "schemaVersion" | "source" | "bindingSha256" | "receiptSha256">
+>;
+
+export const MAX_RUNTIME_ADAPTER_ATTESTATION_LIFETIME_MS = 5 * 60 * 1_000;
+
+const RUNTIME_ADAPTER_PUBLIC_ID = /^[A-Za-z0-9._:@/-]{1,200}$/u;
+const RUNTIME_ADAPTER_SHA256 = /^[a-f0-9]{64}$/u;
+
+function runtimeAdapterHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+function canonicalRuntimeAdapterJourneys(
+  values: readonly ("autonomous" | "guided")[],
+): readonly ("autonomous" | "guided")[] {
+  return Object.freeze([
+    ...(values.includes("autonomous") ? ["autonomous" as const] : []),
+    ...(values.includes("guided") ? ["guided" as const] : []),
+  ]);
+}
+
+function canonicalRuntimeAdapterComponents(values: readonly string[]): readonly string[] {
+  return Object.freeze([...new Set(values)].sort(
+    (left, right) => left < right ? -1 : left > right ? 1 : 0,
+  ));
+}
+
+function runtimeAdapterBindingPreimage(
+  value: Pick<
+    RuntimeAdapterAttestation,
+    "toolId" | "dependencyId" | "parentBindingSha256" | "executionJourneys" | "binding"
+  >,
+): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    bindingSchemaVersion: "ti-scale.runtime-adapter-binding.v1",
+    toolId: value.toolId,
+    dependencyId: value.dependencyId ?? null,
+    parentBindingSha256: value.parentBindingSha256 ?? null,
+    executionJourneys: canonicalRuntimeAdapterJourneys(value.executionJourneys),
+    binding: Object.freeze({
+      configurationSha256: value.binding.configurationSha256,
+      providerReceiptSha256: value.binding.providerReceiptSha256,
+      localManifestSha256: value.binding.localManifestSha256,
+      componentReceiptSha256s: canonicalRuntimeAdapterComponents(
+        value.binding.componentReceiptSha256s,
+      ),
+    }),
+  });
+}
+
+export function runtimeAdapterBindingSha256(
+  value: Pick<
+    RuntimeAdapterAttestation,
+    "toolId" | "dependencyId" | "parentBindingSha256" | "executionJourneys" | "binding"
+  >,
+): string {
+  return runtimeAdapterHash(runtimeAdapterBindingPreimage(value));
+}
+
+function runtimeAdapterReceiptPreimage(
+  value: Omit<RuntimeAdapterAttestation, "receiptSha256">,
+): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    schemaVersion: value.schemaVersion,
+    source: value.source,
+    ...runtimeAdapterBindingPreimage(value),
+    bindingSha256: value.bindingSha256,
+    observedAt: value.observedAt,
+    expiresAt: value.expiresAt,
+  });
+}
+
+export function runtimeAdapterReceiptSha256(
+  value: Omit<RuntimeAdapterAttestation, "receiptSha256">,
+): string {
+  return runtimeAdapterHash(runtimeAdapterReceiptPreimage(value));
+}
+
+export function createRuntimeAdapterAttestation(
+  input: RuntimeAdapterAttestationInput,
+): RuntimeAdapterAttestation {
+  const unsignedBinding = Object.freeze({
+    toolId: input.toolId,
+    ...(input.dependencyId ? { dependencyId: input.dependencyId } : {}),
+    ...(input.parentBindingSha256
+      ? { parentBindingSha256: input.parentBindingSha256 }
+      : {}),
+    executionJourneys: canonicalRuntimeAdapterJourneys(input.executionJourneys),
+    binding: Object.freeze({
+      configurationSha256: input.binding.configurationSha256,
+      providerReceiptSha256: input.binding.providerReceiptSha256,
+      localManifestSha256: input.binding.localManifestSha256,
+      componentReceiptSha256s: canonicalRuntimeAdapterComponents(
+        input.binding.componentReceiptSha256s,
+      ),
+    }),
+  });
+  const unsigned = Object.freeze({
+    schemaVersion: "ti-scale.runtime-adapter-attestation.v1" as const,
+    source: "autonomous_runtime_composition" as const,
+    ...unsignedBinding,
+    bindingSha256: runtimeAdapterBindingSha256(unsignedBinding),
+    observedAt: input.observedAt,
+    expiresAt: input.expiresAt,
+  });
+  const result = Object.freeze({
+    ...unsigned,
+    receiptSha256: runtimeAdapterReceiptSha256(unsigned),
+  });
+  if (!runtimeAdapterAttestationIntegrityValid(result)) {
+    throw new TypeError("Runtime adapter attestation input is invalid.");
+  }
+  return result;
+}
+
+export function runtimeAdapterAttestationIntegrityValid(
+  attestation: RuntimeAdapterAttestation,
+): boolean {
+  const observedAt = Date.parse(attestation.observedAt);
+  const expiresAt = Date.parse(attestation.expiresAt);
+  const canonicalJourneys = canonicalRuntimeAdapterJourneys(
+    attestation.executionJourneys,
+  );
+  const canonicalComponents = canonicalRuntimeAdapterComponents(
+    attestation.binding.componentReceiptSha256s,
+  );
+  const subjectValid = RUNTIME_ADAPTER_PUBLIC_ID.test(attestation.toolId)
+    && (attestation.dependencyId === undefined
+      ? attestation.parentBindingSha256 === undefined
+      : RUNTIME_ADAPTER_PUBLIC_ID.test(attestation.dependencyId)
+        && attestation.parentBindingSha256 !== undefined
+        && RUNTIME_ADAPTER_SHA256.test(attestation.parentBindingSha256));
+  const bindingValid = RUNTIME_ADAPTER_SHA256.test(
+    attestation.binding.configurationSha256,
+  )
+    && RUNTIME_ADAPTER_SHA256.test(attestation.binding.providerReceiptSha256)
+    && RUNTIME_ADAPTER_SHA256.test(attestation.binding.localManifestSha256)
+    && attestation.binding.componentReceiptSha256s.length > 0
+    && canonicalComponents.length === attestation.binding.componentReceiptSha256s.length
+    && canonicalComponents.every(
+      (value, index) => value === attestation.binding.componentReceiptSha256s[index]
+        && RUNTIME_ADAPTER_SHA256.test(value),
+    );
+  const journeyValid = attestation.executionJourneys.length > 0
+    && canonicalJourneys.length === attestation.executionJourneys.length
+    && canonicalJourneys.every(
+      (value, index) => value === attestation.executionJourneys[index],
+    );
+  if (!subjectValid
+    || !bindingValid
+    || !journeyValid
+    || attestation.schemaVersion !== "ti-scale.runtime-adapter-attestation.v1"
+    || attestation.source !== "autonomous_runtime_composition"
+    || !RUNTIME_ADAPTER_SHA256.test(attestation.bindingSha256)
+    || !RUNTIME_ADAPTER_SHA256.test(attestation.receiptSha256)
+    || !Number.isFinite(observedAt)
+    || new Date(observedAt).toISOString() !== attestation.observedAt
+    || !Number.isFinite(expiresAt)
+    || new Date(expiresAt).toISOString() !== attestation.expiresAt
+    || expiresAt <= observedAt
+    || expiresAt - observedAt > MAX_RUNTIME_ADAPTER_ATTESTATION_LIFETIME_MS) {
+    return false;
+  }
+  const { receiptSha256, ...unsigned } = attestation;
+  return attestation.bindingSha256 === runtimeAdapterBindingSha256(attestation)
+    && receiptSha256 === runtimeAdapterReceiptSha256(unsigned);
+}
+
 export interface RuntimeToolManifest {
   readonly id: string;
   readonly label: string;
   readonly available: boolean;
   readonly locallyPolicyEnforced: boolean;
   readonly requiresModel?: boolean;
+  /**
+   * Journeys for which this exact mounted binding may grant execution.
+   * Missing preserves the compatibility behavior of older reviewed runtime
+   * manifests; new exact-step local adapters must declare this explicitly.
+   */
+  readonly executionJourneys?: readonly ("autonomous" | "guided")[];
+  /**
+   * Exact executable tool bindings that implement a planner-visible
+   * composite action. Composite tools have no executable of their own and
+   * are ready only while every named constituent has a current independent
+   * activation receipt. A one-element list is valid for a derived-target
+   * adapter that deliberately hides its physical tool from the planner.
+   */
+  readonly constituentToolIds?: readonly string[];
   readonly actionClassIds: readonly string[];
   readonly evidenceTypeIds: readonly string[];
   readonly deliverableIds?: readonly string[];
   readonly riskClassIds: readonly string[];
   readonly mcpServerId?: string;
+  /**
+   * Expiring proof for a planner-visible in-process adapter that has no
+   * executable or MCP identity of its own. The trusted composition root emits
+   * this only after validating the exact mounted adapter objects and their
+   * versioned configuration. It must never be synthesized from a registry
+   * boolean alone.
+   */
+  readonly runtimeAdapterAttestation?: Readonly<RuntimeAdapterAttestation>;
   readonly dependencies?: readonly {
     readonly id: string;
     readonly ready: boolean;
+    /**
+     * Optional expiring proof emitted by the trusted runtime that evaluated
+     * this dependency. A manifest boolean alone is never fresh evidence.
+     */
+    readonly attestation?: Readonly<{
+      readonly schemaVersion: "ti-scale.local-tool-activation-receipt.v1";
+      readonly source: "local_guided_tool_activation";
+      readonly manifestSha256: string;
+      readonly toolBindingSha256: string;
+      /** Exact hash of the bounded startup-probe specification. */
+      readonly preflightBindingSha256: string;
+      readonly executableSha256: string;
+      readonly observedAt: string;
+      readonly expiresAt: string;
+    }>;
+    /**
+     * Component-specific proof for a dependency implemented inside the same
+     * reviewed in-process adapter. Its binding hash is distinct from the
+     * parent tool's hash so one dependency cannot stand in for another.
+     */
+    readonly runtimeAdapterAttestation?: Readonly<RuntimeAdapterAttestation>;
   }[];
 }
 
@@ -74,6 +306,14 @@ export interface RuntimeAgentManifest {
 export interface RuntimeProviderModelManifest {
   readonly id: string;
   readonly displayName: string;
+  /**
+   * Declares where consequential tool authority lives. The local deterministic
+   * value is never sufficient by itself: model-catalog admission also proves
+   * an exact available, locally enforced, no-model tool binding per action.
+   */
+  readonly executionBoundary?:
+    | "provider_tool_calling"
+    | "local_deterministic_policy";
   readonly toolCalling: boolean;
   readonly structuredOutput: boolean;
   readonly enforcement: Exclude<ModelEnforcementState, "unavailable">;
@@ -164,6 +404,20 @@ export interface RuntimeCapabilityProjection {
     readonly providers: number;
     readonly models: number;
   };
+}
+
+type RuntimeAdapterFreshness = "not_applicable" | "fresh" | "future" | "expired";
+
+function runtimeAdapterFreshness(
+  tool: RuntimeToolManifest,
+  now: Date,
+): RuntimeAdapterFreshness {
+  const attestation = tool.runtimeAdapterAttestation;
+  if (!attestation) return "not_applicable";
+  const observedAt = Date.parse(attestation.observedAt);
+  const expiresAt = Date.parse(attestation.expiresAt);
+  if (observedAt > now.getTime()) return "future";
+  return expiresAt <= now.getTime() ? "expired" : "fresh";
 }
 
 function sorted(values: Iterable<string>): string[] {
@@ -258,6 +512,81 @@ function validateCrossReferences(manifests: RuntimeSourceManifests): void {
         errors.push(`tool:${tool.id}.riskClassIds:${riskId}`);
       }
     }
+    if (tool.constituentToolIds !== undefined) {
+      if (tool.mcpServerId !== undefined
+        || tool.constituentToolIds.length < 1
+        || new Set(tool.constituentToolIds).size !== tool.constituentToolIds.length) {
+        errors.push(`tool:${tool.id}.constituentToolIds:invalid`);
+      }
+      for (const constituentToolId of tool.constituentToolIds) {
+        const constituent = manifests.tools.find(({ id }) => id === constituentToolId);
+        if (!constituent || constituent.id === tool.id
+          || constituent.constituentToolIds !== undefined
+          || constituent.mcpServerId !== undefined) {
+          errors.push(`tool:${tool.id}.constituentToolIds:${constituentToolId}`);
+        }
+      }
+    }
+    const runtimeAttestation = tool.runtimeAdapterAttestation;
+    const runtimeDependencyAttestations = (tool.dependencies ?? [])
+      .map(({ runtimeAdapterAttestation: attestation }) => attestation)
+      .filter((attestation): attestation is RuntimeAdapterAttestation =>
+        attestation !== undefined);
+    if (runtimeAttestation !== undefined) {
+      const runtimeAttestationErrors: string[] = [];
+      if (tool.mcpServerId !== undefined) runtimeAttestationErrors.push("mcp");
+      if (tool.constituentToolIds !== undefined) runtimeAttestationErrors.push("constituents");
+      if (!runtimeAdapterAttestationIntegrityValid(runtimeAttestation)
+        || runtimeAttestation.toolId !== tool.id
+        || runtimeAttestation.dependencyId !== undefined
+        || runtimeAttestation.parentBindingSha256 !== undefined) {
+        runtimeAttestationErrors.push("receipt");
+      }
+      if (tool.executionJourneys === undefined
+        || tool.executionJourneys.length !== runtimeAttestation.executionJourneys.length
+        || !tool.executionJourneys.every(
+          (journey, index) => journey === runtimeAttestation.executionJourneys[index],
+        )) {
+        runtimeAttestationErrors.push("journey");
+      }
+      if ((tool.dependencies ?? []).some(({ attestation }) => attestation !== undefined)) {
+        runtimeAttestationErrors.push("mixed-local-dependency");
+      }
+      if (runtimeDependencyAttestations.length !== (tool.dependencies ?? []).length) {
+        runtimeAttestationErrors.push("missing-runtime-dependency");
+      }
+      if (runtimeAttestationErrors.length > 0) {
+        errors.push(
+          `tool:${tool.id}.runtimeAdapterAttestation:${runtimeAttestationErrors.join("+")}`,
+        );
+      } else {
+        const dependencyHashes = new Set<string>();
+        for (const dependency of tool.dependencies ?? []) {
+          const dependencyAttestation = dependency.runtimeAdapterAttestation!;
+          if (!runtimeAdapterAttestationIntegrityValid(dependencyAttestation)
+            || dependencyAttestation.toolId !== tool.id
+            || dependencyAttestation.dependencyId !== dependency.id
+            || dependencyAttestation.parentBindingSha256
+              !== runtimeAttestation.bindingSha256
+            || dependencyAttestation.executionJourneys.length
+              !== runtimeAttestation.executionJourneys.length
+            || !dependencyAttestation.executionJourneys.every(
+              (journey, index) =>
+                journey === runtimeAttestation.executionJourneys[index],
+            )
+            || dependencyAttestation.observedAt !== runtimeAttestation.observedAt
+            || dependencyAttestation.expiresAt !== runtimeAttestation.expiresAt
+            || dependencyAttestation.bindingSha256 === runtimeAttestation.bindingSha256
+            || dependencyHashes.has(dependencyAttestation.bindingSha256)) {
+            errors.push(`tool:${tool.id}.dependencies.runtimeAdapterAttestation:invalid`);
+            break;
+          }
+          dependencyHashes.add(dependencyAttestation.bindingSha256);
+        }
+      }
+    } else if (runtimeDependencyAttestations.length > 0) {
+      errors.push(`tool:${tool.id}.dependencies.runtimeAdapterAttestation:orphan`);
+    }
   }
   for (const server of manifests.mcpServers) {
     for (const toolId of server.toolIds) {
@@ -278,6 +607,19 @@ function validateCrossReferences(manifests: RuntimeSourceManifests): void {
       if (!modelRefs.has(modelRef)) errors.push(`agent:${agent.id}.modelRefs:${modelRef}`);
     }
   }
+  for (const provider of manifests.providers) {
+    for (const model of provider.models) {
+      if (
+        model.executionBoundary !== undefined
+        && model.executionBoundary !== "provider_tool_calling"
+        && model.executionBoundary !== "local_deterministic_policy"
+      ) {
+        errors.push(
+          `provider-model:${provider.id}/${model.id}.executionBoundary:invalid`,
+        );
+      }
+    }
+  }
 
   if (errors.length > 0) {
     throw new Error(`Runtime manifests contain broken references: ${errors.join(", ")}`);
@@ -286,7 +628,11 @@ function validateCrossReferences(manifests: RuntimeSourceManifests): void {
 
 export function buildRuntimeCapabilityProjection(
   manifests: RuntimeSourceManifests,
+  now: Date = new Date(),
 ): RuntimeCapabilityProjection {
+  if (!Number.isFinite(now.getTime())) {
+    throw new TypeError("Runtime capability projection time is invalid.");
+  }
   assertUniqueIds("risk class", manifests.riskClasses);
   assertUniqueIds("evidence kind", manifests.evidenceKinds);
   assertUniqueIds("capability", manifests.capabilities);
@@ -296,6 +642,9 @@ export function buildRuntimeCapabilityProjection(
   assertUniqueIds("provider", manifests.providers);
   for (const provider of manifests.providers) {
     assertUniqueIds(`provider ${provider.id} model`, provider.models);
+  }
+  for (const tool of manifests.tools) {
+    assertUniqueIds(`tool ${tool.id} dependency`, tool.dependencies ?? []);
   }
   validateCatalogReferences(manifests);
   validateCrossReferences(manifests);
@@ -337,57 +686,147 @@ export function buildRuntimeCapabilityProjection(
       const tools = manifests.tools.filter(({ actionClassIds }) =>
         actionClassIds.includes(actionClassId),
       );
+      const actionToolIds = new Set(tools.map(({ id }) => id));
+      // A capability is executable only when one declared specialist is
+      // actually bound to one of the tools that implements this exact action
+      // class. Keeping the unjoined agent and tool lists below is useful for
+      // diagnostics, but it must never manufacture a runnable route.
+      const toolBoundAgents = agents.filter(({ toolIds }) =>
+        toolIds.some((toolId) => actionToolIds.has(toolId)),
+      );
       const availableTools = tools.filter((tool) => {
         const dependenciesReady = (tool.dependencies ?? []).every(({ ready }) => ready);
         const mcpReady =
           tool.mcpServerId === undefined || mcpById.get(tool.mcpServerId)?.status === "healthy";
-        return tool.available && dependenciesReady && mcpReady;
+        const adapterFreshness = runtimeAdapterFreshness(tool, now);
+        return tool.available
+          && dependenciesReady
+          && mcpReady
+          && (adapterFreshness === "not_applicable" || adapterFreshness === "fresh");
       });
-      const availableAgents = agents.filter(({ available }) => available);
+      const availableAgents = toolBoundAgents.filter(({ available }) => available);
       const providerModelRefs = sorted(
-        agents.flatMap(({ modelRefs }) =>
+        toolBoundAgents.flatMap(({ modelRefs }) =>
           modelRefs.map(({ providerId, modelId }) => `${providerId}/${modelId}`),
         ),
       );
+      const availableAgentModelRefs = new Set(availableAgents.flatMap(({ modelRefs }) =>
+        modelRefs.map(({ providerId, modelId }) => `${providerId}/${modelId}`)));
       const enforcedProviderModelRefs = providerModelRefs.filter((ref) => {
         const model = modelsByRef.get(ref);
-        return (
-          model !== undefined &&
-          model.providerAuthenticated &&
-          model.providerHealthy &&
-          model.toolCalling &&
-          model.structuredOutput &&
-          model.declaredEnforcement === "enforced_executor" &&
-          model.compatibleActionClassIds.includes(actionClassId)
-        );
+        return availableAgentModelRefs.has(ref)
+          && model !== undefined
+          && model.providerAuthenticated
+          && model.providerHealthy
+          && model.toolCalling
+          && model.structuredOutput
+          && model.declaredEnforcement === "enforced_executor"
+          && model.compatibleActionClassIds.includes(actionClassId);
       });
       const locallyEnforcedTools = availableTools.filter(
-        ({ locallyPolicyEnforced }) => locallyPolicyEnforced,
+        ({ locallyPolicyEnforced, executionJourneys }) => locallyPolicyEnforced
+          && (executionJourneys === undefined || executionJourneys.includes("autonomous")),
       );
-      const modelFreeEnforcedTool = locallyEnforcedTools.some(
-        ({ requiresModel }) => requiresModel === false,
-      );
-      const enforcementReady =
-        locallyEnforcedTools.length > 0 &&
-        (modelFreeEnforcedTool || enforcedProviderModelRefs.length > 0);
+      const enforcedProviderModelRefSet = new Set(enforcedProviderModelRefs);
+      const enforcementReady = availableAgents.some((agent) => {
+        const agentModelRefs = agent.modelRefs.map(({ providerId, modelId }) =>
+          `${providerId}/${modelId}`);
+        return locallyEnforcedTools.some((tool) => agent.toolIds.includes(tool.id)
+          && (tool.requiresModel === false
+            || agentModelRefs.some((modelRef) => enforcedProviderModelRefSet.has(modelRef))));
+      });
       const readinessReasons: string[] = [];
 
       if (agents.length === 0) readinessReasons.push("No agent declares this action class.");
       if (tools.length === 0) readinessReasons.push("No runtime tool declares this action class.");
-      if (agents.length > 0 && availableAgents.length === 0) {
-        readinessReasons.push("All mapped agents are unavailable.");
+      if (agents.length > 0 && toolBoundAgents.length === 0 && tools.length > 0) {
+        readinessReasons.push(
+          `No declared agent is bound to the mapped tool${tools.length === 1 ? "" : "s"}: ${sorted(tools.map(({ id }) => id)).join(", ")}.`,
+        );
+      } else if (toolBoundAgents.length > 0 && availableAgents.length === 0) {
+        readinessReasons.push(
+          `Mapped agent${toolBoundAgents.length === 1 ? " is" : "s are"} unavailable: ${sorted(toolBoundAgents.map(({ id }) => id)).join(", ")}.`,
+        );
       }
       if (tools.length > 0 && availableTools.length === 0) {
-        readinessReasons.push("All mapped tools or dependencies are unavailable.");
+        for (const tool of tools) {
+          const missingDependencies = (tool.dependencies ?? [])
+            .filter(({ ready }) => !ready)
+            .map(({ id }) => id);
+          const mcp = tool.mcpServerId === undefined
+            ? undefined
+            : mcpById.get(tool.mcpServerId);
+          const adapterFreshness = runtimeAdapterFreshness(tool, now);
+          if (!tool.available && tool.mcpServerId === undefined) {
+            readinessReasons.push(
+              `${tool.id} has no current activation receipt; run its reviewed target-free activation probe.`,
+            );
+          } else if (!tool.available && mcp?.status === "healthy") {
+            readinessReasons.push(
+              `${tool.id} is absent or unavailable in the current closed inventory for MCP server ${tool.mcpServerId}; repeat that server's tools/list attestation.`,
+            );
+          }
+          if (adapterFreshness === "future") {
+            readinessReasons.push(
+              `${tool.id} has a future-dated runtime-composition receipt; re-attest it against the current trusted clock.`,
+            );
+          } else if (adapterFreshness === "expired") {
+            readinessReasons.push(
+              `${tool.id} has an expired runtime-composition receipt; recompose the exact reviewed in-process adapter before mission use.`,
+            );
+          }
+          if (missingDependencies.length > 0) {
+            readinessReasons.push(
+              `${tool.id} is waiting for ${missingDependencies.length === 1 ? "dependency" : "dependencies"}: ${sorted(missingDependencies).join(", ")}.`,
+            );
+          }
+          if (tool.mcpServerId !== undefined && mcp?.status !== "healthy") {
+            readinessReasons.push(
+              `${tool.id} requires MCP server ${tool.mcpServerId}, which is ${mcp?.status ?? "not registered"}; restore that exact server and repeat its inventory attestation.`,
+            );
+          }
+        }
+      } else if (availableTools.length > 0 && availableAgents.length > 0) {
+        const agentToolIds = new Set(availableAgents.flatMap(({ toolIds }) => toolIds));
+        const unassignedReadyTools = availableTools.filter(({ id }) => !agentToolIds.has(id));
+        if (unassignedReadyTools.length === availableTools.length) {
+          readinessReasons.push(
+            `Ready tool${availableTools.length === 1 ? " is" : "s are"} not assigned to an available specialist: ${sorted(availableTools.map(({ id }) => id)).join(", ")}.`,
+          );
+        }
       }
       if (!enforcementReady && agents.length > 0 && tools.length > 0) {
-        readinessReasons.push("No locally enforced tool and compatible executor path is ready.");
+        const autonomousDenied = availableTools.filter(({ locallyPolicyEnforced, executionJourneys }) =>
+          locallyPolicyEnforced && executionJourneys !== undefined
+          && !executionJourneys.includes("autonomous"));
+        const unenforced = availableTools.filter(({ locallyPolicyEnforced }) => !locallyPolicyEnforced);
+        const modelRequired = locallyEnforcedTools.filter(({ requiresModel }) => requiresModel !== false);
+        if (autonomousDenied.length > 0) {
+          readinessReasons.push(
+            `Ready tool${autonomousDenied.length === 1 ? "" : "s"} ${sorted(autonomousDenied.map(({ id }) => id)).join(", ")} ${autonomousDenied.length === 1 ? "is" : "are"} approved for ${sorted(autonomousDenied.flatMap(({ executionJourneys }) => executionJourneys ?? [])).join(" and ") || "no"} execution, not Autonomous execution.`,
+          );
+        }
+        if (unenforced.length > 0) {
+          readinessReasons.push(
+            `Ready tool${unenforced.length === 1 ? "" : "s"} ${sorted(unenforced.map(({ id }) => id)).join(", ")} ${unenforced.length === 1 ? "has" : "have"} no locally enforced policy adapter.`,
+          );
+        }
+        if (modelRequired.length > 0 && enforcedProviderModelRefs.length === 0) {
+          readinessReasons.push(
+            `Model-backed tool${modelRequired.length === 1 ? "" : "s"} ${sorted(modelRequired.map(({ id }) => id)).join(", ")} ${modelRequired.length === 1 ? "requires" : "require"} a healthy authenticated enforced-executor model assigned to the same specialist.`,
+          );
+        }
+        if (readinessReasons.length === 0) {
+          readinessReasons.push("No available specialist is joined to a locally enforced tool and compatible executor route for this action class.");
+        }
       }
 
       const hasMappings = agents.length > 0 && tools.length > 0;
+      const joinedAvailableRoute = availableAgents.some((agent) =>
+        availableTools.some((tool) => agent.toolIds.includes(tool.id)));
       const availability: CapabilityAvailability = !hasMappings
         ? "unsupported"
-        : availableAgents.length > 0 && availableTools.length > 0
+        : joinedAvailableRoute
           ? "supported"
           : "unavailable";
 

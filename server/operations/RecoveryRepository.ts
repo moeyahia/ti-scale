@@ -16,6 +16,7 @@ import {
   parseRecoveryProviderRouteBinding,
   recoveryProviderCircuitState,
   recoveryProviderHealthMaxAge,
+  recoveryProviderModelPin,
   recoveryProviderRouteSettingKey,
 } from "./recoveryProviderRoute";
 
@@ -575,10 +576,6 @@ export class RecoveryRepository {
     const selectedRoute = routeSetting
       ? parseRecoveryProviderRouteBinding(record(parseJson(routeSetting.value_json)))
       : null;
-    const currentRouteId = selectedRoute && boundary &&
-      selectedRoute.stepId === boundary.stepId && selectedRoute.assignmentId === boundary.assignmentId
-      ? selectedRoute.providerId
-      : "grok-acp";
     const tokenBudget = budgetLimit(budget, "providerTokens", "tokenBudget") ?? 0;
     const costBudget = budgetLimit(budget, "estimatedCost", "costBudget") ?? 0;
     const providerCandidates: Array<RunRecoveryProjection["providerCandidates"][number]> = [];
@@ -588,34 +585,73 @@ export class RecoveryRepository {
       (boundary.actionKind === "provider_turn" || boundary.actionKind === "delegation")
     ) {
       for (const providerId of this.providerRouteIds) {
-        if (providerId === currentRouteId) continue;
         const health = this.database.prepare(`
           SELECT status, metrics_json, captured_at FROM health_snapshots
           WHERE component_type = 'provider' AND component_id = ?
           ORDER BY captured_at DESC, id DESC LIMIT 1
         `).get(providerId) as Row | undefined;
         const metrics = health ? record(parseJson(String(health.metrics_json))) : {};
-        if (
-          health?.status !== "healthy" ||
-          !isRecoveryProviderHealthFresh(
-            recoveryProviderAttestedAt(metrics),
-            this.clock().toISOString(),
-            this.providerHealthMaxAgeMs,
-          ) ||
-          recoveryProviderCircuitState(this.database, runId, providerId) !== "closed" ||
-          metrics.authenticated !== true ||
-          metrics.callable !== true ||
+        const status = health?.status === "healthy" || health?.status === "degraded" ||
+          health?.status === "unhealthy" || health?.status === "unknown"
+          ? health.status
+          : "missing";
+        const modelPin = recoveryProviderModelPin(metrics);
+        const isCurrentExactRoute = selectedRoute?.schemaVersion === 2 && boundary &&
+          selectedRoute.stepId === boundary.stepId &&
+          selectedRoute.assignmentId === boundary.assignmentId &&
+          selectedRoute.providerId === providerId && modelPin !== null &&
+          selectedRoute.modelId === modelPin.modelId &&
+          selectedRoute.modelConfigurationHash === modelPin.modelConfigurationHash;
+        if (isCurrentExactRoute) continue;
+
+        let eligibility: RunRecoveryProjection["providerCandidates"][number]["eligibility"] = "compatible";
+        let candidateReason = `Ready: ${providerId} and ${modelPin?.modelId ?? "its model"} have a fresh callable attestation and satisfy this run boundary.`;
+        if (!health) {
+          eligibility = "unavailable";
+          candidateReason = "Unavailable: no live readiness record exists for this provider route.";
+        } else if (
+          status !== "healthy" || metrics.configured === false ||
+          metrics.authenticated !== true || metrics.callable !== true
+        ) {
+          eligibility = "unavailable";
+          candidateReason = `Unavailable: the provider route is ${status} or is not configured, authenticated, and callable.`;
+        } else if (!modelPin) {
+          eligibility = "unavailable";
+          candidateReason = "Unavailable: live readiness does not attest one exact requested-and-returned model with a valid configuration hash.";
+        } else if (!isRecoveryProviderHealthFresh(
+          recoveryProviderAttestedAt(metrics),
+          this.clock().toISOString(),
+          this.providerHealthMaxAgeMs,
+        )) {
+          eligibility = "stale";
+          candidateReason = "Stale: refresh provider readiness before selecting this provider and model.";
+        } else if (recoveryProviderCircuitState(this.database, runId, providerId) !== "closed") {
+          eligibility = "unavailable";
+          candidateReason = "Unavailable: the provider circuit is open or probing and cannot accept this recovery route.";
+        } else if (
           (tokenBudget > 0 && metrics.reportsExactTokenUsage !== true) ||
-          (costBudget > 0 && metrics.reportsExactCostUsage !== true) ||
-          (run.journey === "autonomous" && (
-            contractPolicy.providerPolicy !== "automatic_enforcing_only" ||
-            metrics.enforcesAutonomousBoundary !== true
-          )) ||
-          (run.journey === "guided" && metrics.supportsGuided !== true)
-        ) continue;
+          (costBudget > 0 && metrics.reportsExactCostUsage !== true)
+        ) {
+          eligibility = "budget_incompatible";
+          candidateReason = "Budget incompatible: this provider does not report the exact usage required by the run's finite budget.";
+        } else if (run.journey === "autonomous" && (
+          contractPolicy.providerPolicy !== "automatic_enforcing_only" ||
+          metrics.enforcesAutonomousBoundary !== true
+        )) {
+          eligibility = "enforcement_incompatible";
+          candidateReason = "Enforcement incompatible: this provider cannot enforce the signed Autonomous boundary.";
+        } else if (run.journey === "guided" && metrics.supportsGuided !== true) {
+          eligibility = "enforcement_incompatible";
+          candidateReason = "Enforcement incompatible: this provider is not attested for represented Guided steps.";
+        }
         providerCandidates.push({
           providerId,
-          status: "healthy",
+          modelId: modelPin?.modelId ?? null,
+          modelConfigurationHash: modelPin?.modelConfigurationHash ?? null,
+          status,
+          eligibility,
+          enabled: eligibility === "compatible",
+          reason: candidateReason,
           supportsGuided: metrics.supportsGuided === true,
           enforcesAutonomousBoundary: metrics.enforcesAutonomousBoundary === true,
           reportsExactTokenUsage: metrics.reportsExactTokenUsage === true,
@@ -697,7 +733,7 @@ export class RecoveryRepository {
         hasFailedCurrentAction,
         canManageRecovery: access.canManageRecovery === true,
         reassignmentCandidates: reassignmentCandidates.length,
-        providerCandidates: providerCandidates.length,
+        providerCandidates: providerCandidates.filter(({ enabled }) => enabled).length,
       }),
     };
   }

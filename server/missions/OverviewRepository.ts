@@ -31,7 +31,7 @@ interface AgentRow {
 
 interface MemoryCountsRow {
   readonly confirmed: number;
-  readonly candidates: number;
+  readonly candidate_nodes: number;
   readonly stale: number;
   readonly disputed: number;
 }
@@ -207,12 +207,16 @@ export class OverviewRepository {
       .prepare(`
         SELECT
           SUM(CASE WHEN lifecycle_status IN ('confirmed', 'verified') THEN 1 ELSE 0 END) AS confirmed,
-          SUM(CASE WHEN lifecycle_status = 'candidate' THEN 1 ELSE 0 END) AS candidates,
+          SUM(CASE WHEN lifecycle_status = 'candidate' THEN 1 ELSE 0 END) AS candidate_nodes,
           SUM(CASE WHEN lifecycle_status = 'stale' THEN 1 ELSE 0 END) AS stale,
           SUM(CASE WHEN lifecycle_status = 'disputed' THEN 1 ELSE 0 END) AS disputed
         FROM memory_nodes
       `)
       .get() as MemoryCountsRow;
+    const pendingMemoryReviews = count(
+      this.database,
+      "SELECT COUNT(*) AS count FROM memory_candidates WHERE status = 'pending'",
+    );
     const openVaultConflicts = count(
       this.database,
       "SELECT COUNT(*) AS count FROM vault_conflicts WHERE status = 'open'",
@@ -277,7 +281,11 @@ export class OverviewRepository {
       ),
       brain: {
         confirmed: memory.confirmed ?? 0,
-        candidates: memory.candidates ?? 0,
+        candidateNodes: memory.candidate_nodes ?? 0,
+        pendingReviews: pendingMemoryReviews,
+        // Compatibility alias. New consumers must use pendingReviews so a
+        // canonical candidate node is never presented as an Inbox item.
+        candidates: pendingMemoryReviews,
         stale: memory.stale ?? 0,
         conflicts: (memory.disputed ?? 0) + openVaultConflicts,
         vaultStatus: vault?.status ?? "not_configured",

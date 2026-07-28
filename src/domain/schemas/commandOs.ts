@@ -7,6 +7,7 @@ import type {
   AutonomousBranchResult,
   AutonomousMissionRequest,
   AutonomousMissionPreflight,
+  AutonomousPlanningSelection,
   CreatedMission,
   Journey,
   MissionRecord,
@@ -22,6 +23,8 @@ import type {
   SavedMissionViewCollection,
   VersionedAutonomousMissionPreflight,
 } from "../types/commandOs";
+import { AUTONOMOUS_LOCAL_PLANNING_SELECTION } from "../types/commandOs";
+import { MEMORY_NODE_TYPES, type MemoryNodeType } from "../types/brain";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -227,7 +230,9 @@ export function parseOverview(payload: unknown): OverviewSnapshot {
     agents: list(value.agents).map(parseAgent),
     brain: {
       confirmed: finiteNumber(brain.confirmed, "confirmed memory count"),
-      candidates: finiteNumber(brain.candidates, "candidate memory count"),
+      candidateNodes: finiteNumber(brain.candidateNodes, "candidate node count"),
+      pendingReviews: finiteNumber(brain.pendingReviews, "pending memory review count"),
+      candidates: finiteNumber(brain.candidates, "pending memory review compatibility count"),
       stale: finiteNumber(brain.stale, "stale memory count"),
       conflicts: finiteNumber(brain.conflicts, "memory conflict count"),
       vaultStatus: text(brain.vaultStatus, "vault status"),
@@ -244,7 +249,8 @@ export function parseOverview(payload: unknown): OverviewSnapshot {
 function parseContextCandidate(value: unknown): AutonomousContextCandidate {
   const item = record(value, "Autonomous context candidate");
   const scope = record(item.scope, "Autonomous context scope");
-  if (item.nodeType !== "preference" && item.nodeType !== "lesson") throw new Error("context node type is invalid");
+  const nodeType = item.nodeType as MemoryNodeType;
+  if (!MEMORY_NODE_TYPES.includes(nodeType)) throw new Error("context node type is invalid");
   if (item.lifecycleStatus !== "confirmed" && item.lifecycleStatus !== "verified") throw new Error("context lifecycle is invalid");
   if (scope.kind !== "global" && scope.kind !== "engagement") throw new Error("context scope is invalid");
   if (item.sensitivity !== "public" && item.sensitivity !== "internal" && item.sensitivity !== "private") {
@@ -252,7 +258,7 @@ function parseContextCandidate(value: unknown): AutonomousContextCandidate {
   }
   return {
     id: text(item.id, "context node id"),
-    nodeType: item.nodeType,
+    nodeType,
     title: text(item.title, "context title"),
     summary: text(item.summary, "context summary"),
     lifecycleStatus: item.lifecycleStatus,
@@ -330,12 +336,163 @@ function parseSpecialistCandidate(value: unknown): AutonomousMissionPreflight["e
   };
 }
 
+function parseModelConfigurationReceipt(
+  value: unknown,
+  label: string,
+): AutonomousMissionPreflight["execution"]["team"]["modelAssignments"][number]["primary"] {
+  const item = record(value, label);
+  const enforcementMode = item.enforcementMode;
+  if (
+    enforcementMode !== "enforced_executor"
+    && enforcementMode !== "observe_only_executor"
+    && enforcementMode !== "advisor_only"
+    && enforcementMode !== "unavailable"
+  ) throw new Error(`${label} enforcement mode is invalid`);
+  const authState = item.authState;
+  if (
+    authState !== "authenticated"
+    && authState !== "unconfigured"
+    && authState !== "invalid"
+    && authState !== "unknown"
+  ) throw new Error(`${label} authentication state is invalid`);
+  const healthState = item.healthState;
+  if (
+    healthState !== "healthy"
+    && healthState !== "degraded"
+    && healthState !== "unavailable"
+    && healthState !== "unknown"
+  ) throw new Error(`${label} health state is invalid`);
+  const executionBoundary = item.executionBoundary;
+  if (
+    executionBoundary !== "provider_tool_calling"
+    && executionBoundary !== "local_deterministic_policy"
+  ) throw new Error(`${label} execution boundary is invalid`);
+  return {
+    configurationId: text(item.configurationId, `${label} configuration ID`),
+    providerId: text(item.providerId, `${label} provider ID`),
+    modelId: text(item.modelId, `${label} model ID`),
+    displayName: text(item.displayName, `${label} display name`),
+    executionBoundary,
+    reasoningEffort: parseNullableText(item.reasoningEffort, `${label} reasoning effort`),
+    enforcementMode,
+    authState,
+    healthState,
+    disclosureClass: text(item.disclosureClass, `${label} disclosure class`),
+    costClass: text(item.costClass, `${label} cost class`),
+    latencyClass: text(item.latencyClass, `${label} latency class`),
+    contextLimit: item.contextLimit === null
+      ? null
+      : finiteNumber(item.contextLimit, `${label} context limit`),
+    catalogSource: text(item.catalogSource, `${label} catalog source`),
+    catalogRetrievedAt: parseNullableText(item.catalogRetrievedAt, `${label} catalog retrieval time`),
+  };
+}
+
+function parseModelAssignmentReceipt(
+  value: unknown,
+): AutonomousMissionPreflight["execution"]["team"]["modelAssignments"][number] {
+  const item = record(value, "Autonomous agent model assignment");
+  const source = item.source;
+  if (source !== "recommended" && source !== "inherited" && source !== "operator_override") {
+    throw new Error("Autonomous agent model assignment source is invalid");
+  }
+  return {
+    agentId: text(item.agentId, "Autonomous model assignment agent ID"),
+    source,
+    ready: booleanValue(item.ready, "Autonomous model assignment readiness"),
+    reasons: list(item.reasons).map((reason) => text(reason, "Autonomous model assignment reason")),
+    primary: parseModelConfigurationReceipt(item.primary, "Autonomous primary model receipt"),
+    fallback: item.fallback === null
+      ? null
+      : parseModelConfigurationReceipt(item.fallback, "Autonomous fallback model receipt"),
+  };
+}
+
+function parseAgentModelAssignment(
+  value: unknown,
+  label: string,
+): AutonomousMissionRequest["contract"]["agentModelAssignments"][number] {
+  const item = record(value, label);
+  return {
+    agentId: text(item.agentId, `${label} agent ID`),
+    primaryConfigurationId: text(
+      item.primaryConfigurationId,
+      `${label} primary configuration ID`,
+    ),
+    fallbackConfigurationId: parseNullableText(
+      item.fallbackConfigurationId,
+      `${label} fallback configuration ID`,
+    ),
+  };
+}
+
+export function parseAutonomousPlanningSelection(
+  value: unknown,
+  label = "Autonomous planning selection",
+): AutonomousPlanningSelection {
+  if (value === undefined) return AUTONOMOUS_LOCAL_PLANNING_SELECTION;
+  const item = record(value, label);
+  if (item.route === "local_deterministic") {
+    if (
+      item.plannerId !== "ti-scale.local-autonomous-contract-planner.v1"
+      || item.enforcementMode !== "local_policy"
+      || item.disclosureClass !== "local_only"
+      || item.executionAuthority !== "none"
+    ) {
+      throw new Error(`${label} local deterministic boundary is invalid`);
+    }
+    return {
+      route: "local_deterministic",
+      plannerId: "ti-scale.local-autonomous-contract-planner.v1",
+      enforcementMode: "local_policy",
+      disclosureClass: "local_only",
+      executionAuthority: "none",
+    };
+  }
+  if (item.route !== "provider_advisory") {
+    throw new Error(`${label} route is invalid`);
+  }
+  if (
+    item.enforcementMode !== "advisor_only"
+    || (
+      item.disclosureClass !== "public_only"
+      && item.disclosureClass !== "sanitized_internal"
+    )
+    || item.executionAuthority !== "none"
+  ) {
+    throw new Error(`${label} provider advisory boundary is invalid`);
+  }
+  const fallbackConfigurationId = item.fallbackConfigurationId === null
+    ? null
+    : text(
+        item.fallbackConfigurationId,
+        `${label} fallback configuration ID`,
+      );
+  const primaryConfigurationId = text(
+    item.primaryConfigurationId,
+    `${label} primary configuration ID`,
+  );
+  if (fallbackConfigurationId === primaryConfigurationId) {
+    throw new Error(`${label} fallback must differ from its primary configuration`);
+  }
+  return {
+    route: "provider_advisory",
+    agentId: text(item.agentId, `${label} planning agent ID`),
+    primaryConfigurationId,
+    fallbackConfigurationId,
+    enforcementMode: "advisor_only",
+    disclosureClass: item.disclosureClass,
+    executionAuthority: "none",
+  };
+}
+
 function parseAutonomousPreflight(
   payload: unknown,
   requireInitialVersion: boolean,
 ): VersionedAutonomousMissionPreflight {
   const value = record(unwrap(payload), "Autonomous preflight");
   const contract = record(value.contract, "Autonomous contract review");
+  const outcome = record(value.outcome, "Autonomous outcome");
   const context = record(value.context, "Autonomous context preview");
   const execution = record(value.execution, "Autonomous execution preview");
   const team = record(execution.team, "Autonomous specialist team preview");
@@ -349,6 +506,25 @@ function parseAutonomousPreflight(
   if (!/^[a-f0-9]{64}$/u.test(hash)) throw new Error("Autonomous contract hash is invalid");
   return {
     schemaVersion: "2.4",
+    outcome: {
+      id: outcome.id === "assessment" || outcome.id === "complete_engagement"
+        ? outcome.id
+        : (() => { throw new Error("Autonomous outcome ID is invalid"); })(),
+      label: text(outcome.label, "Autonomous outcome label"),
+      concisePromise: text(
+        outcome.concisePromise,
+        "Autonomous outcome promise",
+      ),
+      completionMeaning: text(
+        outcome.completionMeaning,
+        "Autonomous outcome completion meaning",
+      ),
+      requiredTerminalSuccessCriteria: list(
+        outcome.requiredTerminalSuccessCriteria,
+      ).map((item) => text(item, "Autonomous terminal success criterion")),
+      requiredActionClassIds: list(outcome.requiredActionClassIds)
+        .map((item) => text(item, "Autonomous terminal action class")),
+    },
     contract: { version, hash },
     readiness: parseReadiness(value.readiness),
     context: {
@@ -365,6 +541,7 @@ function parseAutonomousPreflight(
         invalidSelectedAgentIds: list(team.invalidSelectedAgentIds).map((item) => text(item, "invalid specialist ID")),
         recommendedAgentIds: list(team.recommendedAgentIds).map((item) => text(item, "recommended specialist ID")),
         effectiveAgentIds: list(team.effectiveAgentIds).map((item) => text(item, "effective specialist ID")),
+        modelAssignments: list(team.modelAssignments).map(parseModelAssignmentReceipt),
       },
     },
     policySummary: {
@@ -411,6 +588,15 @@ function parseAutonomousRequest(value: unknown): AutonomousMissionRequest {
   const optionalNumber = (candidate: unknown, label: string): number | undefined => (
     candidate === undefined || candidate === null ? undefined : finiteNumber(candidate, label)
   );
+  const environmentClassification = authorization.environmentClassification;
+  if (
+    environmentClassification !== undefined
+    && !["client_or_public", "internal", "htb", "ctf", "local_disposable_lab"].includes(
+      String(environmentClassification),
+    )
+  ) {
+    throw new Error("branch environment classification is invalid");
+  }
   return {
     journey: "autonomous",
     launch: true,
@@ -419,6 +605,9 @@ function parseAutonomousRequest(value: unknown): AutonomousMissionRequest {
     successCriteria: stringList(root.successCriteria, "branch success criterion"),
     authorization: {
       ...(optionalText(authorization.engagementId) ? { engagementId: optionalText(authorization.engagementId) } : {}),
+      ...(environmentClassification === undefined ? {} : {
+        environmentClassification: environmentClassification as AutonomousMissionRequest["authorization"]["environmentClassification"],
+      }),
       allowedTargets: stringList(authorization.allowedTargets, "branch allowed target"),
       prohibitedTargets: stringList(authorization.prohibitedTargets, "branch prohibited target"),
       authorizationConfirmed: true,
@@ -446,8 +635,14 @@ function parseAutonomousRequest(value: unknown): AutonomousMissionRequest {
       dataHandlingPolicy: requiredLiteral(contract.dataHandlingPolicy, "local_private", "branch data handling policy"),
       retentionPolicy: requiredLiteral(contract.retentionPolicy, "operator_managed", "branch retention policy"),
       providerPolicy: requiredLiteral(contract.providerPolicy, "automatic_enforcing_only", "branch provider policy"),
+      planningSelection: parseAutonomousPlanningSelection(
+        contract.planningSelection,
+        "branch planning selection",
+      ),
       toolPolicy: requiredLiteral(contract.toolPolicy, "contract_allowlist", "branch tool policy"),
       specialistAgentIds: stringList(contract.specialistAgentIds, "branch specialist ID"),
+      agentModelAssignments: list(contract.agentModelAssignments).map((item, index) =>
+        parseAgentModelAssignment(item, `branch agent model assignment ${index + 1}`)),
       memoryScopes: stringList(contract.memoryScopes, "branch memory scope"),
       contextNodeIds: stringList(contract.contextNodeIds, "branch context node ID"),
       safeStopConditions: stringList(contract.safeStopConditions, "branch safe-stop condition"),

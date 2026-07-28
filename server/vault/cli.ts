@@ -1,16 +1,14 @@
 #!/usr/bin/env bun
 import { existsSync, lstatSync, readdirSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import {
   resolveCliDatabasePath,
   resolveCliVaultRoot,
   type TiScaleCliEnvironment,
 } from "../app/StandaloneCliConfiguration";
-import {
-  createDatabaseConnection,
-  createTimestampedBackup,
-} from "../db";
+import { createDatabaseConnection } from "../db";
 import { MemoryRepository } from "../memory";
+import { withCanonicalWriterLease } from "../maintenance";
 import { redactLegacyText } from "../migration/SecretSafety";
 import {
   ObsidianVaultBridge,
@@ -18,6 +16,7 @@ import {
   VaultBulkExportPolicyError,
 } from "./ObsidianVaultBridge";
 import { VaultPathPolicy } from "./VaultPathPolicy";
+import { ObsidianPluginManager } from "./ObsidianPluginManager";
 
 interface Args {
   readonly command: string;
@@ -84,15 +83,19 @@ function usage(): string {
 
 Usage:
   bun run server/vault/cli.ts import [--db PATH] [--vault-root ROOT] [--connection ID] [--path NOTE] [--actor ID]
-  bun run server/vault/cli.ts export [--db PATH] [--vault-root ROOT] [--connection ID] [--concurrency N] [--progress-interval N] [--quiet] [--zip] [--actor ID]
+  bun run server/vault/cli.ts export [--db PATH] [--vault-root ROOT] [--connection ID] [--concurrency N] [--progress-interval N] [--quiet] [--actor ID]
   bun run server/vault/cli.ts sync-verify [--db PATH] [--vault-root ROOT] [--connection ID]
+  bun run server/vault/cli.ts brain-atlas-health [--db PATH] [--vault-root ROOT] [--connection ID]
+  bun run server/vault/cli.ts brain-atlas-install [--db PATH] [--vault-root ROOT] [--connection ID] --source DIR [--actor ID]
 
 Environment fallbacks:
   TI_SCALE_DATABASE_PATH
   TI_SCALE_VAULT_ROOT
 
-SQLite remains canonical. Import creates a verified DB backup first, inbox notes
-remain candidates, conflicts are never overwritten, and .obsidian is ignored.
+SQLite remains canonical. Backups and retained portable ZIPs are disabled by
+operator policy; import runs
+forward-only, inbox notes remain candidates, and conflicts are never overwritten. Import ignores
+.obsidian. Export synchronizes canonical notes only and never creates an archive.
 `;
 }
 
@@ -102,12 +105,48 @@ export async function runVaultCli(
 ): Promise<number> {
   const args = argumentsFor(argv);
   if (args.command === "help" || args.flags.has("help")) { process.stdout.write(usage()); return 0; }
+  if (args.values.has("backup-dir")) {
+    throw new Error("--backup-dir is unavailable because backups are disabled by operator policy");
+  }
+  if (args.flags.has("zip") || args.flags.has("brain-atlas")) {
+    throw new Error("Portable Vault ZIP creation is disabled by operator no-backup policy");
+  }
   const databasePath = resolveCliDatabasePath(args.values.get("db"), environment);
   if (!existsSync(databasePath)) throw new Error("Canonical database does not exist; run db:migrate first");
   const database = createDatabaseConnection({ filename: databasePath, fileMustExist: true });
   try {
     const policy = new VaultPathPolicy(resolveCliVaultRoot(args.values.get("vault-root"), environment));
     const bridge = new ObsidianVaultBridge(database, new MemoryRepository(database), policy);
+    const plugins = new ObsidianPluginManager({ database, pathPolicy: policy });
+    if (args.command === "brain-atlas-health") {
+      const result = plugins.health(args.values.get("connection"));
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return result.healthy ? 0 : 2;
+    }
+    const supportedWriterCommands = new Set([
+      "brain-atlas-install",
+      "import",
+      "export",
+      "sync-verify",
+    ]);
+    if (!supportedWriterCommands.has(args.command)) {
+      throw new Error(`Unknown vault command: ${args.command}`);
+    }
+    const leaseActor = args.values.get("actor")?.trim() || "operator:cli";
+    return await withCanonicalWriterLease(database, {
+      ownerId: leaseActor,
+      operation: `obsidian-${args.command}`,
+    }, async (lease, leases) => {
+      leases.assertActive(lease);
+    if (args.command === "brain-atlas-install") {
+      const result = plugins.installBrainAtlas({
+        sourceDirectory: resolve(required(args, "source")),
+        actor: args.values.get("actor")?.trim() || "operator:cli",
+        ...(args.values.get("connection") ? { connectionId: args.values.get("connection") } : {}),
+      });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return result.health.healthy ? 0 : 2;
+    }
     const id = connectionId(database, args.values.get("connection"));
     const actor = args.values.get("actor")?.trim() || "operator:cli";
     const connection = bridge.requireConnection(id);
@@ -115,10 +154,14 @@ export async function runVaultCli(
 
     if (args.command === "import") {
       bridge.assertVaultSyncAllowed();
-      const backup = await createTimestampedBackup(database, args.values.get("backup-dir") ? resolve(args.values.get("backup-dir")!) : resolve(dirname(databasePath), "backups"), "before-obsidian-import");
       const paths = args.values.get("path") ? [required(args, "path")] : markdownFiles(policy, connection.vaultPath);
       const results = paths.map((path) => bridge.syncChangedPath(id, path, actor));
-      process.stdout.write(`${JSON.stringify({ backup, processed: paths.length, results }, null, 2)}\n`);
+      process.stdout.write(`${JSON.stringify({
+        backup: null,
+        backupPolicy: "disabled_by_operator",
+        processed: paths.length,
+        results,
+      }, null, 2)}\n`);
       return 0;
     }
     if (args.command === "export") {
@@ -139,9 +182,6 @@ export async function runVaultCli(
             },
           } : {}),
         });
-        const portable = args.flags.has("zip")
-          ? await bridge.createPortableExport(id, nodeIds, actor)
-          : undefined;
         process.stdout.write(`${JSON.stringify({
           status: result.counts.failed > 0
             ? "failed"
@@ -149,9 +189,6 @@ export async function runVaultCli(
               ? "attention_required"
               : "completed",
           result,
-          ...(portable ? {
-            portable: { ...portable, archivePath: relative(policy.allowedRoot, portable.archivePath) },
-          } : {}),
         }, null, 2)}\n`);
         if (result.counts.failed > 0) return 1;
         return result.counts.conflicts > 0 || result.counts.vaultAhead > 0 || result.counts.quarantined > 0
@@ -178,6 +215,7 @@ export async function runVaultCli(
       return result.healthy ? 0 : 2;
     }
     throw new Error(`Unknown vault command: ${args.command}`);
+    });
   } finally {
     database.close();
   }

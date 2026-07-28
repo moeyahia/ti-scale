@@ -11,6 +11,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
+import { preloadRouteModule } from "./routeModules";
 
 export type RouteTransitionPhase = "idle" | "disassembling" | "committing" | "assembling";
 export type RouteTransitionMode = "native" | "fallback" | "bypass";
@@ -64,6 +65,7 @@ export interface MechanicalRouteTransitionRuntime {
 export interface MechanicalRouteTransitionRequest {
   readonly from: string;
   readonly to: string;
+  readonly prepare?: () => Promise<unknown>;
   readonly commit: (mode: RouteTransitionMode) => void | Promise<void>;
 }
 
@@ -167,6 +169,26 @@ function settleBeforeDeadline(promise: Promise<void>, milliseconds: number, sign
   });
 }
 
+function consumeViewTransitionRejections(transition: ViewTransitionHandle): ViewTransitionHandle {
+  // WebKit rejects both promises with AbortError when skipTransition() wins a
+  // rapid navigation race. Attach handlers immediately, before either promise
+  // can be skipped, while the controller still inspects their settled state.
+  void transition.updateCallbackDone.catch(() => undefined);
+  void transition.finished.catch(() => undefined);
+  return transition;
+}
+
+function safelySkipViewTransition(transition: ViewTransitionHandle | undefined): void {
+  if (!transition) return;
+  consumeViewTransitionRejections(transition);
+  try {
+    transition.skipTransition();
+  } catch {
+    // A transition can finish between the state check and this call. The
+    // route state machine remains authoritative and will settle to idle.
+  }
+}
+
 /**
  * One finite, latest-request-wins route mechanism. It deliberately owns no
  * React or history state, so its ordering and cancellation contract can be
@@ -184,7 +206,7 @@ export class MechanicalRouteTransitionController {
     if (this.phase === "idle" && !this.abortController && !this.activeViewTransition) return;
     this.revision += 1;
     this.abortController?.abort();
-    this.activeViewTransition?.skipTransition();
+    safelySkipViewTransition(this.activeViewTransition);
     this.abortController = undefined;
     this.activeViewTransition = undefined;
     this.present({ phase: "idle", revision: this.revision });
@@ -194,20 +216,32 @@ export class MechanicalRouteTransitionController {
     this.revision += 1;
     const revision = this.revision;
     this.abortController?.abort();
-    this.activeViewTransition?.skipTransition();
+    safelySkipViewTransition(this.activeViewTransition);
     this.activeViewTransition = undefined;
 
     const signalController = new AbortController();
     this.abortController = signalController;
     const signal = signalController.signal;
     let committed = false;
-    const startedAt = Date.now();
     const isCurrent = () => revision === this.revision && !signal.aborted;
     const commitOnce = async (mode: RouteTransitionMode) => {
       if (committed || !isCurrent()) return;
       committed = true;
       await request.commit(mode);
     };
+
+    if (request.prepare) {
+      try {
+        await request.prepare();
+      } catch {
+        // Route rendering owns the explicit chunk-load error state. Keeping the
+        // current screen intact until this point avoids disassembling into a
+        // Suspense placeholder when the destination is still in flight.
+      }
+      if (!isCurrent()) return "cancelled";
+    }
+
+    const startedAt = Date.now();
 
     if (this.runtime.shouldBypass()) {
       if (this.phase !== "idle") this.present({ phase: "idle", revision });
@@ -227,7 +261,9 @@ export class MechanicalRouteTransitionController {
         this.present({ phase: "committing", mode, from: request.from, to: request.to, revision });
         let transition: ViewTransitionHandle;
         try {
-          transition = this.runtime.startViewTransition(() => commitOnce("native"));
+          transition = consumeViewTransitionRejections(
+            this.runtime.startViewTransition(() => commitOnce("native")),
+          );
         } catch {
           mode = "fallback";
           return await this.completeFallback(request, revision, signal, commitOnce);
@@ -247,7 +283,7 @@ export class MechanicalRouteTransitionController {
           MECHANICAL_ROUTE_TIMING.maximumMs - (Date.now() - startedAt),
           signal,
         );
-        if (finishResult === "timeout" || finishResult === "rejected") transition.skipTransition();
+        if (finishResult === "timeout" || finishResult === "rejected") safelySkipViewTransition(transition);
         if (!isCurrent()) return "cancelled";
       } else {
         return await this.completeFallback(request, revision, signal, commitOnce);
@@ -336,9 +372,6 @@ function publishTransitionToDocument(documentValue: Document, presentation: Rout
 }
 
 function createBrowserTransitionRuntime(documentValue: Document): MechanicalRouteTransitionRuntime {
-  const transitionDocument = documentValue as Document & {
-    startViewTransition?: (update: () => void | Promise<void>) => ViewTransitionHandle;
-  };
   return {
     shouldBypass: () => {
       if (documentValue.visibilityState !== "visible") return true;
@@ -350,9 +383,11 @@ function createBrowserTransitionRuntime(documentValue: Document): MechanicalRout
     },
     sleep: abortableSleep,
     publish: (presentation) => publishTransitionToDocument(documentValue, presentation),
-    startViewTransition: typeof transitionDocument.startViewTransition === "function"
-      ? transitionDocument.startViewTransition.bind(transitionDocument)
-      : undefined,
+    // Native View Transition pseudo-layers obscure the live fixed plate
+    // mechanism and produced an uncovered 350–400 ms commit frame in WebKit.
+    // The finite real-DOM path is intentionally canonical until that browser
+    // contract can provide equivalent visual and cancellation guarantees.
+    startViewTransition: undefined,
   };
 }
 
@@ -400,7 +435,10 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
       const next = currentLocation();
       const previous = locationRef.current;
       const change = classifyLocationChange(previous, next);
-      if (change === "noop") return;
+      if (change === "noop") {
+        controller?.cancel();
+        return;
+      }
       if (change === "location-only") {
         controller?.cancel();
         locationRef.current = next;
@@ -415,6 +453,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
       void controller.transition({
         from: previous.pathname,
         to: next.pathname,
+        prepare: () => preloadRouteModule(next.pathname),
         commit: (mode) => commitLocation(next, undefined, mode, false),
       });
     };
@@ -450,6 +489,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     void controller.transition({
       from: previous.pathname,
       to: next.pathname,
+      prepare: () => preloadRouteModule(next.pathname),
       commit: (mode) => commitLocation(next, historyMethod, mode, true),
     });
   }, [commitLocation, controller]);

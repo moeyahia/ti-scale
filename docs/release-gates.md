@@ -58,8 +58,8 @@ The manifest's `knownGaps` list must be empty.
 - Context Packs are recorded at required lifecycle hooks
 - Scope-isolation and cross-engagement leakage tests pass
 - Forgetting removes content and derived retrieval state
-- Vault round trip, atomic writes, import, export, conflict handling, quarantine, repair, reindex, and portable export pass
-- Backup, restore, and reconciliation are rehearsed
+- Vault round trip, atomic writes, import, connected-Vault export, conflict handling, quarantine, repair, and reindex pass; portable archive endpoints and UI remain policy-disabled
+- No-backup enforcement, forward recovery, and reconciliation are rehearsed
 
 ## Gate 6: research safety
 
@@ -69,7 +69,7 @@ The manifest's `knownGaps` list must be empty.
 - Metrics are recomputed locally
 - Integrity receipts bind strategy, benchmark, evaluator, environment, events, evidence, and metrics
 - Promotion stages cannot be skipped
-- Rollback is proven
+- Strategy-version reversal is proven without copying application, database, or Vault payloads
 - No live mission self-modifies its active strategy
 
 ## Gate 7: performance and reliability
@@ -84,11 +84,12 @@ The manifest's `knownGaps` list must be empty.
 
 ## Gate 8: deployment approval
 
-- Deployment and rollback procedures are documented and rehearsed
-- Static, server, database, artifact, strategy, and vault rollback scopes are understood
+- Forward-only deployment and recovery procedures are documented and rehearsed
+- Static, server, database, artifact, strategy, and Vault forward-recovery boundaries are understood
 - Monitoring and on-call ownership are assigned
 - Known release-scope defect list is empty
-- Test evidence is archived
+- The complete test-evidence retention policy is explicitly approved and the
+  required evidence is durably reviewable
 - Explicit human approval is recorded
 
 Only after every gate passes may a build be described as production-ready.
@@ -102,4 +103,9 @@ bun run release:attest
 bun run db:verify --db /var/lib/ti-scale/data/ti-scale.sqlite
 ```
 
-Archive the command output together with browser reports, visual approvals, accessibility results, performance results, soak receipts, backup checksums, vault reconciliation, and the signed release decision.
+Record hashes for command output, browser reports, visual approvals,
+accessibility results, performance results, soak receipts, Vault
+reconciliation, and the signed release decision only through an explicitly
+approved evidence-retention mechanism. The current no-retained-copy policy
+prohibits a release archive or duplicate and therefore keeps the cutover gate
+closed.

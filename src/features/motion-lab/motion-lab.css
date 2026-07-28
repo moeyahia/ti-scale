@@ -1,0 +1,325 @@
+.motion-lab {
+  position: relative;
+  min-height: calc(100dvh - 64px);
+  overflow: clip;
+  isolation: isolate;
+  background: #f4f2ee;
+  color: var(--os-text);
+  outline: none;
+  touch-action: pan-x;
+}
+
+.motion-lab::before,
+.motion-lab::after {
+  content: "";
+  position: absolute;
+  z-index: 4;
+  pointer-events: none;
+  background: var(--os-line);
+}
+
+.motion-lab::before { inset: 0 auto 0 0; width: 1px; }
+.motion-lab::after { inset: auto 0 0; height: 1px; }
+
+.motion-lab:focus-visible { outline: 2px solid var(--os-focus); outline-offset: -4px; }
+
+.motion-lab__masthead {
+  position: absolute;
+  z-index: 6;
+  inset: clamp(1.2rem, 3vw, 2.7rem) clamp(1.2rem, 3vw, 3.2rem) auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 2rem;
+  pointer-events: none;
+}
+
+.motion-lab__eyebrow {
+  color: var(--os-text-muted);
+  font-family: var(--os-font-mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
+.motion-lab__masthead h1 {
+  max-width: 18ch;
+  margin-top: 0.5rem;
+  font-size: clamp(1.75rem, 3.4vw, 3.5rem);
+  line-height: 0.94;
+  letter-spacing: -0.055em;
+}
+
+.motion-lab__production-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding-top: 0.3rem;
+  color: var(--os-text-secondary);
+  font-family: var(--os-font-mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.motion-lab__masthead-actions {
+  display: grid;
+  justify-items: end;
+  gap: 0.75rem;
+  pointer-events: auto;
+}
+
+.motion-lab__masthead-actions .os-button {
+  min-height: 44px;
+  padding: 0.62rem 0.85rem;
+}
+
+.motion-lab__review-links { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.45rem; }
+
+.motion-lab__production-state span {
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--os-text);
+  background: var(--os-surface-1);
+  box-shadow: inset 0 0 0 2px var(--os-canvas);
+}
+
+.motion-lab[data-motion-status="generating"] .motion-lab__production-state span {
+  animation: motion-lab-production-pulse 1.6s var(--os-ease-mechanical) infinite;
+}
+
+.motion-lab__media {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: clamp(5.8rem, 10vh, 8rem) clamp(3rem, 8vw, 9rem) clamp(10.5rem, 23vh, 14rem);
+}
+
+.motion-lab__media img,
+.motion-lab__media video {
+  grid-area: 1 / 1;
+  display: block;
+  width: min(100%, 1500px);
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  object-position: center;
+  border: 0;
+  background: transparent;
+  filter: none;
+  animation: motion-lab-keyframe-arrive 500ms var(--os-ease-mechanical) both;
+}
+
+.motion-lab__video.is-idle {
+  visibility: hidden;
+  opacity: 0;
+  animation: none;
+  pointer-events: none;
+}
+
+.motion-lab__stage-copy {
+  position: absolute;
+  z-index: 6;
+  left: clamp(1.2rem, 3vw, 3.2rem);
+  bottom: clamp(7.8rem, 16vh, 10.5rem);
+  width: min(39rem, calc(100% - 8rem));
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1rem;
+  align-items: start;
+  pointer-events: none;
+}
+
+.motion-lab__stage-copy > p {
+  padding-top: 0.18rem;
+  color: var(--os-text-muted);
+  font-family: var(--os-font-mono);
+  font-size: 0.63rem;
+  letter-spacing: 0.12em;
+}
+
+.motion-lab__stage-copy h2 {
+  font-size: clamp(1.05rem, 1.8vw, 1.5rem);
+  letter-spacing: -0.025em;
+}
+
+.motion-lab__stage-copy div > p {
+  max-width: 54ch;
+  margin-top: 0.4rem;
+  color: var(--os-text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+
+.motion-lab__stages {
+  position: absolute;
+  z-index: 7;
+  top: 50%;
+  right: clamp(1.1rem, 2vw, 2rem);
+  display: grid;
+  gap: 0.35rem;
+  transform: translateY(-50%);
+}
+
+.motion-lab__stages button {
+  width: 48px;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 1fr 12px;
+  align-items: center;
+  gap: 0.35rem;
+  border: 0;
+  background: transparent;
+  color: var(--os-text-muted);
+  cursor: pointer;
+}
+
+.motion-lab__stages button span {
+  font-family: var(--os-font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+}
+
+.motion-lab__stages button i {
+  display: block;
+  width: 12px;
+  height: 1px;
+  background: var(--os-line-strong);
+  transform-origin: right center;
+  transition: transform 260ms var(--os-ease-mechanical), background 160ms var(--os-ease);
+}
+
+.motion-lab__stages button:hover,
+.motion-lab__stages button.is-active { color: var(--os-text); }
+.motion-lab__stages button.is-active i { background: var(--os-text); transform: scaleX(2.15); }
+
+.motion-lab__controls {
+  position: absolute;
+  z-index: 8;
+  inset: auto 0 0;
+  min-height: 104px;
+  display: grid;
+  grid-template-columns: auto minmax(210px, 1fr) minmax(190px, 0.5fr);
+  align-items: center;
+  gap: clamp(1rem, 2.4vw, 2.5rem);
+  padding: 1rem clamp(1.2rem, 3vw, 3.2rem);
+  border-top: 1px solid var(--os-line);
+  background: rgba(244, 242, 238, 0.96);
+}
+
+.motion-lab__transport { display: flex; align-items: center; gap: 0.45rem; }
+.motion-lab__transport .os-button { min-height: 44px; padding: 0.65rem 0.9rem; }
+.motion-lab__transport .os-button__mechanism { display: none; }
+
+.motion-lab__timeline {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(100px, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--os-text-secondary);
+  font-family: var(--os-font-mono);
+  font-size: 0.61rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.motion-lab__timeline input {
+  width: 100%;
+  height: 44px;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: ew-resize;
+}
+
+.motion-lab__timeline input::-webkit-slider-runnable-track { height: 1px; background: var(--os-line-strong); }
+.motion-lab__timeline input::-moz-range-track { height: 1px; background: var(--os-line-strong); }
+.motion-lab__timeline input::-webkit-slider-thumb {
+  width: 11px;
+  height: 20px;
+  margin-top: -10px;
+  appearance: none;
+  border: 1px solid var(--os-text);
+  border-radius: 0;
+  background: var(--os-surface-1);
+}
+.motion-lab__timeline input::-moz-range-thumb {
+  width: 11px;
+  height: 20px;
+  border: 1px solid var(--os-text);
+  border-radius: 0;
+  background: var(--os-surface-1);
+}
+.motion-lab__timeline input:disabled { cursor: not-allowed; opacity: 0.42; }
+.motion-lab__timeline output { white-space: nowrap; }
+
+.motion-lab__guidance,
+.motion-lab__media-error {
+  max-width: 36ch;
+  color: var(--os-text-muted);
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
+.motion-lab__media-error { color: var(--os-danger-text); }
+
+.motion-lab--pending {
+  display: grid;
+  place-items: center;
+  padding: clamp(2rem, 6vw, 6rem);
+}
+
+.motion-lab__pending {
+  width: min(620px, 100%);
+  padding: clamp(1.5rem, 4vw, 3rem) 0;
+  border-block: 1px solid var(--os-line);
+}
+
+.motion-lab__pending h1 { margin-top: 0.7rem; }
+.motion-lab__pending > p:last-child { max-width: 58ch; margin-top: 1.3rem; color: var(--os-text-secondary); }
+
+@keyframes motion-lab-keyframe-arrive {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes motion-lab-production-pulse {
+  0%, 100% { background: var(--os-surface-1); }
+  50% { background: var(--os-text); }
+}
+
+@media (max-width: 960px) {
+  .motion-lab__media { padding-inline: 1.5rem 4.5rem; padding-bottom: 14rem; }
+  .motion-lab__controls { grid-template-columns: 1fr; gap: 0.55rem; }
+  .motion-lab__guidance { max-width: none; }
+  .motion-lab__stage-copy { bottom: 13.5rem; }
+}
+
+@media (max-width: 620px) {
+  .motion-lab { min-height: calc(100svh - 64px); }
+  .motion-lab__masthead { display: block; }
+  .motion-lab__production-state { margin-top: 0.75rem; }
+  .motion-lab__media { padding: 8rem 0.75rem 17rem; }
+  .motion-lab__stage-copy { right: 4.2rem; bottom: 15.5rem; width: auto; }
+  .motion-lab__stages { right: 0.55rem; }
+  .motion-lab__controls { min-height: 148px; padding: 0.7rem 0.8rem; }
+  .motion-lab__transport { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .motion-lab__transport .os-button { min-width: 0; padding-inline: 0.45rem; font-size: 0.65rem; }
+  .motion-lab__timeline { grid-template-columns: auto 1fr; }
+  .motion-lab__timeline output { display: none; }
+  .motion-lab__guidance { max-width: none; font-size: 0.58rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-lab *,
+  .motion-lab *::before,
+  .motion-lab *::after {
+    scroll-behavior: auto !important;
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+}

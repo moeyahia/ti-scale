@@ -6,8 +6,15 @@ import {
   RunMutationAuthorityGuard,
 } from "../../control-plane";
 import { createDatabaseConnection, migrateDatabase } from "../../db";
+import type { RuntimeSourceManifests } from "../../domain";
 import { MemoryRepository, SecondBrainService } from "../../memory";
 import {
+  ModelConfigurationRepository,
+  ModelConfigurationService,
+  modelCatalogItems,
+} from "../../model-config";
+import {
+  AutonomousReadinessError,
   AutonomousBranchService,
   IdempotencyConflictError,
   MissionRepository,
@@ -21,6 +28,65 @@ import {
 const NOW = "2026-07-15T16:00:00.000Z";
 const assertMutationAuthority = () => {};
 
+function modelManifests(): RuntimeSourceManifests {
+  return {
+    riskClasses: [],
+    evidenceKinds: [],
+    capabilities: [],
+    tools: [],
+    mcpServers: [],
+    agents: [{
+      id: "ReconScout",
+      label: "ReconScout",
+      available: true,
+      capabilityIds: [],
+      actionClassIds: [],
+      toolIds: [],
+      modelRefs: [{
+        providerId: "provider-branch",
+        modelId: "model-branch",
+      }, {
+        providerId: "provider-branch",
+        modelId: "model-branch-planner",
+      }],
+    }],
+    providers: [{
+      id: "provider-branch",
+      authenticated: true,
+      healthy: true,
+      catalogObservedAt: NOW,
+      models: [{
+        id: "model-branch",
+        displayName: "Branch enforced model",
+        toolCalling: true,
+        structuredOutput: true,
+        enforcement: "enforced_executor",
+        compatibleActionClassIds: [],
+        disclosureClasses: ["public"],
+      }, {
+        id: "model-branch-planner",
+        displayName: "Branch advisory planning model",
+        toolCalling: false,
+        structuredOutput: true,
+        enforcement: "advisor_only",
+        compatibleActionClassIds: [],
+        disclosureClasses: ["sanitized_internal"],
+      }],
+    }],
+  };
+}
+
+const BRANCH_MODEL_CONFIGURATION_ID =
+  modelCatalogItems(modelManifests()).find(
+    ({ modelId, reasoningEffort }) =>
+      modelId === "model-branch" && reasoningEffort === null,
+  )!.configurationId;
+const BRANCH_PLANNING_CONFIGURATION_ID =
+  modelCatalogItems(modelManifests()).find(
+    ({ modelId, reasoningEffort }) =>
+      modelId === "model-branch-planner" && reasoningEffort === null,
+  )!.configurationId;
+
 const request: AutonomousMissionRequest = {
   journey: "autonomous",
   launch: true,
@@ -30,8 +96,10 @@ const request: AutonomousMissionRequest = {
   authorization: {
     engagementId: "eng-branch",
     allowedTargets: ["lab.internal"],
-    prohibitedTargets: [],
+    prohibitedTargets: ["blocked.internal"],
     authorizationConfirmed: true,
+    environmentClassification: "htb",
+    timeWindow: "2026-07-15T00:00:00Z/2026-07-16T00:00:00Z",
     dataHandling: "Keep evidence local",
   },
   contract: {
@@ -53,11 +121,32 @@ const request: AutonomousMissionRequest = {
     retentionPolicy: "operator_managed",
     providerPolicy: "automatic_enforcing_only",
     toolPolicy: "contract_allowlist",
-    specialistAgentIds: ["agent-branch-recon"],
+    specialistAgentIds: ["ReconScout"],
+    agentModelAssignments: [{
+      agentId: "ReconScout",
+      primaryConfigurationId: BRANCH_MODEL_CONFIGURATION_ID,
+      fallbackConfigurationId: null,
+    }],
     memoryScopes: ["verified_lessons"],
     contextNodeIds: [],
     safeStopConditions: ["The target leaves the exact signed scope"],
     deliverables: ["Evidence-backed Ti-Scale report"],
+  },
+};
+
+const providerPlanningRequest: AutonomousMissionRequest = {
+  ...request,
+  contract: {
+    ...request.contract,
+    planningSelection: {
+      route: "provider_advisory",
+      agentId: "ReconScout",
+      primaryConfigurationId: BRANCH_PLANNING_CONFIGURATION_ID,
+      fallbackConfigurationId: null,
+      enforcementMode: "advisor_only",
+      disclosureClass: "sanitized_internal",
+      executionAuthority: "none",
+    },
   },
 };
 
@@ -84,15 +173,16 @@ function setup() {
       id, role, display_name, status, provider_policy_json, tool_policy_json,
       configuration_json, version, last_heartbeat_at, created_at, updated_at
     ) VALUES (
-      'agent-branch-recon', 'reconnaissance', 'Branch Recon', 'available',
+      'ReconScout', 'reconnaissance', 'ReconScout', 'available',
       '{"defaultProvider":"xai-grok-oauth"}',
       '{"allowedTools":["nmap"],"deniedTools":[],"approvalRequiredTools":[]}',
-      '{}', '2.4', ?, ?, ?
+      '{"userFacing":true,"productAgent":true,"runtimeBindingAgentIds":["specialist:recon"]}',
+      '2.4', ?, ?, ?
     )
   `).run(NOW, NOW, NOW);
   database.prepare(`
     INSERT INTO agent_capabilities (agent_id, capability, source, enabled, metadata_json)
-    VALUES ('agent-branch-recon', 'nmap', 'live-route-attestation', 1, ?)
+    VALUES ('ReconScout', 'nmap', 'live-route-attestation', 1, ?)
   `).run(JSON.stringify({ attestedAt, validUntil, providerIds: ["xai-grok-oauth"] }));
   database.prepare(`
     INSERT INTO mcp_servers (
@@ -100,7 +190,7 @@ function setup() {
       policy_json, last_checked_at, created_at, updated_at
     ) VALUES (
       'mcp:branch-nmap', 'branch-nmap', 'stdio', 'local fixture', 'healthy', '["nmap"]',
-      '{"enabled":true,"assignedAgents":["agent-branch-recon"],"startPermitted":true,"riskClass":"low"}',
+      '{"enabled":true,"assignedAgents":["specialist:recon"],"startPermitted":true,"riskClass":"low"}',
       ?, ?, ?
     )
   `).run(NOW, NOW, NOW);
@@ -121,6 +211,13 @@ function setup() {
     reportsExactTokenUsage: true,
     reportsExactCostUsage: true,
   }), attestedAt);
+  const modelConfigurations = new ModelConfigurationService(
+    new ModelConfigurationRepository(database, () => new Date(NOW)),
+    {
+      readRuntimeManifests: modelManifests,
+      clock: () => new Date(NOW),
+    },
+  );
   const missions = new MissionService(
     new MissionRepository(database),
     new OverviewRepository(database),
@@ -129,9 +226,18 @@ function setup() {
       database,
       secondBrain: new SecondBrainService(new MemoryRepository(database)),
     }),
+    modelManifests,
+    undefined,
+    undefined,
+    modelConfigurations,
   );
-  const branches = new AutonomousBranchService(database, missions, () => new Date(NOW));
-  return { database, missions, branches };
+  const branches = new AutonomousBranchService(
+    database,
+    missions,
+    () => new Date(NOW),
+    modelConfigurations,
+  );
+  return { database, missions, branches, modelConfigurations };
 }
 
 describe("AutonomousBranchService", () => {
@@ -384,8 +490,21 @@ describe("AutonomousBranchService", () => {
       );
       expect(draft.contract).toMatchObject({ version: 2, state: "draft" });
       expect(draft.preflight.readiness.status).toBe("ready");
+      expect(draft.request.authorization).toEqual(request.authorization);
+      expect(draft.preflight.contract).toEqual({
+        version: draft.contract.version,
+        hash: draft.contract.hash,
+      });
       expect(database.prepare("SELECT state FROM mission_contracts WHERE id = ?").get(draft.contract.id!))
         .toEqual({ state: "draft" });
+      expect(JSON.parse((database.prepare(
+        "SELECT authorization_json FROM mission_contracts WHERE id = ?",
+      ).get(draft.contract.id!) as { authorization_json: string }).authorization_json))
+        .toEqual(request.authorization);
+      expect(JSON.parse((database.prepare(`
+        SELECT request_json FROM mission_contract_snapshots WHERE contract_id = ?
+      `).get(draft.contract.id!) as { request_json: string }).request_json).authorization)
+        .toEqual(request.authorization);
       expect(database.prepare("SELECT status FROM runs WHERE id = ?").get(initial.run.id))
         .toEqual({ status: "completed" });
 
@@ -415,14 +534,62 @@ describe("AutonomousBranchService", () => {
         .toEqual({ state: "superseded" });
       expect(database.prepare("SELECT state FROM mission_contracts WHERE id = ?").get(draft.contract.id!))
         .toEqual({ state: "confirmed" });
+      expect(database.prepare(`
+        SELECT contract_version_bound, contract_hash_bound
+        FROM runs WHERE id = ?
+      `).get(created.run.id)).toEqual({
+        contract_version_bound: 2,
+        contract_hash_bound: draft.contract.hash,
+      });
       expect(database.prepare("SELECT objective FROM missions WHERE id = ?").get(initial.mission.id))
         .toEqual({ objective: amendment.objective });
+      expect(database.prepare("SELECT engagement_id FROM missions WHERE id = ?").get(initial.mission.id))
+        .toEqual({ engagement_id: request.authorization.engagementId });
+      expect(JSON.parse((database.prepare(
+        "SELECT scope_json FROM missions WHERE id = ?",
+      ).get(initial.mission.id) as { scope_json: string }).scope_json)).toEqual({
+        allowedTargets: amendment.authorization.allowedTargets,
+        prohibitedTargets: amendment.authorization.prohibitedTargets,
+        environmentClassification: "htb",
+        timeWindow: request.authorization.timeWindow,
+        dataHandling: "Keep evidence local",
+      });
+      expect(JSON.parse((database.prepare(`
+        SELECT value_json FROM mission_constraints
+        WHERE mission_id = ? AND constraint_type = 'authorization'
+          AND source = 'operator'
+      `).get(initial.mission.id) as { value_json: string }).value_json))
+        .toEqual(request.authorization);
+      expect(branches.context(initial.mission.id, created.run.id).request.authorization)
+        .toEqual(request.authorization);
       expect(database.prepare("SELECT COUNT(*) AS count FROM run_branches WHERE run_id = ?").get(created.run.id))
         .toEqual({ count: 1 });
       expect(database.prepare(`
         SELECT COUNT(*) AS count FROM events
         WHERE run_id = ? AND event_type = 'run.autonomous_branch_created'
       `).get(created.run.id)).toEqual({ count: 1 });
+      expect(database.prepare(`
+        SELECT run_id, agent_id, primary_configuration_id,
+          fallback_configuration_id, pinned
+        FROM agent_model_assignments
+        WHERE run_id IN (?, ?)
+        ORDER BY run_id, agent_id
+      `).all(initial.run.id, created.run.id)).toEqual([
+        {
+          run_id: initial.run.id,
+          agent_id: "ReconScout",
+          primary_configuration_id: BRANCH_MODEL_CONFIGURATION_ID,
+          fallback_configuration_id: null,
+          pinned: 1,
+        },
+        {
+          run_id: created.run.id,
+          agent_id: "ReconScout",
+          primary_configuration_id: BRANCH_MODEL_CONFIGURATION_ID,
+          fallback_configuration_id: null,
+          pinned: 1,
+        },
+      ].sort((left, right) => left.run_id.localeCompare(right.run_id)));
 
       const replay = await branches.createBranch(
         initial.mission.id,
@@ -488,6 +655,202 @@ describe("AutonomousBranchService", () => {
       expect(result).toMatchObject({ safeToBranch: false, contract: { state: "unpersisted" } });
       expect(database.prepare("SELECT COUNT(*) AS count FROM mission_contracts").get()).toEqual({ count: 1 });
       expect(database.prepare("SELECT COUNT(*) AS count FROM runs").get()).toEqual({ count: 1 });
+    } finally {
+      database.close();
+    }
+  });
+
+  test("repins the unchanged signed assignment set into a separate run", async () => {
+    const { database, missions, branches } = setup();
+    try {
+      const review = await missions.preflightAutonomous(
+        providerPlanningRequest,
+      );
+      const initial = await missions.create(
+        { ...providerPlanningRequest, contractReview: review.contract },
+        "branch-unchanged-initial",
+        "operator-branch",
+      );
+      database.prepare(`
+        UPDATE runs SET status = 'completed', status_reason = 'Completed autonomously',
+          ended_at = ?, updated_at = ?, version = version + 1 WHERE id = ?
+      `).run(NOW, NOW, initial.run.id);
+      database.prepare(
+        "UPDATE missions SET status = 'completed', updated_at = ? WHERE id = ?",
+      ).run(NOW, initial.mission.id);
+      const context = branches.context(initial.mission.id, initial.run.id);
+      const branchReview = await branches.preflight(
+        initial.mission.id,
+        {
+          sourceRunId: initial.run.id,
+          sourceRunVersion: context.sourceRun.version,
+          mode: "unchanged_contract",
+          reason: "Repeat the same reviewed work under a fresh immutable run",
+        },
+        "branch-unchanged-preflight",
+        "operator-branch",
+        assertMutationAuthority,
+      );
+      expect(branchReview.preflight.readiness.status).toBe("ready");
+      expect(branchReview.request.contract.agentModelAssignments).toEqual(
+        providerPlanningRequest.contract.agentModelAssignments,
+      );
+      expect(branchReview.request.contract.planningSelection).toEqual(
+        providerPlanningRequest.contract.planningSelection,
+      );
+      const branch = await branches.createBranch(
+        initial.mission.id,
+        {
+          sourceRunId: initial.run.id,
+          sourceRunVersion: context.sourceRun.version,
+          mode: "unchanged_contract",
+          reason: "Repeat the same reviewed work under a fresh immutable run",
+          review: {
+            version: branchReview.contract.version,
+            hash: branchReview.contract.hash,
+          },
+        },
+        "branch-unchanged-create",
+        "operator-branch",
+        assertMutationAuthority,
+      );
+      expect(branch.contract).toEqual({
+        id: context.contract.id,
+        version: context.contract.version,
+        state: "confirmed",
+        hash: context.contract.hash,
+      });
+      expect(database.prepare(`
+        SELECT run_id, assignment_purpose, primary_configuration_id
+        FROM agent_model_assignments
+        WHERE agent_id = 'ReconScout' AND run_id IN (?, ?)
+        ORDER BY run_id, assignment_purpose
+      `).all(initial.run.id, branch.run.id)).toEqual([
+        {
+          run_id: initial.run.id,
+          assignment_purpose: "execution",
+          primary_configuration_id: BRANCH_MODEL_CONFIGURATION_ID,
+        },
+        {
+          run_id: initial.run.id,
+          assignment_purpose: "planning",
+          primary_configuration_id: BRANCH_PLANNING_CONFIGURATION_ID,
+        },
+        {
+          run_id: branch.run.id,
+          assignment_purpose: "execution",
+          primary_configuration_id: BRANCH_MODEL_CONFIGURATION_ID,
+        },
+        {
+          run_id: branch.run.id,
+          assignment_purpose: "planning",
+          primary_configuration_id: BRANCH_PLANNING_CONFIGURATION_ID,
+        },
+      ].sort((left, right) =>
+        left.run_id.localeCompare(right.run_id)
+        || left.assignment_purpose.localeCompare(right.assignment_purpose)));
+    } finally {
+      database.close();
+    }
+  });
+
+  test("keeps legacy unsigned contracts readable but blocks unchanged branching until an exact reviewed amendment is supplied", async () => {
+    const { database, missions, branches } = setup();
+    try {
+      const review = await missions.preflightAutonomous(request);
+      const initial = await missions.create(
+        { ...request, contractReview: review.contract },
+        "branch-legacy-unsigned-initial",
+        "operator-branch",
+      );
+      database.prepare(`
+        UPDATE runs SET status = 'completed', status_reason = 'Completed autonomously',
+          ended_at = ?, updated_at = ?, version = version + 1 WHERE id = ?
+      `).run(NOW, NOW, initial.run.id);
+      database.prepare(
+        "UPDATE missions SET status = 'completed', updated_at = ? WHERE id = ?",
+      ).run(NOW, initial.mission.id);
+      const stored = database.prepare(`
+        SELECT id, action_policy_json
+        FROM mission_contracts WHERE id = (
+          SELECT contract_id FROM runs WHERE id = ?
+        )
+      `).get(initial.run.id) as {
+        readonly id: string;
+        readonly action_policy_json: string;
+      };
+      const legacyPolicy = JSON.parse(stored.action_policy_json) as Record<
+        string,
+        unknown
+      >;
+      delete legacyPolicy.agentModelAssignments;
+      database.prepare(`
+        UPDATE mission_contracts SET action_policy_json = ? WHERE id = ?
+      `).run(JSON.stringify(legacyPolicy), stored.id);
+
+      const context = branches.context(initial.mission.id, initial.run.id);
+      expect(context.request.contract.agentModelAssignments).toEqual([]);
+      const unchanged = await branches.preflight(
+        initial.mission.id,
+        {
+          sourceRunId: initial.run.id,
+          sourceRunVersion: context.sourceRun.version,
+          mode: "unchanged_contract",
+          reason: "Test the read-only legacy contract compatibility boundary",
+        },
+        "branch-legacy-unsigned-preflight",
+        "operator-branch",
+        assertMutationAuthority,
+      );
+      expect(unchanged.preflight.readiness.status).toBe("blocked");
+      expect(unchanged.preflight.readiness.checks.find(
+        ({ id }) => id === "contract_agent_model_assignments",
+      )).toMatchObject({
+        status: "fail",
+        label: "Pinned specialist model configurations",
+      });
+      await expect(branches.createBranch(
+        initial.mission.id,
+        {
+          sourceRunId: initial.run.id,
+          sourceRunVersion: context.sourceRun.version,
+          mode: "unchanged_contract",
+          reason: "Test the read-only legacy contract compatibility boundary",
+          review: {
+            version: context.contract.version,
+            hash: context.contract.hash,
+          },
+        },
+        "branch-legacy-unsigned-create",
+        "operator-branch",
+        assertMutationAuthority,
+      )).rejects.toBeInstanceOf(AutonomousReadinessError);
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM runs WHERE mission_id = ?",
+      ).get(initial.mission.id)).toEqual({ count: 1 });
+
+      const amended = await branches.preflight(
+        initial.mission.id,
+        {
+          sourceRunId: initial.run.id,
+          sourceRunVersion: context.sourceRun.version,
+          mode: "contract_amendment",
+          reason: "Add exact model authority before creating another run",
+          request: {
+            ...request,
+            objective:
+              "Collect one bounded service inventory under an exact reviewed model assignment",
+          },
+        },
+        "branch-legacy-signed-amendment",
+        "operator-branch",
+        assertMutationAuthority,
+      );
+      expect(amended.contract.state).toBe("draft");
+      expect(amended.preflight.readiness.status).toBe("ready");
+      expect(amended.request.contract.agentModelAssignments).toEqual(
+        request.contract.agentModelAssignments,
+      );
     } finally {
       database.close();
     }

@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "ti-scale.bubblewrap-probe-sandbox.v1",
+  "descriptorVersion": "bubblewrap-0.11.2-2026.07.19",
+  "executablePath": "/usr/bin/bwrap",
+  "expectedSha256": "042763bc80c8a895a497e6f801af003d585ea5588a580f7a4349d9ab2aa22980",
+  "fileCapabilities": "none"
+}

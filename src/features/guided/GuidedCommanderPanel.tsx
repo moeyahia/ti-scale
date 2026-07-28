@@ -11,6 +11,7 @@ import { guidedCommanderApi } from "../../data/api/guidedCommander";
 import { runtimeV2Api } from "../../data/api/runtimeV2";
 import { useGuidedTranscript } from "../../data/queries/guidedCommander";
 import { useEventStream } from "../../data/events/EventStreamProvider";
+import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
 import type {
   GuidedCommanderMessage,
   GuidedCommanderReplyEnvelope,
@@ -18,6 +19,7 @@ import type {
   GuidedRememberInput,
   GuidedTextResultInput,
 } from "../../domain/types/guidedCommander";
+import type { GuidedRuntimeCapabilities } from "../../domain/guidedRuntimeCapabilities";
 import { Button, ErrorPanel, LoadingPanel, StatusPill } from "../../design-system/components/Primitives";
 import { ContextPackPanel } from "../brain/ContextPackPanel";
 import { formatTime } from "../runs/OperationalSurface";
@@ -57,10 +59,10 @@ function uniqueMessages(
   });
 }
 
-export function GuidedCommanderPanel({ missionId, runId, executionAvailable, availabilityPending = false, onAdvanced }: {
+export function GuidedCommanderPanel({ missionId, runId, capabilities, availabilityPending = false, onAdvanced }: {
   missionId: string;
   runId: string;
-  executionAvailable: boolean;
+  capabilities: GuidedRuntimeCapabilities;
   availabilityPending?: boolean;
   onAdvanced?: () => void;
 }) {
@@ -80,7 +82,6 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
   const [completionConfirmed, setCompletionConfirmed] = useState(false);
   const controllers = useRef(new Set<AbortController>());
   const retryKeys = useRef(new Map<string, string>());
-
   useEffect(() => () => {
     controllers.current.forEach((controller) => controller.abort());
     controllers.current.clear();
@@ -156,7 +157,10 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
   }
 
   async function performContextAction(action: ContextAction): Promise<void> {
-    if (!step) return;
+    if (
+      !step
+      || (!capabilities.localCommanderGuidance && !capabilities.providerGuidance)
+    ) return;
     const input = contextualInput(step);
     const response = await runMutation({
       kind: action,
@@ -177,7 +181,7 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
 
   async function interpretResult(event: FormEvent): Promise<void> {
     event.preventDefault();
-    if (!step || !resultText.trim()) return;
+    if (!step || !capabilities.manualResultReview || !resultText.trim()) return;
     const byteSize = utf8ByteSize(resultText);
     if (byteSize > GUIDED_TEXT_RESULT_LIMIT) {
       setFileError(`The selected result is ${byteSize.toLocaleString()} bytes. Submit at most ${GUIDED_TEXT_RESULT_LIMIT.toLocaleString()} bytes.`);
@@ -209,7 +213,13 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
   }
 
   async function completeFromReviewedObservation(): Promise<void> {
-    if (!step || !observation || !completionConfirmed) return;
+    if (
+      !step
+      || !observation
+      || !capabilities.manualResultCompletion
+      || observation.reviewKind !== "semantic_interpretation"
+      || !completionConfirmed
+    ) return;
     const response = await runMutation({
       kind: "complete_reviewed_step",
       signature: JSON.stringify({
@@ -230,7 +240,7 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
         key,
         signal,
       ),
-      success: "Reviewed evidence verified. The exact step advanced to its next durable checkpoint.",
+      success: "Semantically interpreted evidence was accepted for the exact step and advanced to its next durable checkpoint.",
     });
     if (!response) return;
     setCompletionConfirmed(false);
@@ -269,7 +279,7 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
   }
 
   async function rememberMessage(message: GuidedCommanderMessage, input: Omit<GuidedRememberInput, "runId" | "stepId" | "expectedFingerprint">): Promise<void> {
-    if (!step) return;
+    if (!step || !capabilities.memoryCandidateActions) return;
     const request: GuidedRememberInput = { ...contextualInput(step), ...input };
     const response = await runMutation({
       kind: "remember",
@@ -287,7 +297,7 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
   }
 
   async function suppressCandidate(messageId: string, candidateId: string, reason: string): Promise<void> {
-    if (!step) return;
+    if (!step || !capabilities.memoryCandidateActions) return;
     const request = { ...contextualInput(step), candidateId, reason };
     const response = await runMutation({
       kind: "do_not_remember",
@@ -309,7 +319,10 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
 
   const snapshot = transcript.data;
   const active = Boolean(step) && !["completed", "failed", "cancelled"].includes(snapshot.run.status);
-  const commanderReady = active && executionAvailable;
+  const commanderGuidanceReady = active
+    && (capabilities.localCommanderGuidance || capabilities.providerGuidance);
+  const manualReviewReady = active && capabilities.manualResultReview;
+  const memoryActionsReady = active && capabilities.memoryCandidateActions;
   const pending = Boolean(mutation.pending);
   return (
     <section className="os-guided-commander" aria-labelledby="guided-commander-title">
@@ -324,11 +337,24 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
 
       {transcript.error && <div className="os-guided-inline-warning" role="status">Refresh failed. The last validated transcript remains visible.</div>}
       {snapshot.nextCursor && <div className="os-guided-inline-warning" role="status">This view contains the first 200 durable messages. Additional pages remain available through the transcript API.</div>}
-      {!executionAvailable && <div className="os-guided-inline-warning" role="status">
-        <strong>{availabilityPending ? "Checking Guided execution readiness." : "Guided Commander actions are unavailable."}</strong>{" "}
-        {availabilityPending
-          ? "The represented step remains paused until the current process capability attestation is loaded."
-          : "No callable planning provider and exact-step execution boundary are attached to this Ti-Scale instance. Review remains read-only; connect a compatible Guided provider and execution adapter, then recheck System readiness."}
+      {availabilityPending && <div className="os-guided-inline-warning" role="status">
+        <strong>Checking Guided execution readiness.</strong>{" "}
+        The represented step remains paused until the current process capability attestation is loaded.
+      </div>}
+      {!availabilityPending && capabilities.mode === "unavailable" && <div className="os-guided-inline-warning" role="status">
+        <strong>Guided Commander actions are unavailable.</strong>{" "}
+        No exact-step execution boundary is attached to this Ti-Scale instance. Review remains read-only until System readiness verifies one.
+      </div>}
+      {!availabilityPending && capabilities.manualOnly && <div className="os-guided-inline-warning" role="status">
+        <strong>Manual Guided runtime is active.</strong>{" "}
+        You can retain output and inspect its local hash, size, and redaction attestation, then reject, skip, or stop the exact decision. This runtime does not semantically interpret or verify the text, so ingestion alone cannot complete the step. {capabilities.localCommanderGuidance ? "Local deterministic explanations are available without contacting a provider, tool, or target; they cannot authorize or advance the step. " : "Commander explanations are unavailable until their local capability is attested. "}Provider semantic interpretation and agent tool execution remain unavailable.{capabilities.memoryCandidateActions ? " Reviewable Second Brain candidates remain available through the local canonical memory boundary." : " Memory candidate actions remain unavailable because the canonical Second Brain is not ready."}
+      </div>}
+      {!availabilityPending && capabilities.mode === "ready" && !capabilities.providerGuidance && <div className="os-guided-inline-warning" role="status">
+        <strong>Reviewed local Guided execution is active.</strong>{" "}
+        {capabilities.toolDispatch
+          ? "The exact represented local tool step can run after your fingerprint-bound decision. "
+          : "No exact local tool dispatch receipt is current. "}
+        {capabilities.localCommanderGuidance ? "The local Commander can explain the current exact step and how to request another approach without contacting a provider, tool, or target. " : "Local Commander guidance is not currently attested. "}Manual output can be retained with local hashing and redaction, but it is not semantically interpreted and cannot complete the step. Provider-backed semantic interpretation remains unavailable.{capabilities.memoryCandidateActions ? " Reviewable Second Brain candidates remain available locally." : " Memory candidate actions remain unavailable because the canonical Second Brain is not ready."}
       </div>}
 
       <div className="os-guided-messages" role="log" aria-live="polite" aria-relevant="additions text">
@@ -354,10 +380,10 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
               {presentation.nextConsequentialActionRequiresDecision && <p className="os-guided-decision-note">The next consequential action still requires the exact Guided decision shown alongside this conversation.</p>}
               <footer>
                 {message.contextPackId && <Button type="button" variant="quiet" onClick={() => setContextPackId(contextPackId === message.contextPackId ? undefined : message.contextPackId ?? undefined)}>{contextPackId === message.contextPackId ? "Hide context used" : "Context used"}</Button>}
-                {message.role === "assistant" && belongsToCurrentStep && !candidate && <Button type="button" variant="quiet" disabled={!commanderReady || pending} onClick={() => setMemoryMessageId(memoryMessageId === message.id ? undefined : message.id)}>Remember this</Button>}
-                {message.role === "assistant" && belongsToCurrentStep && !candidate && <Button type="button" variant="quiet" disabled={!commanderReady || pending} onClick={() => setMutation({ message: "Nothing from this response is reusable memory unless you choose Remember this." })}>Do not remember this</Button>}
+                {message.role === "assistant" && belongsToCurrentStep && !candidate && <Button type="button" variant="quiet" disabled={!memoryActionsReady || pending} onClick={() => setMemoryMessageId(memoryMessageId === message.id ? undefined : message.id)}>Remember this</Button>}
+                {message.role === "assistant" && belongsToCurrentStep && !candidate && <Button type="button" variant="quiet" disabled={!memoryActionsReady || pending} onClick={() => setMutation({ message: "Nothing from this response is reusable memory unless you choose Remember this." })}>Do not remember this</Button>}
                 {candidate && <StatusPill status={candidate.status}>{candidate.status === "pending" ? "Memory candidate" : candidate.status}</StatusPill>}
-                {candidate?.status === "pending" && <Button type="button" variant="quiet" disabled={!commanderReady || pending} onClick={() => setMemoryMessageId(memoryMessageId === message.id ? undefined : message.id)}>Do not remember this</Button>}
+                {candidate?.status === "pending" && <Button type="button" variant="quiet" disabled={!memoryActionsReady || pending} onClick={() => setMemoryMessageId(memoryMessageId === message.id ? undefined : message.id)}>Do not remember this</Button>}
               </footer>
               {contextPackId === message.contextPackId && message.contextPackId && <ContextPackPanel packId={message.contextPackId} />}
               {memoryMessageId === message.id && belongsToCurrentStep && <MemoryCandidateControls
@@ -377,31 +403,31 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
         <p id="guided-action-boundary">These actions explain the current represented step. They never authorize or execute it.</p>
         <label>Optional context for the Commander<textarea maxLength={4000} value={note} onChange={(event) => setNote(event.target.value)} placeholder="Ask about a prerequisite, risk, output pattern, or alternative…" /></label>
         <div className="os-guided-context-actions">
-          <Button type="button" variant="secondary" disabled={!commanderReady || pending} onClick={() => performContextAction("explain_more")}>Explain more</Button>
-          <Button type="button" disabled={!commanderReady || pending} onClick={() => performContextAction("show_next_step")}>Show next step</Button>
-          <Button type="button" variant="secondary" disabled={!commanderReady || pending} onClick={() => performContextAction("use_another_approach")}>Use another approach</Button>
+          <Button type="button" variant="secondary" disabled={!commanderGuidanceReady || pending} onClick={() => performContextAction("explain_more")}>Explain more</Button>
+          <Button type="button" disabled={!commanderGuidanceReady || pending} onClick={() => performContextAction("show_next_step")}>Show next step</Button>
+          <Button type="button" variant="secondary" disabled={!commanderGuidanceReady || pending} onClick={() => performContextAction("use_another_approach")}>Use another approach</Button>
         </div>
       </div>
 
       <form className="os-guided-result-form" onSubmit={interpretResult}>
-        <div><p className="os-eyebrow">Planning-only interpretation</p><h3>Interpret observed output — keep this step paused</h3><p>The server hashes, redacts, and retains bounded text as unverified evidence for interpretation. <strong>This does not attest that the represented action succeeded, mark the step complete, or advance the run.</strong> Only the separately labeled exact-step completion control can do that after your review.</p><StatusPill status="planning_only">Interpretation only · no advancement</StatusPill></div>
-        <fieldset className="os-guided-result-source" disabled={!commanderReady || pending}>
+        <div><p className="os-eyebrow">{capabilities.manualResultHandling === "semantic_interpretation" ? "Planning-only interpretation" : "Local ingestion attestation"}</p><h3>{capabilities.manualResultHandling === "semantic_interpretation" ? "Interpret observed output — keep this step paused" : "Retain observed output — keep this step paused"}</h3><p>{capabilities.manualResultHandling === "semantic_interpretation" ? "The server hashes, redacts, and retains bounded text as unverified evidence for interpretation." : "The server hashes, redacts, and retains bounded text as an unverified observation. It attests only ingestion metadata and does not interpret meaning."} <strong>This does not attest that the represented action succeeded, mark the step complete, or advance the run.</strong>{capabilities.manualResultHandling === "semantic_interpretation" && " Only semantically interpreted evidence can reach the separately labeled exact-step completion control."}</p><StatusPill status="planning_only">{capabilities.manualResultHandling === "semantic_interpretation" ? "Interpretation only · no advancement" : "Ingestion only · no advancement"}</StatusPill></div>
+        <fieldset className="os-guided-result-source" disabled={!manualReviewReady || pending}>
           <legend>Result source</legend>
           <label><input type="radio" name="guided-result-source" checked={resultSource === "paste"} onChange={() => { setResultSource("paste"); setResultFileName(undefined); }} /> Paste text</label>
           <label><input type="radio" name="guided-result-source" checked={resultSource === "text_upload"} onChange={() => setResultSource("text_upload")} /> Text upload</label>
         </fieldset>
-        {resultSource === "text_upload" && <label className="os-guided-file-input">Choose text result<input disabled={!commanderReady || pending} type="file" accept=".txt,.log,.json,.csv,.xml,text/plain,application/json,text/csv,application/xml,text/xml" onChange={selectTextFile} />{resultFileName && <span>Loaded {resultFileName} · {utf8ByteSize(resultText).toLocaleString()} bytes</span>}</label>}
-        <label>Result text<textarea disabled={!commanderReady || pending} required maxLength={GUIDED_TEXT_RESULT_LIMIT} value={resultText} onChange={(event) => { setResultText(event.target.value); setFileError(undefined); }} placeholder="Paste only the relevant authorized output. Authentication material will be redacted." /></label>
+        {resultSource === "text_upload" && <label className="os-guided-file-input">Choose text result<input disabled={!manualReviewReady || pending} type="file" accept=".txt,.log,.json,.csv,.xml,text/plain,application/json,text/csv,application/xml,text/xml" onChange={selectTextFile} />{resultFileName && <span>Loaded {resultFileName} · {utf8ByteSize(resultText).toLocaleString()} bytes</span>}</label>}
+        <label>Result text<textarea disabled={!manualReviewReady || pending} required maxLength={GUIDED_TEXT_RESULT_LIMIT} value={resultText} onChange={(event) => { setResultText(event.target.value); setFileError(undefined); }} placeholder="Paste only the relevant authorized output. Authentication material will be redacted." /></label>
         <div className="os-guided-result-meta"><span>{utf8ByteSize(resultText).toLocaleString()} / {GUIDED_TEXT_RESULT_LIMIT.toLocaleString()} bytes</span><span>{resultMediaType}</span></div>
         {fileError && <p className="os-guided-field-error" role="alert">{fileError}</p>}
-        <Button disabled={!commanderReady || pending || !resultText.trim()}>Interpret only — keep step paused</Button>
+        <Button disabled={!manualReviewReady || pending || !resultText.trim()}>{capabilities.manualResultHandling === "semantic_interpretation" ? "Interpret only — keep step paused" : "Retain and attest ingestion — keep step paused"}</Button>
       </form>
 
       {observation && step && <section className="os-guided-result-form" aria-labelledby="guided-reviewed-result-title">
         <div>
-          <p className="os-eyebrow">Durable reviewed observation</p>
-          <h3 id="guided-reviewed-result-title">Interpretation ready for your decision</h3>
-          <p>{observation.interpretationSummary}</p>
+          <p className="os-eyebrow">{observation.reviewKind === "ingestion_attestation" ? "Durable ingested observation" : "Durable reviewed observation"}</p>
+          <h3 id="guided-reviewed-result-title">{observation.reviewKind === "ingestion_attestation" ? "Ingestion metadata ready for inspection" : "Interpretation ready for your decision"}</h3>
+          <p>{observation.reviewSummary}</p>
         </div>
         <dl className="os-key-values">
           <div><dt>Evidence</dt><dd><AppLink href={`/intelligence/evidence/${encodeURIComponent(observation.evidenceId)}`}>{observation.evidenceId}</AppLink></dd></div>
@@ -409,21 +435,23 @@ export function GuidedCommanderPanel({ missionId, runId, executionAvailable, ava
           <div><dt>Size</dt><dd>{observation.byteSize.toLocaleString()} bytes</dd></div>
           <div><dt>Hash</dt><dd className="os-mono">{observation.contentHash.slice(0, 16)}…</dd></div>
         </dl>
-        <p>The evidence and interpretation are stored against this exact decision independently of the transcript. Advancing verifies this same evidence identity; it cannot substitute changed parameters or a different result.</p>
-        <label className="os-checkbox-row">
-          <input
-            type="checkbox"
-            checked={completionConfirmed}
-            disabled={!executionAvailable || availabilityPending}
-            onChange={(event) => setCompletionConfirmed(event.target.checked)}
-          />
-          <span>I performed the exact represented action and reviewed this interpretation.</span>
-        </label>
-        <Button
-          type="button"
-          disabled={!commanderReady || pending || !completionConfirmed || observation.verificationState !== "unverified"}
-          onClick={completeFromReviewedObservation}
-        >Accept interpreted evidence and advance exact step</Button>
+        {observation.reviewKind === "semantic_interpretation" ? <>
+          <p>The evidence and semantic interpretation are stored against this exact decision independently of the transcript. Advancing accepts this same evidence identity; it cannot substitute changed parameters or a different result.</p>
+          <label className="os-checkbox-row">
+            <input
+              type="checkbox"
+              checked={completionConfirmed}
+              disabled={!capabilities.manualResultCompletion || availabilityPending}
+              onChange={(event) => setCompletionConfirmed(event.target.checked)}
+            />
+            <span>I performed the exact represented action and reviewed this semantic interpretation.</span>
+          </label>
+          <Button
+            type="button"
+            disabled={!capabilities.manualResultCompletion || pending || !completionConfirmed || observation.verificationState !== "unverified"}
+            onClick={completeFromReviewedObservation}
+          >Accept interpreted evidence and advance exact step</Button>
+        </> : <p role="status"><strong>This text is not interpreted or verified.</strong> It cannot complete the step. Configure semantic interpretation, or use the visible reject, skip, plan-amendment, or stop controls.</p>}
       </section>}
 
       {mutation.error && <ErrorPanel title="The Guided action did not complete" error={mutation.error} />}
@@ -462,9 +490,9 @@ function MemoryCandidateControls({ message, engagementAvailable, candidate, pend
     }}>
       <p>This creates a candidate only. It cannot influence a future mission until the operator confirms it in the Memory Inbox.</p>
       <div className="os-field-grid">
-        <label>Memory type<select value={nodeType} onChange={(event) => setNodeType(event.target.value as GuidedRememberInput["nodeType"])}><option value="preference">Preference</option><option value="procedure">Procedure</option><option value="tool">Tool</option><option value="tactic">Tactic</option><option value="technique">Technique</option><option value="source">Source note</option></select></label>
-        <label>Scope<select value={scope} onChange={(event) => setScope(event.target.value as GuidedRememberInput["scope"])}><option value="mission">This mission</option><option value="engagement" disabled={!engagementAvailable}>This engagement</option><option value="global" disabled={nodeType !== "preference"}>Global (confirmed preferences only)</option></select></label>
-        <label>Sensitivity<select value={sensitivity} onChange={(event) => setSensitivity(event.target.value as GuidedRememberInput["sensitivity"])}><option value="internal">Internal</option><option value="private">Private</option><option value="restricted">Restricted</option></select></label>
+        <label>Memory type<TitaniumSelect value={nodeType} onChange={(event) => setNodeType(event.target.value as GuidedRememberInput["nodeType"])}><option value="preference">Preference</option><option value="procedure">Procedure</option><option value="tool">Tool</option><option value="tactic">Tactic</option><option value="technique">Technique</option><option value="source">Source note</option></TitaniumSelect></label>
+        <label>Scope<TitaniumSelect value={scope} onChange={(event) => setScope(event.target.value as GuidedRememberInput["scope"])}><option value="mission">This mission</option><option value="engagement" disabled={!engagementAvailable}>This engagement</option><option value="global" disabled={nodeType !== "preference"}>Global (confirmed preferences only)</option></TitaniumSelect></label>
+        <label>Sensitivity<TitaniumSelect value={sensitivity} onChange={(event) => setSensitivity(event.target.value as GuidedRememberInput["sensitivity"])}><option value="internal">Internal</option><option value="private">Private</option><option value="restricted">Restricted</option></TitaniumSelect></label>
       </div>
       <label>Candidate title<input required maxLength={500} value={title} onChange={(event) => setTitle(event.target.value)} /></label>
       <label>Candidate summary<textarea required maxLength={4000} value={summary} onChange={(event) => setSummary(event.target.value)} /></label>

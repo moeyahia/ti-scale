@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createDatabaseConnection, migrateDatabase } from "../../db";
+import {
+  createDatabaseConnection,
+  inImmediateTransaction,
+  migrateDatabase,
+} from "../../db";
 import { EventRepository } from "../EventRepository";
 
 const temporaryDirectories: string[] = [];
@@ -170,6 +174,73 @@ describe("EventRepository", () => {
     } finally {
       secondDatabase.close();
       firstDatabase.close();
+    }
+  });
+
+  test("repairs a stale allocator after a production-shaped atomic result event", () => {
+    const path = join(temporaryDirectory(), "result-events.sqlite");
+    const runtimeDatabase = createDatabaseConnection({ filename: path });
+    migrateDatabase(runtimeDatabase);
+    seedRun(runtimeDatabase);
+    const resultDatabase = createDatabaseConnection({
+      filename: path,
+      fileMustExist: true,
+    });
+    try {
+      const repository = new EventRepository(runtimeDatabase);
+      expect(repository.append({
+        id: "event-action-authorized",
+        runId: "run-1",
+        eventType: "action.authorized",
+        actorType: "worker",
+        summary: "The reviewed action was authorized",
+      }).sequence).toBe(1);
+
+      // Production result verifiers historically committed immutable evidence
+      // and its semantic event atomically using MAX(sequence) + 1. That event
+      // is valid, but it does not advance the repository's allocation row.
+      inImmediateTransaction(resultDatabase, () => {
+        const next = resultDatabase.prepare(`
+          SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
+          FROM events WHERE run_id = ?
+        `).get("run-1") as { readonly sequence: number };
+        resultDatabase.prepare(`
+          INSERT INTO events (
+            id, mission_id, run_id, sequence, event_type, occurred_at,
+            actor_type, actor_id, summary, payload_json, schema_version,
+            journey, sensitivity, redaction_json, created_at
+          ) VALUES (
+            'event-cve-result', 'mission-1', 'run-1', ?,
+            'autonomous_cve_applicability_completed', ?,
+            'agent', 'vuln-intel', 'CVE applicability evidence committed',
+            '{}', 1, 'autonomous', 'private', '{}', ?
+          )
+        `).run(next.sequence, "2026-07-23T05:17:50.526Z", "2026-07-23T05:17:50.526Z");
+      });
+
+      expect(
+        (runtimeDatabase.prepare(`
+          SELECT last_sequence FROM run_event_sequences WHERE run_id = ?
+        `).get("run-1") as { readonly last_sequence: number }).last_sequence,
+      ).toBe(1);
+
+      const accepted = repository.append({
+        id: "event-action-completed",
+        runId: "run-1",
+        eventType: "action.completed",
+        actorType: "worker",
+        summary: "The durable result was accepted",
+      });
+      expect(accepted.sequence).toBe(3);
+      expect(repository.listAfter("run-1").map(({ sequence }) => sequence)).toEqual([1, 2, 3]);
+      expect(
+        (runtimeDatabase.prepare(`
+          SELECT last_sequence FROM run_event_sequences WHERE run_id = ?
+        `).get("run-1") as { readonly last_sequence: number }).last_sequence,
+      ).toBe(3);
+    } finally {
+      resultDatabase.close();
+      runtimeDatabase.close();
     }
   });
 

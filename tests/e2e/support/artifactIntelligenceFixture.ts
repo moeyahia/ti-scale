@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
 import { createDatabaseConnection, inImmediateTransaction } from "../../../server/db";
-import { resolveV2ScriptSourceRoot } from "../../../server/app";
+// Import the path-only module directly. The broad server/app barrel also
+// exports Bun-native execution adapters, which must not be loaded into the
+// Node-based Playwright fixture process.
+import { resolveV2ScriptSourceRoot } from "../../../server/app/V2ArtifactPaths";
 import { PageCaptureService } from "../../../server/page-captures";
 import { FileScriptSourceStore, ScriptArtifactService } from "../../../server/script-artifacts";
-import { E2E_DATABASE_PATH } from "./environment";
+import {
+  E2E_DATABASE_PATH,
+  E2E_SCRIPT_SOURCE_ROOT,
+} from "./environment";
 import { normalizeFixtureNamespace } from "./fixtureNamespace";
 
 const NOW = "2026-07-16T19:00:00.000Z";
@@ -185,7 +191,10 @@ export function createArtifactIntelligenceFixture(instanceId: string): ArtifactI
       database.prepare("INSERT INTO finding_evidence (finding_id, evidence_id, relationship, added_at) VALUES (?, ?, 'supports', ?)").run(findingId, evidenceId, NOW);
     });
 
-    const sourceStore = new FileScriptSourceStore(resolveV2ScriptSourceRoot(E2E_DATABASE_PATH));
+    const sourceStore = new FileScriptSourceStore(resolveV2ScriptSourceRoot(
+      E2E_DATABASE_PATH,
+      E2E_SCRIPT_SOURCE_ROOT,
+    ));
     const scripts = new ScriptArtifactService(database, sourceStore, () => new Date(NOW));
     const documentation = {
       language: "python" as const,

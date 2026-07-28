@@ -117,4 +117,55 @@ describe("RuntimeContinuationRepository", () => {
       database.close();
     }
   });
+
+  test("reconciles only the owning journey when Guided and Autonomous runtimes share a database", () => {
+    const { database, now } = fixture();
+    try {
+      database.prepare(`
+        INSERT INTO missions (
+          id, name, objective, journey, status, authorization_status,
+          success_criteria_json, memory_policy_json, created_by, created_at, updated_at
+        ) VALUES ('mission-autonomous', 'Autonomous terminal mission', 'Preserve terminal memory',
+          'autonomous', 'completed', 'verified', '[]', '{}', 'operator', ?, ?)
+      `).run(now, now);
+      database.prepare(`
+        INSERT INTO runs (
+          id, mission_id, journey, status, budget_json, budget_usage_json,
+          status_reason, created_at, updated_at, ended_at, version
+        ) VALUES ('run-autonomous', 'mission-autonomous', 'autonomous', 'completed',
+          '{}', '{}', 'Completed safely', ?, ?, ?, 1)
+      `).run(now, now, now);
+      for (const [evaluationId, missionId, runId, journey] of [
+        ["evaluation-guided", "mission-continuation", "run-continuation", "guided"],
+        ["evaluation-autonomous", "mission-autonomous", "run-autonomous", "autonomous"],
+      ] as const) {
+        database.prepare(`
+          INSERT INTO run_evaluations (
+            id, mission_id, run_id, journey, scores_json, metrics_json,
+            retrospective, evidence_coverage, created_by, created_at
+          ) VALUES (?, ?, ?, ?, '{}', '{}', 'Terminal evaluation', 1, 'test', ?)
+        `).run(evaluationId, missionId, runId, journey, now);
+      }
+      const touched: string[] = [];
+      const guided = new RuntimeContinuationRepository(database, (runId) => {
+        touched.push(runId);
+        if (runId === "run-autonomous") throw new Error("cross-journey mutation");
+      });
+
+      expect(guided.reconcileFromCanonicalState(now, "ti_scale", ["guided"])).toBe(1);
+      expect(touched).toEqual(["run-continuation"]);
+      expect(guided.listForRun("run-continuation")).toEqual([
+        expect.objectContaining({ kind: "memory_projection_pending", sourceId: "evaluation-guided" }),
+      ]);
+      expect(guided.listForRun("run-autonomous")).toEqual([]);
+
+      const autonomous = new RuntimeContinuationRepository(database);
+      expect(autonomous.reconcileFromCanonicalState(now, "ti_scale", ["autonomous"])).toBe(1);
+      expect(autonomous.listForRun("run-autonomous")).toEqual([
+        expect.objectContaining({ kind: "memory_projection_pending", sourceId: "evaluation-autonomous" }),
+      ]);
+    } finally {
+      database.close();
+    }
+  });
 });
