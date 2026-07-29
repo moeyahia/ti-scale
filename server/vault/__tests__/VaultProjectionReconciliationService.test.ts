@@ -138,7 +138,7 @@ function receiptFiles(vaultPath: string): string[] {
 }
 
 describe("VaultProjectionReconciliationService", () => {
-  test("includes only the exact current runtime-capability projection bypass", () => {
+  test("includes and completely reconciles only the exact current runtime-capability projection bypass", async () => {
     const fixture = setup();
     try {
       const runtimeAgent = fixture.memory.createNode({
@@ -217,6 +217,25 @@ describe("VaultProjectionReconciliationService", () => {
       });
       expect(fixture.bridge.previewExportableNodeIds(fixture.connection.id)).toContain(runtimeAgent.id);
       expect(fixture.bridge.previewExportableNodeIds(fixture.connection.id)).not.toContain(id("arbitrary-agent"));
+      const receipt = await fixture.service.execute({
+        connectionId: fixture.connection.id,
+        expectedPlanHash: preview.planHash,
+        approvedBy: "operator:test",
+      });
+      expect(receipt).toMatchObject({
+        status: "completed",
+        reconciliation: {
+          status: "complete",
+          eligibleNodeCount: 3,
+          syncedNodeCount: 3,
+          managedMarkdownCount: 3,
+          verifiedFileCount: 3,
+          parsedNoteCount: 3,
+          issueCount: 0,
+        },
+      });
+      expect(receipt.reconciliation.managedMarkdownCount)
+        .toBe(receipt.reconciliation.eligibleNodeCount);
     } finally {
       fixture.database.close();
     }

@@ -214,7 +214,10 @@ export class VaultProjectionReconciliationService {
       if (issues.length < MAX_ISSUES) issues.push(issue);
     };
     const plannedNodeIds = new Set(plan.entries.map((entry) => entry.nodeId));
-    const managedPaths = new Set(this.#managedMarkdown(connection));
+    const managedPaths = new Set(this.#managedMarkdown(
+      connection,
+      plan.entries.map((entry) => entry.relativePath),
+    ));
     const seenStateNodeIds = new Set<string>();
     const seenStatePaths = new Set<string>();
     for (const state of states) {
@@ -704,7 +707,10 @@ export class VaultProjectionReconciliationService {
       }
     }
 
-    const managed = this.#managedMarkdown(connection);
+    const managed = this.#managedMarkdown(
+      connection,
+      plan.entries.map((entry) => entry.relativePath),
+    );
     const trackedPaths = new Set(states.map((state) => state.relative_path));
     const untracked = managed.filter((path) => !trackedPaths.has(path));
     for (const relativePath of untracked) {
@@ -838,12 +844,16 @@ export class VaultProjectionReconciliationService {
     };
   }
 
-  #managedMarkdown(connection: VaultConnection): readonly string[] {
+  #managedMarkdown(
+    connection: VaultConnection,
+    selectedProjectionPaths: readonly string[] = [],
+  ): readonly string[] {
     const folders = [
       ...OBSIDIAN_V2_4_VAULT_FOLDERS,
       ...(vaultScopeIncludesOperatorProfile(connection.syncScope) ? [OPERATOR_PROFILE_VAULT_FOLDER] : []),
     ];
     const results: string[] = [];
+    const resultPaths = new Set<string>();
     const seen = new Set<string>();
     const visit = (relativeDirectory: string): void => {
       const directory = this.paths.resolveRelative(connection.vaultPath, relativeDirectory);
@@ -858,6 +868,7 @@ export class VaultProjectionReconciliationService {
         if (entry.isDirectory()) visit(relativePath);
         else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
           results.push(relativePath);
+          resultPaths.add(relativePath);
           if (results.length > MAX_MANAGED_NOTES) {
             throw new Error(`Vault reconciliation is limited to ${MAX_MANAGED_NOTES} managed Markdown notes`);
           }
@@ -868,6 +879,25 @@ export class VaultProjectionReconciliationService {
       if (seen.has(folder)) continue;
       seen.add(folder);
       visit(folder);
+    }
+    // Exact current runtime capability notes live in the operational Agent and
+    // Tool folders, which are intentionally not broad managed directories for
+    // an attack-knowledge Vault. Count only paths already admitted by the
+    // canonical projection plan; do not scan or adopt arbitrary Markdown from
+    // either operational folder.
+    for (const relativePath of selectedProjectionPaths) {
+      if (resultPaths.has(relativePath)) continue;
+      const path = this.paths.resolveRelative(connection.vaultPath, relativePath);
+      if (!existsSync(path)) continue;
+      const metadata = lstatSync(path);
+      if (metadata.isSymbolicLink() || !metadata.isFile()) {
+        throw new Error("Selected Vault projection is not a real file");
+      }
+      results.push(relativePath);
+      resultPaths.add(relativePath);
+      if (results.length > MAX_MANAGED_NOTES) {
+        throw new Error(`Vault reconciliation is limited to ${MAX_MANAGED_NOTES} managed Markdown notes`);
+      }
     }
     return results.sort((left, right) => left.localeCompare(right, "en"));
   }
