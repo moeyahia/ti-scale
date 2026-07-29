@@ -12,8 +12,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertNoBackupForwardReceiptSchemaBoundary,
   assertNoBackupPayloadInventoryEmpty,
   assertNoBackupPayloadInventoryUnchanged,
+  attestedNoBackupForwardSchemas,
   captureNoBackupPayloadInventory,
   discardFailedPreSchemaCandidateArtifacts,
   executeNoBackupPreviewPhaseSequence,
@@ -29,13 +31,18 @@ import {
   noBackupTargetStartMode,
   noBackupStopSnapshotFromServiceProperties,
   noBackupRecoveryDirection,
+  noBackupForwardDeploymentSchemaBoundary,
   noBackupPreviewUsage,
+  NO_BACKUP_SOURCE_SCHEMA,
   NO_BACKUP_TARGET_SCHEMA,
   parseNoBackupPreviewArguments,
   resolveNoBackupReleaseObserverProof,
   type NoBackupPreviewReceipt,
   verifyNoBackupTargetApplicationForCommit,
 } from "../../../scripts/release/NoBackupPreviewRelease";
+import {
+  attestReleaseMigrationCeiling,
+} from "../../../scripts/release/ReleaseMigrationAttestation";
 import {
   canonicalApplicationTreeFingerprint,
   stageServerRelease,
@@ -871,6 +878,69 @@ describe("metadata-journaled no-backup preview release", () => {
       .toThrow("cannot classify observed schema");
     expect(() => noBackupRecoveryDirection(60, 60, 61, [], true))
       .toThrow("cannot classify observed schema");
+  });
+
+  test("selects baseline migration and exact-ceiling source-only update boundaries", () => {
+    expect(noBackupForwardDeploymentSchemaBoundary(
+      NO_BACKUP_SOURCE_SCHEMA,
+      NO_BACKUP_TARGET_SCHEMA,
+    )).toEqual({
+      sourceSchema: NO_BACKUP_SOURCE_SCHEMA,
+      targetSchema: NO_BACKUP_TARGET_SCHEMA,
+    });
+    expect(noBackupForwardDeploymentSchemaBoundary(
+      NO_BACKUP_TARGET_SCHEMA,
+      NO_BACKUP_TARGET_SCHEMA,
+    )).toEqual({
+      sourceSchema: NO_BACKUP_TARGET_SCHEMA,
+      targetSchema: NO_BACKUP_TARGET_SCHEMA,
+    });
+    expect(() => noBackupForwardDeploymentSchemaBoundary(
+      NO_BACKUP_SOURCE_SCHEMA + 1,
+      NO_BACKUP_TARGET_SCHEMA,
+    )).toThrow("requires the canonical database");
+    expect(() => noBackupForwardDeploymentSchemaBoundary(
+      NO_BACKUP_TARGET_SCHEMA + 1,
+      NO_BACKUP_TARGET_SCHEMA,
+    )).toThrow("exact candidate ceiling");
+  });
+
+  test("keeps historical 60-to-ceiling receipts and current same-schema receipts recoverable", () => {
+    const attestation = attestReleaseMigrationCeiling(process.cwd());
+    expect(() => assertNoBackupForwardReceiptSchemaBoundary(
+      NO_BACKUP_SOURCE_SCHEMA,
+      NO_BACKUP_TARGET_SCHEMA,
+      attestation,
+    )).not.toThrow();
+    expect(attestedNoBackupForwardSchemas(
+      attestation,
+      NO_BACKUP_SOURCE_SCHEMA,
+      NO_BACKUP_TARGET_SCHEMA,
+    )).toEqual(Array.from(
+      { length: NO_BACKUP_TARGET_SCHEMA - NO_BACKUP_SOURCE_SCHEMA },
+      (_, index) => NO_BACKUP_SOURCE_SCHEMA + index + 1,
+    ));
+
+    expect(() => assertNoBackupForwardReceiptSchemaBoundary(
+      NO_BACKUP_TARGET_SCHEMA,
+      NO_BACKUP_TARGET_SCHEMA,
+      attestation,
+    )).not.toThrow();
+    expect(attestedNoBackupForwardSchemas(
+      attestation,
+      NO_BACKUP_TARGET_SCHEMA,
+      NO_BACKUP_TARGET_SCHEMA,
+    )).toEqual([]);
+    expect(() => assertNoBackupForwardReceiptSchemaBoundary(
+      NO_BACKUP_SOURCE_SCHEMA - 1,
+      NO_BACKUP_TARGET_SCHEMA,
+      attestation,
+    )).toThrow("invalid database boundary");
+    expect(() => assertNoBackupForwardReceiptSchemaBoundary(
+      NO_BACKUP_SOURCE_SCHEMA + 1,
+      NO_BACKUP_TARGET_SCHEMA,
+      attestation,
+    )).toThrow("invalid database boundary");
   });
 
   test("cleanly deploys a same-schema target in deterministic phase order", async () => {

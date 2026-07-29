@@ -185,7 +185,6 @@ function canonicalNoBackupTargetSchema(): number {
  * boundary through NO_BACKUP_HISTORICAL_TARGET_SCHEMA.
  */
 export const NO_BACKUP_TARGET_SCHEMA = canonicalNoBackupTargetSchema();
-const SOURCE_SCHEMA = NO_BACKUP_SOURCE_SCHEMA;
 const TARGET_SCHEMA = NO_BACKUP_TARGET_SCHEMA;
 const RELEASE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
@@ -302,7 +301,7 @@ export interface NoBackupForwardReceipt extends NoBackupReceiptBase {
   readonly releaseObserver: typeof NO_BACKUP_STANDALONE_RELEASE_OBSERVER;
   readonly cutoverEligible?: never;
   readonly database: {
-    readonly sourceSchema: typeof NO_BACKUP_SOURCE_SCHEMA;
+    readonly sourceSchema: number;
     readonly targetSchema: typeof NO_BACKUP_TARGET_SCHEMA;
     readonly migrationAttestation: ReleaseMigrationAttestation;
     schemaCommittedAt?: string;
@@ -1413,6 +1412,61 @@ export function attestedNoBackupForwardSchemas(
   return forwardSchemas;
 }
 
+export function noBackupForwardDeploymentSchemaBoundary(
+  observedSchema: number,
+  targetSchema = NO_BACKUP_TARGET_SCHEMA,
+): {
+  readonly sourceSchema: number;
+  readonly targetSchema: number;
+} {
+  if (
+    !Number.isSafeInteger(observedSchema) ||
+    !Number.isSafeInteger(targetSchema) ||
+    targetSchema < NO_BACKUP_SOURCE_SCHEMA ||
+    (
+      observedSchema !== NO_BACKUP_SOURCE_SCHEMA &&
+      observedSchema !== targetSchema
+    )
+  ) {
+    throw new Error(
+      "No-backup forward deployment requires the canonical database at " +
+      `schema ${String(NO_BACKUP_SOURCE_SCHEMA)} or the exact candidate ` +
+      `ceiling ${String(targetSchema)}; observed ${String(observedSchema)}`,
+    );
+  }
+  return {
+    sourceSchema: observedSchema,
+    targetSchema,
+  };
+}
+
+export function assertNoBackupForwardReceiptSchemaBoundary(
+  sourceSchema: number,
+  targetSchema: number,
+  migrationAttestation: ReleaseMigrationAttestation,
+): void {
+  if (
+    !Number.isSafeInteger(sourceSchema) ||
+    sourceSchema < NO_BACKUP_SOURCE_SCHEMA ||
+    !Number.isSafeInteger(targetSchema) ||
+    targetSchema < sourceSchema ||
+    (
+      sourceSchema !== NO_BACKUP_SOURCE_SCHEMA &&
+      sourceSchema !== targetSchema
+    ) ||
+    migrationAttestation.targetSchema !== targetSchema
+  ) {
+    throw new Error(
+      "No-backup forward recovery receipt has an invalid database boundary",
+    );
+  }
+  attestedNoBackupForwardSchemas(
+    migrationAttestation,
+    sourceSchema,
+    targetSchema,
+  );
+}
+
 export function parseNoBackupPreviewArguments(
   argv: readonly string[],
 ): NoBackupPreviewArguments {
@@ -2074,18 +2128,19 @@ function prepareNoBackupPreview(
       stagedAttestation,
       "No-backup forward staged migration attestation",
     );
-    if (
-      migrationAttestation.targetSchema !== TARGET_SCHEMA ||
-      databaseSchema() !== SOURCE_SCHEMA
-    ) {
+    if (migrationAttestation.targetSchema !== TARGET_SCHEMA) {
       throw new Error(
-        `No-backup forward deployment is bound to schema ${SOURCE_SCHEMA}→${TARGET_SCHEMA}`,
+        `No-backup forward candidate must attest schema ceiling ${TARGET_SCHEMA}`,
       );
     }
+    const databaseBoundary = noBackupForwardDeploymentSchemaBoundary(
+      databaseSchema(),
+      TARGET_SCHEMA,
+    );
     attestedNoBackupForwardSchemas(
       migrationAttestation,
-      SOURCE_SCHEMA,
-      TARGET_SCHEMA,
+      databaseBoundary.sourceSchema,
+      databaseBoundary.targetSchema,
     );
     const staticStore = new StaticArtifactReleaseStore({ releaseRoot: STATIC_RELEASE_ROOT });
     const staticRelease = staticStore.verifyRelease(releaseId);
@@ -2177,8 +2232,8 @@ function prepareNoBackupPreview(
         }
         : {}),
       database: {
-        sourceSchema: SOURCE_SCHEMA,
-        targetSchema: TARGET_SCHEMA,
+        sourceSchema: databaseBoundary.sourceSchema,
+        targetSchema: databaseBoundary.targetSchema,
         migrationAttestation,
       },
       previous: {
@@ -2220,13 +2275,13 @@ function prepareNoBackupPreview(
           : {}),
         predeploy: {
           pointers: receipt.previous,
-          databaseSchema: SOURCE_SCHEMA,
+          databaseSchema: databaseBoundary.sourceSchema,
           serviceIntent: "active",
           previousInvocationId: tiScaleBefore.invocationId,
         },
         target: {
           pointers: receipt.target,
-          databaseSchema: TARGET_SCHEMA,
+          databaseSchema: databaseBoundary.targetSchema,
           migrationAttestation,
         },
       },
@@ -2255,14 +2310,11 @@ async function loadPreparedNoBackupPreview(
   const receiptObserverShapeValid =
     isStandaloneNoBackupForwardReceipt(receipt) ||
     isLegacyNoBackupPreviewReceipt(receipt);
-  const expectedSourceSchema =
-    receipt.schemaVersion === NO_BACKUP_FORWARD_RECEIPT_SCHEMA
-      ? NO_BACKUP_SOURCE_SCHEMA
-      : NO_BACKUP_HISTORICAL_SOURCE_SCHEMA;
   const expectedHistoricalTargetSchema =
     receipt.schemaVersion === NO_BACKUP_PREVIEW_RECEIPT_SCHEMA
       ? NO_BACKUP_HISTORICAL_TARGET_SCHEMA
       : undefined;
+  const receiptSourceSchema = receipt.database?.sourceSchema;
   const receiptTargetSchema = receipt.database?.targetSchema;
   const receiptMigrationAttestation =
     receipt.database?.migrationAttestation;
@@ -2276,12 +2328,18 @@ async function loadPreparedNoBackupPreview(
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
       receipt.hostBootId,
     ) ||
-    receipt.database?.sourceSchema !== expectedSourceSchema ||
+    !Number.isSafeInteger(receiptSourceSchema) ||
     !Number.isSafeInteger(receiptTargetSchema) ||
     (
       expectedHistoricalTargetSchema !== undefined
-        ? receiptTargetSchema !== expectedHistoricalTargetSchema
-        : Number(receiptTargetSchema) < expectedSourceSchema
+        ? (
+          receiptSourceSchema !== NO_BACKUP_HISTORICAL_SOURCE_SCHEMA ||
+          receiptTargetSchema !== expectedHistoricalTargetSchema
+        )
+        : (
+          Number(receiptSourceSchema) < NO_BACKUP_SOURCE_SCHEMA ||
+          Number(receiptTargetSchema) < Number(receiptSourceSchema)
+        )
     ) ||
     receiptMigrationAttestation?.targetSchema !== receiptTargetSchema ||
     !receipt.serverRelease ||
@@ -2292,15 +2350,23 @@ async function loadPreparedNoBackupPreview(
   ) {
     throw new Error("No-backup forward recovery receipt is malformed or policy-incompatible");
   }
-  assertNoBackupForwardOnlySchemaProgression(
-    expectedSourceSchema,
-    Number(receiptTargetSchema),
-    attestedNoBackupForwardSchemas(
-      receiptMigrationAttestation,
-      expectedSourceSchema,
+  if (receipt.schemaVersion === NO_BACKUP_FORWARD_RECEIPT_SCHEMA) {
+    assertNoBackupForwardReceiptSchemaBoundary(
+      Number(receiptSourceSchema),
       Number(receiptTargetSchema),
-    ),
-  );
+      receiptMigrationAttestation,
+    );
+  } else {
+    assertNoBackupForwardOnlySchemaProgression(
+      NO_BACKUP_HISTORICAL_SOURCE_SCHEMA,
+      Number(receiptTargetSchema),
+      attestedNoBackupForwardSchemas(
+        receiptMigrationAttestation,
+        NO_BACKUP_HISTORICAL_SOURCE_SCHEMA,
+        Number(receiptTargetSchema),
+      ),
+    );
+  }
   if (
     JSON.stringify(receipt.backupPayloadInventoryBefore.roots) !==
       JSON.stringify([...NO_BACKUP_PAYLOAD_ROOTS].sort((left, right) =>
