@@ -120,6 +120,7 @@ export interface VaultProjectionPreview {
   readonly trackedNodeCount: number;
   readonly currentNodeCount: number;
   readonly writeRequiredNodeCount: number;
+  readonly revocationRequiredNodeCount: number;
   readonly attentionRequiredNodeCount: number;
   readonly connectionScopeHash: string;
   readonly selectionHash: string;
@@ -206,19 +207,22 @@ export class VaultProjectionReconciliationService {
     let issueCount = plan.issueCount;
     let currentNodeCount = 0;
     let writeRequiredNodeCount = 0;
+    let revocationRequiredNodeCount = 0;
     let attentionRequiredNodeCount = 0;
     const addIssue = (issue: VaultProjectionIssue): void => {
       issueCount += 1;
       if (issues.length < MAX_ISSUES) issues.push(issue);
     };
     const plannedNodeIds = new Set(plan.entries.map((entry) => entry.nodeId));
+    const managedPaths = new Set(this.#managedMarkdown(connection));
     const seenStateNodeIds = new Set<string>();
+    const seenStatePaths = new Set<string>();
     for (const state of states) {
-      if (
-        !state.node_id
-        || !plannedNodeIds.has(state.node_id)
-        || seenStateNodeIds.has(state.node_id)
-      ) {
+      const duplicate = Boolean(
+        (state.node_id && seenStateNodeIds.has(state.node_id))
+        || seenStatePaths.has(state.relative_path),
+      );
+      if (!state.node_id || duplicate) {
         attentionRequiredNodeCount += 1;
         addIssue({
           category: "unexpected_state",
@@ -226,14 +230,73 @@ export class VaultProjectionReconciliationService {
           relativePath: state.relative_path,
           message: !state.node_id
             ? "An unbound Vault synchronization row requires import or reconciliation."
-            : "A tracked Vault projection is outside the reviewed eligible population or duplicated.",
+            : "A tracked Vault projection is duplicated.",
         });
+      } else if (!plannedNodeIds.has(state.node_id)) {
+        const path = this.paths.resolveRelative(connection.vaultPath, state.relative_path);
+        if (!managedPaths.has(state.relative_path)) {
+          attentionRequiredNodeCount += 1;
+          addIssue({
+            category: "unexpected_state",
+            nodeId: state.node_id,
+            relativePath: state.relative_path,
+            message: "An out-of-policy synchronization row is outside the managed Vault folders.",
+          });
+        } else if (state.status !== "synced") {
+          attentionRequiredNodeCount += 1;
+          addIssue({
+            category: "state_not_synced",
+            nodeId: state.node_id,
+            relativePath: state.relative_path,
+            message: `The out-of-policy projection cannot be revoked while tracked as ${state.status}.`,
+          });
+        } else if (
+          !state.vault_content_hash
+          || !SHA256.test(state.vault_content_hash)
+          || state.database_content_hash !== state.vault_content_hash
+        ) {
+          attentionRequiredNodeCount += 1;
+          addIssue({
+            category: "content_mismatch",
+            nodeId: state.node_id,
+            relativePath: state.relative_path,
+            message: "The out-of-policy projection synchronization hashes have drifted.",
+          });
+        } else if (!existsSync(path)) {
+          attentionRequiredNodeCount += 1;
+          addIssue({
+            category: "missing_file",
+            nodeId: state.node_id,
+            relativePath: state.relative_path,
+            message: "The out-of-policy managed projection is missing and cannot be safely revoked.",
+          });
+        } else {
+          try {
+            const metadata = lstatSync(path);
+            if (metadata.isSymbolicLink() || !metadata.isFile() || (metadata.mode & 0o777) !== 0o600) {
+              throw new Error("Revocation candidate must be a non-symbolic-link 0600 regular file");
+            }
+            if (sha256(stableFileBytes(path)) !== state.vault_content_hash) {
+              throw new Error("Revocation candidate changed after synchronization");
+            }
+            revocationRequiredNodeCount += 1;
+          } catch {
+            attentionRequiredNodeCount += 1;
+            addIssue({
+              category: "unsafe_file",
+              nodeId: state.node_id,
+              relativePath: state.relative_path,
+              message: "The out-of-policy managed projection is unsafe or changed after synchronization.",
+            });
+          }
+        }
       }
       if (state.node_id) seenStateNodeIds.add(state.node_id);
+      seenStatePaths.add(state.relative_path);
     }
     const expectedPaths = new Set(plan.entries.map((entry) => entry.relativePath));
     const trackedPaths = new Set(states.map((state) => state.relative_path));
-    for (const relativePath of this.#managedMarkdown(connection)) {
+    for (const relativePath of managedPaths) {
       if (trackedPaths.has(relativePath) || expectedPaths.has(relativePath)) continue;
       attentionRequiredNodeCount += 1;
       addIssue({
@@ -344,6 +407,7 @@ export class VaultProjectionReconciliationService {
       trackedNodeCount: stateByNode.size,
       currentNodeCount,
       writeRequiredNodeCount,
+      revocationRequiredNodeCount,
       attentionRequiredNodeCount,
       connectionScopeHash: plan.connectionScopeHash,
       selectionHash: plan.selectionHash,

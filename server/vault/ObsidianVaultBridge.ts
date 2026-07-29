@@ -166,6 +166,7 @@ const MAX_SYNC_SCOPE_NODE_IDS = 10_000;
 const MAX_BULK_EXPORT_CONCURRENCY = 32;
 const MAX_BULK_EXPORT_ISSUES = 100;
 const MAX_ARTIFACT_BACKLINKS = 8;
+const SHA256_HEX = /^[a-f0-9]{64}$/u;
 const REUSABLE_VAULT_NODE_TYPES = [
   ...ATTACK_CENTRIC_REUSABLE_NODE_TYPES,
 ] as const satisfies readonly MemoryNode["nodeType"][];
@@ -174,6 +175,25 @@ const RUNTIME_CAPABILITY_VAULT_NODE_TYPE_SET: ReadonlySet<string> =
   new Set(["agent", "tool", "mcp_capability"]);
 const RUNTIME_CAPABILITY_MEMORY_SCHEMA =
   "ti-scale.runtime-capability-memory-projection.v1";
+const CURRENT_RUNTIME_CAPABILITY_PROJECTION_SQL = `(
+  node_type IN ('agent', 'tool', 'mcp_capability')
+  AND author_type = 'system'
+  AND author_id = 'system:runtime-capability-memory-projector'
+  AND scope = 'global'
+  AND lifecycle_status = 'verified'
+  AND json_extract(
+    retention_policy_json,
+    '$.runtimeCapabilityProjection.schemaVersion'
+  ) = 'ti-scale.runtime-capability-memory-projection.v1'
+  AND json_extract(
+    retention_policy_json,
+    '$.runtimeCapabilityProjection.status'
+  ) = 'current'
+  AND json_extract(
+    retention_policy_json,
+    '$.agentToolDecision.schemaVersion'
+  ) = '1'
+)`;
 
 function isCurrentRuntimeCapabilityProjectionNode(node: MemoryNode): boolean {
   if (!RUNTIME_CAPABILITY_VAULT_NODE_TYPE_SET.has(node.nodeType)) return false;
@@ -1563,9 +1583,14 @@ export class ObsidianVaultBridge {
       && vaultScopeIncludesOperatorProfile(connection.syncScope)
       ? operatorProfileVaultEligibleNodeIds(this.#database, operatorId)
       : [];
-    const projectionBoundary = operatorProfileNodeIds.length > 0
-      ? `(node_type IN (${REUSABLE_VAULT_NODE_TYPES.map(() => "?").join(",")}) OR id IN (${operatorProfileNodeIds.map(() => "?").join(",")}))`
-      : `node_type IN (${REUSABLE_VAULT_NODE_TYPES.map(() => "?").join(",")})`;
+    const projectionBoundaryParts = [
+      `node_type IN (${REUSABLE_VAULT_NODE_TYPES.map(() => "?").join(",")})`,
+      CURRENT_RUNTIME_CAPABILITY_PROJECTION_SQL,
+      ...(operatorProfileNodeIds.length > 0
+        ? [`id IN (${operatorProfileNodeIds.map(() => "?").join(",")})`]
+        : []),
+    ];
+    const projectionBoundary = `(${projectionBoundaryParts.join(" OR ")})`;
     const lifecycleClause = candidateReviewNodeTypes.length > 0
       ? `(
           ${permittedLifecycle.length > 0
@@ -1608,7 +1633,16 @@ export class ObsidianVaultBridge {
       clauses.push(`${column} IN (${values.map(() => "?").join(",")})`);
       parameters.push(...values);
     };
-    addScopeClause("nodeTypes", "node_type", MEMORY_NODE_TYPES);
+    const scopedNodeTypes = this.#connectionScopeValues(connection, "nodeTypes", MEMORY_NODE_TYPES);
+    if (scopedNodeTypes) {
+      clauses.push(`(
+        ${scopedNodeTypes.length > 0
+          ? `node_type IN (${scopedNodeTypes.map(() => "?").join(",")}) OR`
+          : ""}
+        ${CURRENT_RUNTIME_CAPABILITY_PROJECTION_SQL}
+      )`);
+      parameters.push(...scopedNodeTypes);
+    }
     addScopeClause("nodeIds", "id");
     addScopeClause("scopeKinds", "scope", MEMORY_SCOPE_KINDS);
     addScopeClause("sensitivities", "sensitivity", MEMORY_SENSITIVITIES);
@@ -1640,9 +1674,18 @@ export class ObsidianVaultBridge {
     requestedNodeIds?: ReadonlySet<string>,
   ): readonly string[] {
     const rows = this.#database.prepare(`
-      SELECT node_id, relative_path FROM vault_sync_state
+      SELECT id, node_id, relative_path, status,
+        database_content_hash, vault_content_hash
+      FROM vault_sync_state
       WHERE connection_id = ? AND node_id IS NOT NULL
-    `).all(connection.id) as Array<{ node_id: string; relative_path: string }>;
+    `).all(connection.id) as Array<{
+      id: string;
+      node_id: string;
+      relative_path: string;
+      status: string;
+      database_content_hash: string | null;
+      vault_content_hash: string | null;
+    }>;
     const revoked = rows.filter((row) => {
       if (requestedNodeIds && !requestedNodeIds.has(row.node_id)) return false;
       const node = this.#memory.getNode(row.node_id, true);
@@ -1653,25 +1696,108 @@ export class ObsidianVaultBridge {
     });
     if (revoked.length === 0) return [];
 
+    const currentState = this.#database.prepare(`
+      SELECT id, node_id, relative_path, status,
+        database_content_hash, vault_content_hash
+      FROM vault_sync_state
+      WHERE id = ? AND connection_id = ?
+    `);
+    const hasOpenConflict = this.#database.prepare(`
+      SELECT 1 FROM vault_conflicts
+      WHERE sync_state_id = ? AND status = 'open'
+      LIMIT 1
+    `);
     const deleteConflicts = this.#database.prepare(`
       DELETE FROM vault_conflicts WHERE sync_state_id IN (
         SELECT id FROM vault_sync_state WHERE connection_id = ? AND relative_path = ?
       )
     `);
     const deleteState = this.#database.prepare(`
-      DELETE FROM vault_sync_state WHERE connection_id = ? AND relative_path = ?
+      DELETE FROM vault_sync_state
+      WHERE id = ? AND connection_id = ? AND node_id = ? AND relative_path = ?
+        AND status = 'synced'
+        AND database_content_hash = ?
+        AND vault_content_hash = ?
     `);
     for (const row of revoked) {
       const path = this.#paths.resolveRelative(connection.vaultPath, row.relative_path);
-      if (existsSync(path)) {
-        const metadata = lstatSync(path);
-        if (!metadata.isFile() && !metadata.isSymbolicLink()) {
-          throw new Error("Revoked vault projection is not a removable file");
-        }
-        rmSync(path, { force: true });
+      const fresh = currentState.get(row.id, connection.id) as typeof row | undefined;
+      if (
+        !fresh
+        || fresh.node_id !== row.node_id
+        || fresh.relative_path !== row.relative_path
+        || fresh.status !== "synced"
+        || fresh.status !== row.status
+        || !fresh.vault_content_hash
+        || !SHA256_HEX.test(fresh.vault_content_hash)
+        || fresh.vault_content_hash !== row.vault_content_hash
+        || fresh.database_content_hash !== row.database_content_hash
+        || fresh.database_content_hash !== fresh.vault_content_hash
+      ) {
+        throw new VaultDestinationChangedError();
       }
-      deleteConflicts.run(connection.id, row.relative_path);
-      deleteState.run(connection.id, row.relative_path);
+      if (hasOpenConflict.get(row.id)) {
+        throw new Error("Revoked vault projection has an unresolved operator conflict");
+      }
+      if (!existsSync(path)) throw new VaultDestinationChangedError();
+      const metadata = lstatSync(path);
+      if (metadata.isSymbolicLink() || !metadata.isFile() || (metadata.mode & 0o777) !== 0o600) {
+        throw new Error("Revoked vault projection is not a safe managed file");
+      }
+      const snapshot = this.#readManagedNoteSnapshot(path);
+      if (hashText(snapshot.source) !== fresh.vault_content_hash) {
+        throw new VaultDestinationChangedError();
+      }
+
+      const guardRelativePath = `.ti-scale/revocation-guards/${randomUUID()}.md`;
+      const guardPath = this.#paths.resolveRelative(
+        connection.vaultPath,
+        guardRelativePath,
+        true,
+      );
+      renameSync(path, guardPath);
+      this.#fsyncDirectory(dirname(path));
+      this.#fsyncDirectory(dirname(guardPath));
+      let stateCommitted = false;
+      try {
+        const guarded = this.#readManagedNoteSnapshot(guardPath, false);
+        const admitted = currentState.get(row.id, connection.id) as typeof row | undefined;
+        if (
+          !admitted
+          || admitted.node_id !== fresh.node_id
+          || admitted.relative_path !== fresh.relative_path
+          || admitted.status !== "synced"
+          || admitted.database_content_hash !== fresh.database_content_hash
+          || admitted.vault_content_hash !== fresh.vault_content_hash
+          || hashText(guarded.source) !== fresh.vault_content_hash
+        ) {
+          throw new VaultDestinationChangedError();
+        }
+        inImmediateTransaction(this.#database, () => {
+          deleteConflicts.run(connection.id, row.relative_path);
+          const deleted = deleteState.run(
+            row.id,
+            connection.id,
+            row.node_id,
+            row.relative_path,
+            fresh.database_content_hash,
+            fresh.vault_content_hash,
+          );
+          if (deleted.changes !== 1) throw new VaultDestinationChangedError();
+        });
+        stateCommitted = true;
+        // Keep the verified note privately captured until the synchronization
+        // state deletion commits. A post-commit unlink failure therefore
+        // cannot leave a public managed note with no canonical state.
+        unlinkSync(guardPath);
+        this.#fsyncDirectory(dirname(guardPath));
+      } finally {
+        if (!stateCommitted && existsSync(guardPath) && !existsSync(path)) {
+          renameSync(guardPath, path);
+          this.#fsyncDirectory(dirname(path));
+          this.#fsyncDirectory(dirname(guardPath));
+        }
+      }
     }
 
     // Scope changes invalidate every portable snapshot for this connection.

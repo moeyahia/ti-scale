@@ -33,7 +33,9 @@ function id(label: string): string {
   return `mem_${createHash("sha256").update(label).digest("hex")}`;
 }
 
-function setup() {
+function setup(options: {
+  readonly beforeManagedRead?: (absolutePath: string) => void;
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), "vault-projection-reconciliation-"));
   directories.push(root);
   const databasePath = join(root, "ti-scale.sqlite");
@@ -46,6 +48,9 @@ function setup() {
   const paths = new VaultPathPolicy(vaultRoot);
   const bridge = new ObsidianVaultBridge(database, memory, paths, {
     clock: () => new Date("2026-07-22T12:00:00.000Z"),
+    ...(options.beforeManagedRead
+      ? { beforeManagedRead: options.beforeManagedRead }
+      : {}),
   });
   const connection = bridge.connect({
     id: "vault-attack-knowledge-reconciliation",
@@ -133,6 +138,90 @@ function receiptFiles(vaultPath: string): string[] {
 }
 
 describe("VaultProjectionReconciliationService", () => {
+  test("includes only the exact current runtime-capability projection bypass", () => {
+    const fixture = setup();
+    try {
+      const runtimeAgent = fixture.memory.createNode({
+        id: id("runtime-agent"),
+        nodeType: "agent",
+        title: "ReconScout current specialist capability",
+        summary: "Current locally attested reconnaissance specialist capability.",
+        body: "Use this exact runtime capability only while its typed attestation remains current.",
+        scope: { kind: "global" },
+        sensitivity: "internal",
+        confidence: 1,
+        lifecycleStatus: "verified",
+        confirmationState: "not_required",
+        provenance: {
+          method: "derived",
+          explanation: "Current runtime capability projection fixture.",
+          sources: [{
+            sourceType: "runtime_capability_projection",
+            sourceId: `runtime-agent:${"a".repeat(64)}`,
+            sourceHash: "b".repeat(64),
+            acquiredAt: "2026-07-22T12:00:00.000Z",
+          }],
+        },
+        authorType: "system",
+        authorId: "system:runtime-capability-memory-projector",
+        retentionPolicy: {
+          journeys: ["autonomous"],
+          allowAutonomous: true,
+          allowGuided: false,
+          runtimeCapabilityProjection: {
+            schemaVersion: "ti-scale.runtime-capability-memory-projection.v1",
+            kind: "agent",
+            sourceId: "ReconScout",
+            sourceGenerationHash: "c".repeat(64),
+            contentHash: "d".repeat(64),
+            status: "current",
+          },
+          agentToolDecision: {
+            schemaVersion: "1",
+            match: {
+              hooks: ["assignment_acceptance"],
+              agentIds: ["ReconScout"],
+              actionTypes: ["service_probe"],
+              actionClasses: ["port_service_enumeration"],
+            },
+            effect: {
+              verdict: "compatible",
+              reasonCode: "runtime.current_local_capability",
+            },
+          },
+        },
+      });
+      fixture.memory.createNode({
+        id: id("arbitrary-agent"),
+        nodeType: "agent",
+        title: "Arbitrary agent note",
+        summary: "A global agent note without a current runtime attestation.",
+        body: "This generic note must remain outside the attack-knowledge Vault.",
+        scope: { kind: "global" },
+        sensitivity: "internal",
+        confidence: 1,
+        lifecycleStatus: "verified",
+        confirmationState: "not_required",
+        provenance: fixture.provenance,
+        authorType: "operator",
+        authorId: "operator:test",
+      });
+
+      const preview = fixture.service.preview(fixture.connection.id);
+      expect(preview).toMatchObject({
+        eligibleNodeCount: 3,
+        writeRequiredNodeCount: 3,
+        revocationRequiredNodeCount: 0,
+        attentionRequiredNodeCount: 0,
+        readyForExecution: true,
+      });
+      expect(fixture.bridge.previewExportableNodeIds(fixture.connection.id)).toContain(runtimeAgent.id);
+      expect(fixture.bridge.previewExportableNodeIds(fixture.connection.id)).not.toContain(id("arbitrary-agent"));
+    } finally {
+      fixture.database.close();
+    }
+  });
+
   test("previews read-only, projects the complete eligible set, resolves links, and replays idempotently", async () => {
     const fixture = setup();
     try {
@@ -365,6 +454,148 @@ describe("VaultProjectionReconciliationService", () => {
       expect(preview.issues).toEqual(expect.arrayContaining([
         expect.objectContaining({ category: "unexpected_state", relativePath: pendingPath }),
       ]));
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  test("approved execution removes an unchanged synchronized stale projection", async () => {
+    const fixture = setup();
+    try {
+      const initial = fixture.service.preview(fixture.connection.id);
+      await fixture.service.execute({
+        connectionId: fixture.connection.id,
+        expectedPlanHash: initial.planHash,
+        approvedBy: "operator:test",
+      });
+      const state = fixture.database.prepare(`
+        SELECT relative_path FROM vault_sync_state
+        WHERE connection_id = ? AND node_id = ?
+      `).get(fixture.connection.id, fixture.procedure.id) as { relative_path: string };
+      const path = join(fixture.connection.vaultPath, state.relative_path);
+      fixture.memory.correctNode(fixture.procedure.id, {
+        lifecycleStatus: "stale",
+        authorType: "operator",
+        authorId: "operator:test",
+        changeReason: "Withdraw the obsolete reusable procedure",
+      });
+
+      const preview = fixture.service.preview(fixture.connection.id);
+      expect(preview).toMatchObject({
+        eligibleNodeCount: 1,
+        revocationRequiredNodeCount: 1,
+        attentionRequiredNodeCount: 0,
+        readyForExecution: true,
+      });
+      const receipt = await fixture.service.execute({
+        connectionId: fixture.connection.id,
+        expectedPlanHash: preview.planHash,
+        approvedBy: "operator:test",
+      });
+      expect(receipt.status).toBe("completed");
+      expect(existsSync(path)).toBe(false);
+      expect(fixture.database.prepare(`
+        SELECT 1 FROM vault_sync_state
+        WHERE connection_id = ? AND node_id = ?
+      `).get(fixture.connection.id, fixture.procedure.id)).toBeNull();
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  test("operator-edited stale projection blocks execution and is preserved", async () => {
+    const fixture = setup();
+    try {
+      const initial = fixture.service.preview(fixture.connection.id);
+      await fixture.service.execute({
+        connectionId: fixture.connection.id,
+        expectedPlanHash: initial.planHash,
+        approvedBy: "operator:test",
+      });
+      const state = fixture.database.prepare(`
+        SELECT relative_path FROM vault_sync_state
+        WHERE connection_id = ? AND node_id = ?
+      `).get(fixture.connection.id, fixture.procedure.id) as { relative_path: string };
+      const path = join(fixture.connection.vaultPath, state.relative_path);
+      fixture.memory.correctNode(fixture.procedure.id, {
+        lifecycleStatus: "stale",
+        authorType: "operator",
+        authorId: "operator:test",
+        changeReason: "Withdraw the obsolete reusable procedure",
+      });
+      const edited = `${readFileSync(path, "utf8")}\nOperator review in progress.\n`;
+      writeFileSync(path, edited, { mode: 0o600 });
+
+      const preview = fixture.service.preview(fixture.connection.id);
+      expect(preview).toMatchObject({
+        revocationRequiredNodeCount: 0,
+        attentionRequiredNodeCount: 1,
+        readyForExecution: false,
+      });
+      await expect(fixture.service.execute({
+        connectionId: fixture.connection.id,
+        expectedPlanHash: preview.planHash,
+        approvedBy: "operator:test",
+      })).rejects.toThrow("requires conflict or connection recovery");
+      expect(readFileSync(path, "utf8")).toBe(edited);
+      expect(fixture.database.prepare(`
+        SELECT status FROM vault_sync_state
+        WHERE connection_id = ? AND node_id = ?
+      `).get(fixture.connection.id, fixture.procedure.id)).toEqual({ status: "synced" });
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  test("an operator edit racing after preview blocks purge and preserves state", async () => {
+    let racePath: string | undefined;
+    let raceArmed = false;
+    const fixture = setup({
+      beforeManagedRead: (absolutePath) => {
+        if (!raceArmed || absolutePath !== racePath) return;
+        raceArmed = false;
+        writeFileSync(absolutePath, `${readFileSync(absolutePath, "utf8")}\nRacing operator edit.\n`, {
+          mode: 0o600,
+        });
+      },
+    });
+    try {
+      const initial = fixture.service.preview(fixture.connection.id);
+      await fixture.service.execute({
+        connectionId: fixture.connection.id,
+        expectedPlanHash: initial.planHash,
+        approvedBy: "operator:test",
+      });
+      const state = fixture.database.prepare(`
+        SELECT relative_path FROM vault_sync_state
+        WHERE connection_id = ? AND node_id = ?
+      `).get(fixture.connection.id, fixture.procedure.id) as { relative_path: string };
+      racePath = join(fixture.connection.vaultPath, state.relative_path);
+      fixture.memory.correctNode(fixture.procedure.id, {
+        lifecycleStatus: "stale",
+        authorType: "operator",
+        authorId: "operator:test",
+        changeReason: "Withdraw the obsolete reusable procedure",
+      });
+      const preview = fixture.service.preview(fixture.connection.id);
+      expect(preview).toMatchObject({
+        revocationRequiredNodeCount: 1,
+        attentionRequiredNodeCount: 0,
+        readyForExecution: true,
+      });
+      raceArmed = true;
+
+      await expect(fixture.service.execute({
+        connectionId: fixture.connection.id,
+        expectedPlanHash: preview.planHash,
+        approvedBy: "operator:test",
+      })).rejects.toThrow();
+      expect(existsSync(racePath)).toBe(true);
+      expect(readFileSync(racePath, "utf8")).toContain("Racing operator edit.");
+      expect(fixture.database.prepare(`
+        SELECT status FROM vault_sync_state
+        WHERE connection_id = ? AND node_id = ?
+      `).get(fixture.connection.id, fixture.procedure.id)).toEqual({ status: "synced" });
     } finally {
       fixture.database.close();
     }
