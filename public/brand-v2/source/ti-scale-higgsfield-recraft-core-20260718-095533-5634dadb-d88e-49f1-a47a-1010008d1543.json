@@ -1,0 +1,33 @@
+{
+  "tool": "mcp__higgsfield__generate_image",
+  "poll_tool": "mcp__higgsfield__job_display",
+  "poll_count": 1,
+  "model": "recraft_v4_1",
+  "parameters": {
+    "aspect_ratio": "16:9",
+    "count": 1,
+    "resolution": "1k",
+    "model_type": "standard",
+    "background_color": "#F4F2EE",
+    "colors": [
+      "#F4F2EE",
+      "#111315",
+      "#343A40",
+      "#6C737A",
+      "#C8C4BD",
+      "#8D795B"
+    ]
+  },
+  "prompt": "Create a text-free premium editorial hero artwork for the standalone Ti-Scale command-intelligence platform. The artwork must be an abstract sculptural titanium scale system, not a device, computer, robot, engine, or interface: five to nine distinct angular plates suspended in a precise exploded formation around an empty central void, with visible clean separation between every layer. Use asymmetric architectural geometry, razor-sharp machined edges, brushed titanium facets, matte graphite seams, sparse warm-metal fasteners, and strong black-and-white Ben-Day halftone or screenprint dither that visibly breaks selected facets into dots. Center the sculpture at 38 percent canvas coverage with generous uninterrupted negative space. Perfectly flat warm off-white #F4F2EE background edge to edge, no floor, horizon, gradient, vignette, reflection, or cast shadow. Calm Swiss modernist editorial art direction, sophisticated corporate technology, print-poster precision, high contrast, no visual clutter. Strictly no green or other colors, no glow, no transparent display, no screen, no circle display, no UI, no HUD, no symbols, text, letters, numbers, logos, brand marks, circuitry graphics, humans, faces, anatomy, humanoids, armor suits, weapons, vehicles, cyberpunk, hacker imagery, or recognizable intellectual property.",
+  "generation_id": "5634dadb-d88e-49f1-a47a-1010008d1543",
+  "timestamp": "2026-07-18T09:55:33.708Z",
+  "timestamp_unix": 1784368533.708739,
+  "dimensions": {
+    "width": 1344,
+    "height": 768
+  },
+  "reported_cost": null,
+  "reported_cost_note": "No cost value was returned by the generation submission or the single poll; no cost preflight was performed.",
+  "sha256": "4becf93da9ce55dd96d59833870b21ccae128b5e5fd2679443863afc43606107",
+  "selection_status": "accepted-production"
+}

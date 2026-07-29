@@ -1,0 +1,100 @@
+.brain-control-form,
+.brain-control-grid,
+.brain-control-form fieldset,
+.brain-control-form label,
+.brain-control-actions > div {
+  display: grid;
+  gap: var(--os-space-3);
+}
+
+.brain-control-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--os-space-4);
+  align-items: start;
+}
+
+.brain-control-summary > label {
+  grid-column: 1 / -1;
+}
+
+.brain-control-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.brain-control-form fieldset {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+
+.brain-control-form legend {
+  margin-bottom: var(--os-space-4);
+  color: var(--os-text);
+  font-size: 1.05rem;
+  font-weight: 650;
+}
+
+.brain-control-form select {
+  min-height: 44px;
+  padding: 0 var(--os-space-3);
+  border: 1px solid var(--os-line-strong);
+  border-radius: var(--os-radius-md);
+  color: var(--os-text);
+  background: var(--os-surface-2);
+}
+
+.brain-control-switch {
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  min-height: 44px;
+}
+
+.brain-control-switch input {
+  width: 20px;
+  height: 20px;
+  justify-self: center;
+  accent-color: var(--os-accent);
+}
+
+.brain-control-actions {
+  position: sticky;
+  bottom: var(--os-space-4);
+  z-index: calc(var(--os-z-sidebar) - 1);
+  display: flex;
+  justify-content: space-between;
+  gap: var(--os-space-4);
+  align-items: center;
+  padding: var(--os-space-4);
+  border: 1px solid var(--os-line-strong);
+  border-radius: var(--os-radius-lg);
+  background: color-mix(in srgb, var(--os-surface-2) 94%, transparent);
+  backdrop-filter: blur(16px);
+}
+
+.brain-control-actions > div {
+  grid-auto-flow: column;
+  align-items: center;
+  color: var(--os-text-muted);
+  font-size: 0.82rem;
+}
+
+.brain-control-actions strong {
+  color: var(--os-accent);
+}
+
+@media (max-width: 760px) {
+  .brain-control-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .brain-control-actions,
+  .brain-control-actions > div {
+    grid-auto-flow: row;
+    align-items: stretch;
+  }
+
+  .brain-control-actions {
+    display: grid;
+  }
+}

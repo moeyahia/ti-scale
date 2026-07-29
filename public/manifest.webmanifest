@@ -1,0 +1,12 @@
+{
+  "name": "Ti-Scale",
+  "short_name": "Ti-Scale",
+  "id": "/?source=ti-scale",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f2ee",
+  "theme_color": "#fffefa",
+  "description": "Mission intelligence and controlled orchestration for authorized security operations.",
+  "icons": []
+}

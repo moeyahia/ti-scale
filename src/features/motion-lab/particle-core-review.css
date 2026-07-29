@@ -1,0 +1,415 @@
+.particle-core-review {
+  --particle-canvas: #f3f1ed;
+  min-height: calc(100dvh - 64px);
+  display: grid;
+  grid-template-rows: auto minmax(560px, 1fr) auto auto;
+  overflow: hidden;
+  background: var(--particle-canvas);
+  color: var(--os-text);
+}
+
+.particle-core-review__masthead {
+  position: relative;
+  z-index: 8;
+  min-height: 104px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 2rem;
+  padding: 1.25rem clamp(1.1rem, 2.8vw, 3rem) 1.05rem;
+  border-bottom: 1px solid var(--os-line);
+  background: rgba(243, 241, 237, 0.96);
+}
+
+.particle-core-review__title > p,
+.particle-core-review__concept > p,
+.particle-core-review__clusters > div > span,
+.particle-core-review__accessible-list > div > p,
+.particle-core-review__state-readout,
+.particle-core-review__status,
+.particle-core-review__scrubber,
+.particle-core-review__toggle,
+.particle-core-review__boundary {
+  color: var(--os-text-muted);
+  font-family: var(--os-font-mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.particle-core-review__title h1 {
+  margin-top: 0.42rem;
+  font-size: clamp(1.7rem, 3.1vw, 3.25rem);
+  line-height: 0.91;
+  letter-spacing: -0.06em;
+}
+
+.particle-core-review__title > span {
+  display: block;
+  margin-top: 0.52rem;
+  color: var(--os-text-secondary);
+  font-size: 0.68rem;
+}
+
+.particle-core-review__header-actions {
+  display: grid;
+  justify-items: end;
+  gap: 0.55rem;
+}
+
+.particle-core-review__status {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.particle-core-review__status i {
+  width: 8px;
+  height: 8px;
+  border: 1px solid #596774;
+  background: #d8dde0;
+  transform: rotate(45deg);
+}
+
+.particle-core-review[data-runtime-ready="true"] .particle-core-review__status i {
+  background: #586773;
+}
+
+.particle-core-review__stage {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  isolation: isolate;
+  background: var(--particle-canvas);
+}
+
+.particle-core-review__stage::before,
+.particle-core-review__stage::after {
+  content: "";
+  position: absolute;
+  z-index: 4;
+  pointer-events: none;
+  background: var(--os-line);
+}
+
+.particle-core-review__stage::before { inset: 50% auto auto 0; width: 26px; height: 1px; }
+.particle-core-review__stage::after { inset: 0 auto auto 50%; width: 1px; height: 26px; }
+
+.particle-core-review__state-readout {
+  position: absolute;
+  z-index: 6;
+  inset: 0.9rem 1rem auto;
+  display: flex;
+  justify-content: space-between;
+  gap: 1.2rem;
+  pointer-events: none;
+}
+
+.particle-core-review__state-readout span:last-child { text-align: right; }
+
+.particle-core-review__canvas-frame {
+  position: absolute;
+  inset: 0;
+}
+
+.particle-core-review__concept {
+  position: absolute;
+  z-index: 6;
+  left: clamp(1rem, 3vw, 3rem);
+  bottom: clamp(1rem, 3vh, 2.4rem);
+  width: min(330px, 28vw);
+  padding-top: 0.72rem;
+  border-top: 1px solid var(--os-line-strong);
+  pointer-events: none;
+}
+
+.particle-core-review__concept h2 {
+  margin-top: 0.42rem;
+  font-size: clamp(0.96rem, 1.3vw, 1.25rem);
+  letter-spacing: -0.025em;
+}
+
+.particle-core-review__concept > span {
+  display: block;
+  margin-top: 0.48rem;
+  color: var(--os-text-secondary);
+  font-size: 0.66rem;
+  line-height: 1.55;
+}
+
+.particle-core-review__clusters {
+  position: absolute;
+  z-index: 7;
+  top: 3rem;
+  right: clamp(0.9rem, 2vw, 1.8rem);
+  width: min(205px, 24vw);
+  max-height: calc(100% - 7.2rem);
+  overflow: auto;
+  border-block: 1px solid var(--os-line);
+  background: rgba(247, 245, 241, 0.78);
+  backdrop-filter: blur(11px);
+  scrollbar-width: thin;
+}
+
+.particle-core-review__clusters > div {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  min-height: 45px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.45rem 0.55rem;
+  border-bottom: 1px solid var(--os-line);
+  background: rgba(247, 245, 241, 0.94);
+}
+
+.particle-core-review__clusters > div button {
+  min-width: 54px;
+  min-height: 34px;
+  border: 1px solid var(--os-line-strong);
+  border-radius: 0;
+  background: transparent;
+  color: var(--os-text);
+  font-family: var(--os-font-mono);
+  font-size: 0.58rem;
+  cursor: pointer;
+}
+
+.particle-core-review__clusters ol { list-style: none; }
+.particle-core-review__clusters li + li { border-top: 1px solid var(--os-line); }
+
+.particle-core-review__clusters li button {
+  width: 100%;
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 1.65rem 1fr;
+  align-items: center;
+  gap: 0.36rem;
+  padding: 0.38rem 0.52rem;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--os-text);
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms var(--os-ease), border-color 140ms var(--os-ease), transform 180ms var(--os-ease-mechanical);
+}
+
+.particle-core-review__clusters li button:hover { background: #ebe9e5; transform: translateX(-2px); }
+.particle-core-review__clusters li button.is-selected { border-left-color: #566b7a; background: #e4e5e3; }
+.particle-core-review__clusters li span { color: var(--os-text-muted); font-family: var(--os-font-mono); font-size: 0.54rem; }
+.particle-core-review__clusters li strong { overflow: hidden; font-size: 0.61rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+
+.particle-core-review__camera {
+  position: absolute;
+  z-index: 7;
+  left: clamp(1rem, 3vw, 3rem);
+  top: 3.2rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(62px, 1fr));
+  gap: 1px;
+  padding: 1px;
+  background: var(--os-line);
+}
+
+.particle-core-review__camera .os-button {
+  min-height: 40px;
+  border: 0;
+  background: rgba(247, 245, 241, 0.88);
+  backdrop-filter: blur(10px);
+}
+
+.particle-core-review__error,
+.particle-core-review__loader {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 0.7rem;
+  padding: 2rem;
+  text-align: center;
+}
+
+.particle-core-review__error p {
+  max-width: 58ch;
+  color: var(--os-text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.55;
+}
+
+.particle-core-review__loader > div {
+  position: relative;
+  width: 6rem;
+  height: 6rem;
+  animation: particle-core-loader-orbit 4.8s linear infinite;
+}
+
+.particle-core-review__loader i {
+  --particle-angle: calc(var(--particle-index) * 25.714deg);
+  position: absolute;
+  top: calc(50% - 2px);
+  left: calc(50% - 2px);
+  width: 4px;
+  height: 4px;
+  background: #45535f;
+  transform: rotate(var(--particle-angle)) translateY(-2.35rem) rotate(calc(var(--particle-angle) * -1));
+  animation: particle-core-loader-breathe 1.55s var(--os-ease-mechanical) infinite alternate;
+  animation-delay: calc(var(--particle-index) * -90ms);
+}
+
+.particle-core-review__loader > span { color: var(--os-text-muted); font-family: var(--os-font-mono); font-size: 0.61rem; letter-spacing: 0.1em; text-transform: uppercase; }
+
+.particle-core-review__accessible-list {
+  position: absolute;
+  z-index: 20;
+  inset: 1rem;
+  overflow: auto;
+  padding: clamp(1rem, 3vw, 2.5rem);
+  border: 1px solid var(--os-line-strong);
+  background: rgba(247, 245, 241, 0.985);
+}
+
+.particle-core-review__accessible-list > div { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.particle-core-review__accessible-list h2 { margin-top: 0.35rem; }
+.particle-core-review__accessible-list > p { max-width: 72ch; margin-top: 0.75rem; color: var(--os-text-secondary); font-size: 0.7rem; line-height: 1.5; }
+.particle-core-review__accessible-list ol { margin-top: 1.1rem; list-style: none; border-top: 1px solid var(--os-line); }
+.particle-core-review__accessible-list li { min-height: 44px; display: grid; grid-template-columns: 2rem 1fr auto; align-items: center; gap: 0.7rem; border-bottom: 1px solid var(--os-line); }
+.particle-core-review__accessible-list li span,
+.particle-core-review__accessible-list li small { color: var(--os-text-muted); font-family: var(--os-font-mono); font-size: 0.58rem; }
+.particle-core-review__accessible-list li strong { font-size: 0.7rem; }
+
+.particle-core-review__controls {
+  position: relative;
+  z-index: 9;
+  min-height: 82px;
+  display: grid;
+  grid-template-columns: auto minmax(220px, 1fr) auto auto auto;
+  align-items: center;
+  gap: clamp(0.7rem, 1.7vw, 1.5rem);
+  padding: 0.72rem clamp(1rem, 2.8vw, 3rem);
+  border-top: 1px solid var(--os-line);
+  background: rgba(247, 245, 241, 0.98);
+}
+
+.particle-core-review__presets { display: flex; gap: 1px; padding: 1px; background: var(--os-line); }
+.particle-core-review__presets .os-button { min-height: 44px; border: 0; }
+
+.particle-core-review__scrubber {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(90px, 1fr) 2.7rem;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.particle-core-review__scrubber input {
+  width: 100%;
+  height: 44px;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: ew-resize;
+}
+
+.particle-core-review__scrubber input::-webkit-slider-runnable-track { height: 1px; background: var(--os-line-strong); }
+.particle-core-review__scrubber input::-moz-range-track { height: 1px; background: var(--os-line-strong); }
+.particle-core-review__scrubber input::-webkit-slider-thumb { width: 10px; height: 22px; margin-top: -10px; appearance: none; border: 1px solid var(--os-text); border-radius: 0; background: #f7f5f1; }
+.particle-core-review__scrubber input::-moz-range-thumb { width: 10px; height: 22px; border: 1px solid var(--os-text); border-radius: 0; background: #f7f5f1; }
+.particle-core-review__scrubber output { text-align: right; }
+
+.particle-core-review__toggle {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.48rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.particle-core-review__toggle input { width: 18px; height: 18px; accent-color: #566a79; }
+.particle-core-review__toggle input:disabled { opacity: 0.5; }
+
+.particle-core-review__boundary {
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem clamp(1rem, 2.8vw, 3rem);
+  border-top: 1px solid var(--os-line);
+  background: #eeece7;
+  letter-spacing: 0.06em;
+  text-transform: none;
+}
+
+.particle-core-review__boundary strong { color: var(--os-text); }
+.particle-core-review__boundary span:last-child { text-align: right; }
+
+@keyframes particle-core-canvas-arrive {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes particle-core-loader-orbit {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes particle-core-loader-breathe {
+  from { opacity: 0.35; }
+  to { opacity: 1; transform: rotate(var(--particle-angle)) translateY(-2.55rem) rotate(calc(var(--particle-angle) * -1)); }
+}
+
+@media (max-width: 1120px) {
+  .particle-core-review { overflow: auto; }
+  .particle-core-review__controls { grid-template-columns: minmax(0, 1fr) minmax(220px, 1.4fr) auto; }
+  .particle-core-review__controls > :nth-child(4),
+  .particle-core-review__controls > :nth-child(5) { grid-row: 2; }
+  .particle-core-review__concept { width: min(300px, 32vw); }
+}
+
+@media (max-width: 760px) {
+  .particle-core-review { grid-template-rows: auto minmax(620px, 1fr) auto auto; }
+  .particle-core-review__masthead { display: grid; }
+  .particle-core-review__header-actions { justify-items: start; }
+  .particle-core-review__stage::after { left: 42%; }
+  .particle-core-review__clusters { top: auto; right: 0.65rem; bottom: 0.75rem; left: 0.65rem; width: auto; max-height: 150px; }
+  .particle-core-review__clusters ol { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .particle-core-review__clusters li + li { border-top: 0; }
+  .particle-core-review__clusters li { border-top: 1px solid var(--os-line); }
+  .particle-core-review__concept { top: 3.1rem; bottom: auto; left: auto; right: 0.65rem; width: min(250px, 45vw); }
+  .particle-core-review__camera { left: 0.65rem; top: 3.1rem; grid-template-columns: 64px; }
+  .particle-core-review__controls { grid-template-columns: 1fr; }
+  .particle-core-review__controls > :nth-child(4),
+  .particle-core-review__controls > :nth-child(5) { grid-row: auto; }
+  .particle-core-review__presets { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .particle-core-review__boundary { grid-template-columns: 1fr; }
+  .particle-core-review__boundary span:last-child { text-align: left; }
+}
+
+@media (max-width: 460px) {
+  .particle-core-review__state-readout { display: grid; }
+  .particle-core-review__state-readout span:last-child { text-align: left; }
+  .particle-core-review__concept { display: none; }
+  .particle-core-review__clusters { max-height: 175px; }
+  .particle-core-review__clusters ol { grid-template-columns: 1fr; }
+  .particle-core-review__camera { grid-template-columns: repeat(2, 58px); }
+  .particle-core-review__camera .os-button:last-child { grid-column: 1 / -1; }
+  .particle-core-review__scrubber { grid-template-columns: 1fr 2.7rem; }
+  .particle-core-review__scrubber > span { grid-column: 1 / -1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .particle-core-review *,
+  .particle-core-review *::before,
+  .particle-core-review *::after {
+    animation: none !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

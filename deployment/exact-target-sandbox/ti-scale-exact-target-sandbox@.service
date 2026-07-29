@@ -1,0 +1,36 @@
+[Unit]
+Description=Ti-Scale exact-target confinement request
+Requires=ti-scale-exact-target-sandbox.socket
+After=ti-scale-exact-target-sandbox.socket
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ti-scale-exact-target-broker
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/ti-scale-exact-target-sandbox /var/lib/ti-scale/exploit-sandbox
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=64M
+TasksMax=16
+TimeoutStartSec=330s
+TimeoutStopSec=5s

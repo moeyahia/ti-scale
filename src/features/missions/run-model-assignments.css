@@ -1,0 +1,117 @@
+.run-model-assignments {
+  display: grid;
+  gap: var(--os-space-4);
+}
+
+.run-model-assignments .os-card-heading p:not(.os-eyebrow) {
+  max-width: 76ch;
+  margin: var(--os-space-2) 0 0;
+  color: var(--os-text-muted);
+  font-size: 0.68rem;
+  line-height: 1.55;
+}
+
+.run-model-assignments__list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--os-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.run-model-assignment {
+  display: grid;
+  align-content: start;
+  gap: var(--os-space-3);
+  min-width: 0;
+  padding: var(--os-space-4);
+  border: 1px solid var(--os-line-strong);
+  background: var(--os-surface-2);
+  clip-path: polygon(
+    0 0,
+    calc(100% - 0.9rem) 0,
+    100% 0.9rem,
+    100% 100%,
+    0.9rem 100%,
+    0 calc(100% - 0.9rem)
+  );
+}
+
+.run-model-assignment > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--os-space-3);
+}
+
+.run-model-assignment h3,
+.run-model-assignment > header p {
+  margin: 0;
+}
+
+.run-model-assignment > header p:not(.os-eyebrow) {
+  margin-top: var(--os-space-2);
+  color: var(--os-text-muted);
+  font-size: 0.64rem;
+  line-height: 1.5;
+}
+
+.run-model-assignment .os-key-values {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.run-model-assignment .os-key-values dd {
+  overflow-wrap: anywhere;
+}
+
+.run-model-assignment__fallback,
+.run-model-assignment__authority,
+.run-model-assignments__policy {
+  margin: 0;
+  color: var(--os-text-secondary);
+  font-size: 0.64rem;
+  line-height: 1.55;
+}
+
+.run-model-assignment__fallback {
+  padding: var(--os-space-3);
+  border-left: 2px solid var(--os-info);
+  background: var(--os-info-soft);
+}
+
+.run-model-assignment__authority {
+  padding: var(--os-space-3);
+  border-left: 2px solid var(--os-info);
+  background: var(--os-info-soft);
+}
+
+.run-model-assignments__policy {
+  padding-top: var(--os-space-3);
+  border-top: 1px solid var(--os-line-soft);
+}
+
+@media (max-width: 960px) {
+  .run-model-assignments__list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 620px) {
+  .run-model-assignment > header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .run-model-assignment .os-key-values {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .run-model-assignments *,
+  .run-model-assignments *::before,
+  .run-model-assignments *::after {
+    scroll-behavior: auto;
+  }
+}

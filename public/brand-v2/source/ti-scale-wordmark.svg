@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 80" role="img" aria-labelledby="ti-scale-wordmark-title ti-scale-wordmark-description">
+  <title id="ti-scale-wordmark-title">Ti-Scale</title>
+  <desc id="ti-scale-wordmark-description">Ti-Scale wordmark with an abstract titanium scale symbol.</desc>
+  <g transform="translate(8 8)">
+    <path fill="#C8C4BD" d="M7 7h50l-6 12H39v38l-7 4-7-4V19H13Z"/>
+    <path fill="#6C737A" d="M13 7h44l-4 7H17Z"/>
+    <path fill="#111315" d="m15 18 32-8 8 9-25 8 18 6 5 10-32 14-10-9 25-11-18-6-7-8Z"/>
+    <path fill="#0A0A0B" d="m15 18 3 5 27-7 2-6Zm15 9 18 6-3 5-18-6Z"/>
+    <path fill="#6C737A" d="m21 51 28-12 4 4-32 14-10-9 4-2Z"/>
+  </g>
+  <g fill="#0A0A0B">
+    <path d="M88 18h36v9h-13v35h-10V27H88Z"/>
+    <path d="M133 18h10v44h-10Z"/>
+    <path d="M153 35h24v9h-24Z"/>
+    <path d="M218 18h-27c-6 0-10 4-10 10v7c0 6 4 10 10 10h18v8h-28v9h29c6 0 10-4 10-10v-8c0-6-4-9-10-9h-19v-8h27Z"/>
+    <path d="M267 18h-24c-8 0-13 5-13 13v18c0 8 5 13 13 13h24v-9h-22c-3 0-5-2-5-5V32c0-3 2-5 5-5h22Z"/>
+    <path fill-rule="evenodd" d="m276 62 16-44h12l17 44h-11l-3-9h-18l-3 9Zm16-18h12l-6-17Z"/>
+    <path d="M330 18h10v35h26v9h-36Z"/>
+    <path d="M375 18h36v9h-26v8h23v9h-23v9h26v9h-36Z"/>
+  </g>
+</svg>

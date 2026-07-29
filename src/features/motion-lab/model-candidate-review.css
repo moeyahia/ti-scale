@@ -1,0 +1,256 @@
+.candidate-review {
+  min-height: calc(100dvh - 64px);
+  /* The shell header is 64px tall. Retain one full clearance even when a
+     sticky/fixed header or preserved scroll position removes it from normal
+     flow during a route handoff. */
+  padding: max(5rem, 3vw) clamp(1.25rem, 3vw, 3rem) clamp(1.25rem, 3vw, 3rem);
+  background: var(--os-canvas);
+  color: var(--os-text);
+}
+
+.candidate-review__decision-boundary {
+  display: grid;
+  grid-template-columns: minmax(12rem, 0.42fr) minmax(18rem, 1fr);
+  gap: 1.25rem;
+  margin: 1.5rem 0 1px;
+  padding: 1rem 1.2rem;
+  border: 1px solid var(--os-line-strong);
+  background: var(--os-surface-1);
+}
+
+.candidate-review__decision-boundary strong {
+  font-size: 0.76rem;
+  letter-spacing: 0.02em;
+}
+
+.candidate-review__decision-boundary p {
+  color: var(--os-text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+
+.candidate-review__workspace {
+  display: grid;
+  grid-template-columns: minmax(12rem, 0.27fr) minmax(0, 1fr) minmax(15rem, 0.34fr);
+  min-height: min(68rem, calc(100dvh - 18rem));
+  border: 1px solid var(--os-line);
+  background: var(--os-line);
+  gap: 1px;
+}
+
+.candidate-review__tabs,
+.candidate-review__facts,
+.candidate-review__stage {
+  background: var(--os-canvas);
+}
+
+.candidate-review__tabs {
+  display: grid;
+  align-content: start;
+}
+
+.candidate-review__tabs button {
+  min-height: 92px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  gap: 0.35rem 0.8rem;
+  padding: 1rem;
+  border: 0;
+  border-bottom: 1px solid var(--os-line);
+  background: transparent;
+  color: var(--os-text);
+  text-align: left;
+  cursor: pointer;
+  transition: background 160ms var(--os-ease), transform 240ms var(--os-ease-mechanical);
+}
+
+.candidate-review__tabs button:hover,
+.candidate-review__tabs button[aria-selected="true"] {
+  background: var(--os-surface-1);
+}
+
+.candidate-review__tabs button[aria-selected="true"] {
+  transform: translateX(4px);
+}
+
+.candidate-review__tabs button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--os-focus);
+  outline-offset: -3px;
+}
+
+.candidate-review__tabs span,
+.candidate-review__tabs small {
+  color: var(--os-text-muted);
+  font-family: var(--os-font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.candidate-review__tabs span { grid-row: 1 / 3; }
+.candidate-review__tabs strong { font-size: 0.78rem; }
+
+.candidate-review__stage {
+  position: relative;
+  min-width: 0;
+  min-height: 34rem;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.candidate-review__image-stage {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  place-items: center;
+  margin: 0;
+  padding: clamp(1rem, 3vw, 2.5rem);
+}
+
+.candidate-review__image-stage img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  border: 0;
+  background: transparent;
+}
+
+.candidate-review__image-stage figcaption {
+  width: 100%;
+  padding-top: 0.85rem;
+  color: var(--os-text-secondary);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.candidate-review__model-stage {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+
+.candidate-review__canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  outline: none;
+}
+
+.candidate-review__canvas:focus-visible {
+  outline: 2px solid var(--os-focus);
+  outline-offset: -4px;
+}
+
+.candidate-review__runtime-status {
+  position: absolute;
+  z-index: 2;
+  left: 1rem;
+  right: 1rem;
+  bottom: 4.7rem;
+  max-width: 48rem;
+  margin-inline: auto;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--os-line);
+  background: color-mix(in srgb, var(--os-canvas) 94%, transparent);
+  color: var(--os-text-secondary);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.candidate-review__model-stage > .os-button {
+  position: absolute;
+  z-index: 3;
+  bottom: 1rem;
+}
+
+.candidate-review__turntable-controls {
+  position: absolute;
+  z-index: 3;
+  inset: auto 0 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  padding: 1px;
+  background: var(--os-line);
+}
+
+.candidate-review__turntable-controls .os-button {
+  min-height: 52px;
+  border: 0;
+}
+
+.candidate-review__facts {
+  padding: 1.2rem;
+}
+
+.candidate-review__facts dl {
+  display: grid;
+  gap: 0;
+  margin-top: 1rem;
+}
+
+.candidate-review__facts dl > div {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.8rem 0;
+  border-top: 1px solid var(--os-line);
+}
+
+.candidate-review__facts dt {
+  color: var(--os-text-muted);
+  font-family: var(--os-font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.candidate-review__facts dd {
+  overflow-wrap: anywhere;
+  color: var(--os-text-secondary);
+  font-size: 0.69rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 980px) {
+  .candidate-review__workspace { grid-template-columns: minmax(10rem, 0.32fr) minmax(0, 1fr); }
+  .candidate-review__facts { grid-column: 1 / -1; }
+}
+
+@media (max-width: 680px) {
+  .candidate-review {
+    padding-block-start: 5rem;
+    padding-inline: 1rem;
+    padding-block-end: 1rem;
+  }
+  .candidate-review__decision-boundary { grid-template-columns: 1fr; }
+  .candidate-review__workspace { display: block; }
+  .candidate-review__tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .candidate-review__tabs button { min-height: 74px; padding: 0.75rem; }
+  .candidate-review__tabs button span,
+  .candidate-review__tabs button small { display: none; }
+  .candidate-review__stage { min-height: 31rem; border-bottom: 1px solid var(--os-line); }
+  .candidate-review__turntable-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .candidate-review__runtime-status { bottom: 7.4rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .candidate-review *,
+  .candidate-review *::before,
+  .candidate-review *::after {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,124 @@
+name: Full Playwright release profile
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ti-scale-release-browser-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-browser-gate:
+    name: All browsers, viewports, and interactions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      CI: "true"
+      TI_SCALE_E2E_PROFILE: release
+      TI_SCALE_E2E_REQUIRE_API: "1"
+      TI_SCALE_E2E_ENFORCE_MANIFEST: "1"
+      TI_SCALE_E2E_ENFORCE_ACTIVATION_RECEIPTS: "1"
+      TI_SCALE_E2E_ENFORCE_RELEASE_RESULT_POLICY: "1"
+      TI_SCALE_E2E_SERVER_MODE: playwright-managed-static
+      TI_SCALE_E2E_EXTERNAL_SERVERS: "false"
+      TI_SCALE_E2E_BASE_URL: http://127.0.0.1:43140
+      TI_SCALE_E2E_API_URL: http://127.0.0.1:43140
+      TI_SCALE_E2E_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+      TI_SCALE_E2E_CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - name: Check out the reviewed source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Use the repository Bun version
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate workflow policy
+        run: bun run scripts/validate-ci-workflows.ts
+
+      - name: Validate resolved release browser configuration
+        run: bun run scripts/validate-playwright-release-config.ts
+
+      - name: Validate the complete test inventory and modifier policy
+        run: bun run test:policy
+
+      - name: Verify standalone source isolation
+        run: bun run isolation:verify
+
+      - name: Type-check application, server, and browser contracts
+        run: |
+          bun run typecheck
+          bun run typecheck:e2e
+
+      - name: Run unit and interaction-manifest gates
+        run: |
+          sudo -H env "PATH=$PATH" CI=true bun run test
+          bun run test:interaction-manifest
+
+      - name: Bind the browser gate to the checked-out candidate
+        run: |
+          test "$(git rev-parse HEAD)" = "$TI_SCALE_E2E_CANDIDATE_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Build and enforce bundle budgets
+        run: |
+          bun run build
+          bun run scripts/measure-bundle-performance.ts
+
+      - name: Record the lock-installed browser toolchain
+        run: bun run scripts/report-browser-toolchain.ts
+
+      - name: Install the reviewed browser engines
+        run: ./node_modules/.bin/playwright install --with-deps chromium firefox webkit
+
+      - name: Run the complete retry-free release profile
+        run: bun run scripts/run-playwright-tests.ts --config=playwright.config.ts --retries=0
+
+      - name: Verify the tested source remained unchanged
+        run: |
+          test "$(git rev-parse HEAD)" = "$TI_SCALE_E2E_CANDIDATE_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Upload sanitized browser release evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ti-scale-playwright-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            test-results/html/
+            test-results/results/
+            test-results/playwright/
+            tests/interaction-manifest.json
+            tests/interaction-manifest.schema.json
+            tests/interaction-manifest/visual-baselines.json
+            tests/accessibility-state-inventory.json
+          if-no-files-found: warn
+          include-hidden-files: false
+          retention-days: 14
+          overwrite: false
+
+      - name: Remove transient runner output
+        if: always()
+        run: |
+          rm -rf \
+            "$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/playwright-report" \
+            "$GITHUB_WORKSPACE/test-results" \
+            "${RUNNER_TEMP:?}/ti-scale-e2e-data" \
+            /tmp/ti-scale-e2e-data

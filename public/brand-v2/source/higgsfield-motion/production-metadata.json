@@ -1,0 +1,227 @@
+{
+  "schemaVersion": 1,
+  "recordType": "higgsfield-production-provenance",
+  "status": "production_complete_local_assets_ready",
+  "recordedAtUtc": "2026-07-18T16:27:00Z",
+  "outputDirectory": "public/brand-v2/source/higgsfield-motion/",
+  "generationProvider": "Higgsfield MCP",
+  "account": {
+    "subscriptionPlan": "plus",
+    "creditsBeforeProduction": 1218.6,
+    "creditsAfterSubmission": 876.6,
+    "creditsSpent": 342,
+    "creditBreakdown": {
+      "three4kImageGenerations": 12,
+      "fifteenSecond4kVideo": 330
+    }
+  },
+  "catalogInspection": {
+    "inspectionDateUtc": "2026-07-18",
+    "nanoBananaFamilyAvailable": [
+      {
+        "id": "nano_banana_pro",
+        "name": "Nano Banana Pro",
+        "description": "Ultimate quality, text and diagrams",
+        "resolutions": ["1k", "2k", "4k"]
+      },
+      {
+        "id": "nano_banana_2",
+        "name": "Nano Banana 2",
+        "description": "Fast, next-gen high-quality images",
+        "resolutions": ["1k", "2k", "4k"]
+      },
+      {
+        "id": "nano_banana",
+        "name": "Nano Banana",
+        "description": "Realistic images, budget-friendly"
+      },
+      {
+        "id": "nano_banana_2_shots",
+        "name": "Nano Banana Pro",
+        "description": "Catalog entry with no provider or quality parameters"
+      },
+      {
+        "id": "nano_banana_2_lite",
+        "name": "Nano Banana 2 Lite",
+        "description": "Lite next-gen high-quality images",
+        "resolutions": ["1k"]
+      }
+    ],
+    "videoCandidates": [
+      {
+        "id": "seedance_2_0",
+        "name": "Seedance 2.0",
+        "description": "Reference-driven video with identity consistency, explicit start, end, and image-reference roles, up to 4K"
+      },
+      {
+        "id": "cinematic_studio_3_0",
+        "name": "Cinema Studio Video 3.0",
+        "description": "Most advanced cinema-grade model, up to 4K, start and end frame support"
+      },
+      {
+        "id": "seedance_2_0_mini",
+        "name": "Seedance 2.0 Mini",
+        "description": "Fast budget variant, excluded from production"
+      }
+    ],
+    "selection": {
+      "requestedImageModelId": "nano_banana_pro",
+      "imageResolution": "4k",
+      "selectedVideoModelId": "seedance_2_0",
+      "videoResolution": "4k",
+      "videoMode": "std",
+      "videoBitrateMode": "high",
+      "videoDurationSeconds": 15,
+      "videoAudio": false,
+      "reason": "Full Seedance 2.0 is the highest-quality compatible model with explicit start_image, end_image, and intermediate image-reference roles at 4K."
+    },
+    "executionRoutingNote": "All three generate_image calls explicitly requested nano_banana_pro at 4k. Higgsfield accepted those calls but returned and executed model ID nano_banana_2. Both the requested catalog ID and actual returned ID are recorded for exact provenance."
+  },
+  "source": {
+    "originalWorkspacePath": "public/brand-v2/source/ti-scale-higgsfield-recraft-core-20260718-095533-5634dadb-d88e-49f1-a47a-1010008d1543.png",
+    "savedAssetPath": "00-input-ti-scale-core-5634dadb.png",
+    "mimeType": "image/png",
+    "fileSizeBytes": 788246,
+    "sha256": "4becf93da9ce55dd96d59833870b21ccae128b5e5fd2679443863afc43606107",
+    "dimensions": {
+      "width": 1344,
+      "height": 768
+    },
+    "generationId": "5634dadb-d88e-49f1-a47a-1010008d1543",
+    "returnedModelId": "recraft_v4_1",
+    "resolutionTier": "1k",
+    "rawUrl": "https://d8j0ntlcm91z4.cloudfront.net/user_3GBOvDqJU2sqXNaFlfWzyFDBbyC/hf_20260718_095533_5634dadb-d88e-49f1-a47a-1010008d1543.png",
+    "minUrl": "https://d8j0ntlcm91z4.cloudfront.net/user_3GBOvDqJU2sqXNaFlfWzyFDBbyC/hf_20260718_095533_5634dadb-d88e-49f1-a47a-1010008d1543_min.webp",
+    "prompt": "Create a text-free premium editorial hero artwork for the standalone Ti-Scale command-intelligence platform. The artwork must be an abstract sculptural titanium scale system, not a device, computer, robot, engine, or interface: five to nine distinct angular plates suspended in a precise exploded formation around an empty central void, with visible clean separation between every layer. Use asymmetric architectural geometry, razor-sharp machined edges, brushed titanium facets, matte graphite seams, sparse warm-metal fasteners, and strong black-and-white Ben-Day halftone or screenprint dither that visibly breaks selected facets into dots. Center the sculpture at 38 percent canvas coverage with generous uninterrupted negative space. Perfectly flat warm off-white #F4F2EE background edge to edge, no floor, horizon, gradient, vignette, reflection, or cast shadow. Calm Swiss modernist editorial art direction, sophisticated corporate technology, print-poster precision, high contrast, no visual clutter. Strictly no green or other colors, no glow, no transparent display, no screen, no circle display, no UI, no HUD, no symbols, text, letters, numbers, logos, brand marks, circuitry graphics, humans, faces, anatomy, humanoids, armor suits, weapons, vehicles, cyberpunk, hacker imagery, or recognizable intellectual property."
+  },
+  "assets": [
+    {
+      "purpose": "locked_assembled_hero_keyframe",
+      "type": "image",
+      "savedAssetPath": "01-locked-assembled-b00afa65.png",
+      "fileSizeBytes": 16903851,
+      "sha256": "dc764077442ecbd5d06abf60f01bb772eee1e7cfbd83fe5ea3ead796ce3bcab9",
+      "generationId": "b00afa65-a288-464d-9ec7-dc494f17a814",
+      "requestedModelId": "nano_banana_pro",
+      "returnedModelId": "nano_banana_2",
+      "status": "completed",
+      "resolutionTier": "4k",
+      "aspectRatio": "16:9",
+      "dimensions": {
+        "width": 5504,
+        "height": 3072
+      },
+      "durationSeconds": null,
+      "inputGenerationIds": ["5634dadb-d88e-49f1-a47a-1010008d1543"],
+      "rawUrl": "https://d8j0ntlcm91z4.cloudfront.net/user_3GBOvDqJU2sqXNaFlfWzyFDBbyC/hf_20260718_155525_b00afa65-a288-464d-9ec7-dc494f17a814.png",
+      "minUrl": "https://d8j0ntlcm91z4.cloudfront.net/user_3GBOvDqJU2sqXNaFlfWzyFDBbyC/hf_20260718_155525_b00afa65-a288-464d-9ec7-dc494f17a814_min.webp",
+      "prompt": "Use case: identity-preserve\nAsset type: locked assembled hero keyframe for premium industrial product motion.\nInput image: the supplied Ti-Scale artwork is the sole geometry and identity reference and the edit target.\nTreat the supplied artwork as immutable identity. Preserve the exact recognizable silhouette, topology, plate count and order, folds, existing seams, perforations, fastener locations, central opening, proportions, orientation, scale, centered 16:9 framing, fixed three-quarter camera, wide negative space, warm off-white seamless background, graphite shadows, brushed titanium and matte graphite palette, and only the restrained warm-metal accents already present. No redesign; no invented, duplicated, replaced, or missing parts.\nShow the same titanium core in its fully seated, mechanically locked assembled hero state, with every original plate and fastener occupying its source position. Refine only physical realism: premium anisotropic brushed titanium, precise machined edges, believable panel contact, restrained warm-metal perforations, subtle surface variation, and controlled graphite contact shadows. Keep the exact source silhouette, composition, lighting direction and central void. Clean, quiet, monumental, physically buildable 2100-era titanium industrial design.\nNo text, typography, numbers, labels, logos, watermarks, screens, charts, widgets, fake dashboard copy, UI graphics, glass HUD, green, neon, cyberpunk, gaming aesthetics, generic spacecraft styling, flashes, sparks, energy, particles, smoke, liquid morphing, dissolution, elastic deformation, new parts, missing parts, camera change, background change, or lighting change."
+    },
+    {
+      "purpose": "engineering_exploded_view_keyframe",
+      "type": "image",
+      "savedAssetPath": "02-exploded-b121553c.png",
+      "fileSizeBytes": 17792125,
+      "sha256": "13df783bc06e243dae288e879dc7e3587867974578558bcc24fd3299bb4a16d9",
+      "generationId": "b121553c-aadb-4716-8ba5-fe6bf77ff1cb",
+      "requestedModelId": "nano_banana_pro",
+      "returnedModelId": "nano_banana_2",
+      "status": "completed",
+      "resolutionTier": "4k",
+      "aspectRatio": "16:9",
+      "dimensions": {
+        "width": 5504,
+        "height": 3072
+      },
+      "durationSeconds": null,
+      "inputGenerationIds": [
+        "5634dadb-d88e-49f1-a47a-1010008d1543",
+        "b00afa65-a288-464d-9ec7-dc494f17a814"
+      ],
+      "rawUrl": "https://d8j0ntlcm91z4.cloudfront.net/user_3GBOvDqJU2sqXNaFlfWzyFDBbyC/hf_20260718_155856_b121553c-aadb-4716-8ba5-fe6bf77ff1cb.png",
+      "minUrl": "https://d8j0ntlcm91z4.cloudfront.net/user_3GBOvDqJU2sqXNaFlfWzyFDBbyC/hf_20260718_155856_b121553c-aadb-4716-8ba5-fe6bf77ff1cb_min.webp",
+      "prompt": "Use case: identity-preserve\nAsset type: engineering exploded-view keyframe for a continuous premium mechanical transformation.\nInput images: the original Ti-Scale artwork is the sole identity and geometry baseline; the completed locked assembled hero keyframe is the immediate edit target.\nPreserve the exact recognizable Ti-Scale core: identical silhouette logic, topology, plate count and order, individual plate shapes, hard folds, perforation fields, every fastener location, central diamond opening, proportions, material, brushed-grain direction, graphite undersides, restrained warm-metal accents, fixed three-quarter camera, centered 16:9 framing, lighting direction, graphite shadows, and warm off-white seamless background. Every component must keep permanent one-to-one identity. No redesign, replacement, duplication, omission, deformation, or invented internal machinery.\nCreate a precise engineering exploded state by separating those exact rigid components only along believable existing seams and joint normals. Translate each plate a measured distance outward and slightly downward from the central assembly. Keep each part's original scale, finish, perforations, fasteners, and orientation logic. Use orderly, readable rigid-body spacing, clear air gaps, no collisions, no interpenetration, and a visually obvious perfectly reassemblable relationship to the hero. Maintain the same object center and overall canvas footprint so this can serve as the mandatory intermediate keyframe in one fixed-camera shot. Premium physically buildable 2100-era titanium industrial design; this is a text-free product keyframe, not a labeled diagram.\nNo text, typography, numbers, labels, leader lines, logos, watermarks, screens, charts, widgets, fake dashboard copy, UI graphics, glass HUD, green, neon, cyberpunk, gaming aesthetics, generic spacecraft styling, flashes, sparks, energy, particles, smoke, liquid morphing, dissolution, elastic or soft-body deformation, new parts, missing parts, duplicated parts, camera movement, zoom, reframing, background change, exposure change, or lighting change."
+    },
+    {
+      "purpose": "destination_architectural_chassis_keyframe",
+      "type": "image",
+      "savedAssetPath": "03-destination-1e5e57f6.png",
+      "fileSizeBytes": 21793592,
+      "sha256": "3952eda80cce96b056f8cfc6793833f52ef086598c17d1a0f1c05e7aa7dc6281",
+      "generationId": "1e5e57f6-efb7-4b1d-b71c-d252bdc94265",
+      "requestedModelId": "nano_banana_pro",
+      "returnedModelId": "nano_banana_2",
+      "status": "completed",
+      "resolutionTier": "4k",
+      "aspectRatio": "16:9",
+      "dimensions": {
+        "width": 5504,
+        "height": 3072
+      },
+      "durationSeconds": null,
+      "inputGenerationIds": [
+        "5634dadb-d88e-49f1-a47a-1010008d1543",
+        "b00afa65-a288-464d-9ec7-dc494f17a814",
+        "b121553c-aadb-4716-8ba5-fe6bf77ff1cb"
+      ],
+      "rawUrl": "https://d8j0ntlcm91z4.cloudfront.net/user_3GBOvDqJU2sqXNaFlfWzyFDBbyC/hf_20260718_160027_1e5e57f6-efb7-4b1d-b71c-d252bdc94265.png",
+      "minUrl": "https://d8j0ntlcm91z4.cloudfront.net/user_3GBOvDqJU2sqXNaFlfWzyFDBbyC/hf_20260718_160027_1e5e57f6-efb7-4b1d-b71c-d252bdc94265_min.webp",
+      "prompt": "Use case: identity-preserve\nAsset type: destination architectural-chassis keyframe for handoff to accessible live DOM UI.\nInput images: the original Ti-Scale artwork is the immutable identity and geometry baseline; the locked assembled hero confirms the opening state; the completed engineering exploded keyframe is the immediate edit target and exact part inventory.\nContinue from the exploded keyframe using those exact same titanium components. Preserve permanent one-to-one identity for every plate, fold, perforation field, graphite underside, fastener, seam, finish, proportion, and brushed-grain direction. Preserve the same fixed three-quarter camera, object center, 16:9 canvas, warm off-white seamless background, graphite shadows, lighting direction, restrained titanium/graphite/warm-metal palette, and recognizable central diamond core. No new, replaced, duplicated, merged, missing, stretched, or melted geometry.\nWithout morphing, translate, rotate, hinge, and telescope the identified rigid plates from their exploded positions into the beginning of a physically buildable architectural arrangement of empty interface chassis around a dense central core. Use the same parts to form restrained structural rails, machined bezels, open bays, and clean mounting apertures; all interface areas must remain empty neutral physical chassis reserved for later accessible live DOM UI. Keep every component individually traceable back to the hero and exploded state. Retain generous negative space and the same overall canvas footprint. Premium 2100-era titanium industrial architecture: precise, quiet, monumental, and engineered, not a rendered dashboard.\nNo text, typography, numbers, labels, leader lines, logos, watermarks, screens, charts, controls, widgets, fake dashboard copy, rendered UI, glass HUD, green, neon, cyberpunk, gaming aesthetics, generic sci-fi or spacecraft styling, flashes, sparks, energy effects, particles, smoke, liquid morphing, dissolution, elastic or soft-body deformation, invented internal machinery, new parts, missing parts, duplicated parts, camera movement, zoom, reframing, background change, exposure change, or lighting change."
+    },
+    {
+      "purpose": "premium_mechanical_transformation_clip",
+      "type": "video",
+      "savedAssetPath": "04-transformation-ba5f3e4b-4k.mp4",
+      "intendedSavedAssetPath": "04-transformation-ba5f3e4b-4k.mp4",
+      "localFileStatus": "verified",
+      "fileSizeBytes": 22439518,
+      "sha256": "72e5a1db1ceac32b61971c84e1ccbe25a23eb76ffa74454dde9d413581f5db23",
+      "optimizedDelivery": {
+        "path": "../../optimized/higgsfield-motion/04-transformation-titanium-matte-1440p.mp4",
+        "mimeType": "video/mp4",
+        "codec": "h264",
+        "alphaMode": 0,
+        "matteColor": "#f4f2ee",
+        "width": 2560,
+        "height": 1440,
+        "durationSeconds": 15.041667,
+        "fileSizeBytes": 7280982,
+        "sha256": "9e7c23637dd56e48afb4f989f8c1b066723feaaf966c5e9ddaf0f01a12b3e403",
+        "transparentMaster": {
+          "path": "../../optimized/higgsfield-motion/04-transformation-transparent-1440p.webm",
+          "mimeType": "video/webm",
+          "codec": "vp9",
+          "alphaMode": 1,
+          "fileSizeBytes": 19390212,
+          "sha256": "5a04ae9bd3ac162260cbd48859d2c9d4f0f0e73eb4fad337fb0d93332bf2ae8f"
+        }
+      },
+      "generationId": "ba5f3e4b-67fa-4bf4-9f8f-04b8bac516c7",
+      "requestedModelId": "seedance_2_0",
+      "returnedModelId": "seedance_2_0",
+      "status": "completed",
+      "resolutionTier": "4k",
+      "mode": "std",
+      "bitrateMode": "high",
+      "aspectRatio": "16:9",
+      "dimensions": {
+        "width": 3840,
+        "height": 2160
+      },
+      "durationSeconds": 15,
+      "generateAudio": false,
+      "createdAtUtc": "2026-07-18T16:06:22.673805000Z",
+      "inputRoles": {
+        "start_image": "b00afa65-a288-464d-9ec7-dc494f17a814",
+        "end_image": "1e5e57f6-efb7-4b1d-b71c-d252bdc94265",
+        "image_references": [
+          "b121553c-aadb-4716-8ba5-fe6bf77ff1cb",
+          "5634dadb-d88e-49f1-a47a-1010008d1543"
+        ]
+      },
+      "rawUrl": "https://d8j0ntlcm91z4.cloudfront.net/user_3GBOvDqJU2sqXNaFlfWzyFDBbyC/hf_20260718_160622_ba5f3e4b-67fa-4bf4-9f8f-04b8bac516c7.mp4",
+      "thumbnailUrl": "https://d8j0ntlcm91z4.cloudfront.net/user_3GBOvDqJU2sqXNaFlfWzyFDBbyC/hf_20260718_155525_b00afa65-a288-464d-9ec7-dc494f17a814.png",
+      "prompt": "Single continuous 15-second fixed-camera premium product transformation. The supplied locked assembled hero is the mandatory exact opening state. The supplied engineering exploded-view keyframe is the mandatory exact intermediate state and part map. The supplied architectural-chassis keyframe is the mandatory exact final state. The original Ti-Scale artwork is the immutable identity reference.\nPreserve permanent one-to-one tracking of every original titanium component through every frame: exact plate count and order, individual shapes, hard folds, existing seams, perforation fields, fastener locations, brushed-grain direction, graphite undersides, restrained warm-metal accents, central diamond core, proportions, scale, fixed three-quarter perspective, centered 16:9 framing, warm off-white seamless background, graphite shadows, lighting, exposure, and palette. No geometry may appear, disappear, swap, duplicate, merge, melt, stretch, deform, or interpenetrate.\nTiming and motion:\n0.0-1.2 seconds: hold the assembled hero completely locked and motionless.\n1.2-2.0 seconds: existing seams release through tiny believable mechanical detents; no flash or effect.\n2.0-6.0 seconds: the exact rigid plates accelerate with convincing inertial mass and move outward and slightly downward along believable existing seam normals and short linear rails, coordinated but subtly staggered, directly matching the engineering exploded-view paths.\n6.0-7.2 seconds: arrive exactly at the exploded reference state; firm deceleration, tiny contact rebound, brief micro-vibration settle, readable pause.\n7.2-12.8 seconds: without changing identity, those same rigid components rotate on precise articulated joints and extend on restrained telescoping travel into the exact empty architectural-chassis arrangement around the dense central core. Each source part remains continuously traceable.\n12.8-15.0 seconds: parts seat mechanically into the destination reference with controlled ease-out, subtle inertial overshoot, tiny contact rebound and short micro-vibration settling; finish motionless on the exact destination state.\nPhysical choreography only: precise robotic assembly, realistic titanium mass, rigid-body motion, machined tolerances, clean clearances, no collision. One uninterrupted shot. Camera is absolutely locked: no pan, tilt, roll, orbit, dolly, zoom, reframing, lens change, parallax jump, cut, transition, or time discontinuity. Keep lighting, exposure, shadows, off-white background and palette identical throughout.\nNo audio. No text, typography, numbers, labels, leader lines, logos, watermarks, screens, charts, controls, widgets, fake dashboard copy, rendered UI, glass HUD, green, neon, cyberpunk, gaming aesthetics, generic sci-fi or spacecraft styling, flashes, sparks, energy effects, particles, debris, smoke, liquid morphing, dissolution, elastic deformation, soft-body motion, flicker, exposure pumping, background change, or lighting change."
+    }
+  ]
+}

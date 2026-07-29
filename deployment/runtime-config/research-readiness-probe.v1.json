@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "ti-scale.research-readiness-probe.v1",
+  "descriptorVersion": "bubblewrap-local-research-2026.07.24",
+  "isolationExecutable": {
+    "path": "/usr/bin/bwrap",
+    "sha256": "042763bc80c8a895a497e6f801af003d585ea5588a580f7a4349d9ab2aa22980"
+  },
+  "resourceLimitExecutable": {
+    "path": "/usr/bin/prlimit",
+    "sha256": "0669635b11695f00d020ad17d8f8091da28f894a6284feaba8f87374b5ee6386"
+  },
+  "evaluatorExecutable": {
+    "path": "/usr/bin/python3.13",
+    "sha256": "ecf651f545bcef039d29503acf695a38903b7e8e9867a1ce0994ff6924e0274b"
+  },
+  "evaluatorId": "ti-scale.local-research-readiness.v1",
+  "evaluatorSourceSha256": "388944cf5965604a883081535b7fcc77fc5e344771150865834691e374f554ac",
+  "timeoutMs": 3000,
+  "receiptTtlMs": 120000,
+  "limits": {
+    "addressSpaceBytes": 134217728,
+    "cpuSeconds": 2,
+    "maxProcesses": 16,
+    "maxFileBytes": 1048576,
+    "maxOpenFiles": 64
+  }
+}

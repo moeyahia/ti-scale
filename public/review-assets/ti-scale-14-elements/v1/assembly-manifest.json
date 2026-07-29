@@ -1,0 +1,1647 @@
+{
+  "schemaVersion": 1,
+  "status": "review-candidate",
+  "title": "Ti-Scale 14-element assembly",
+  "reviewBoundary": "Review candidate — not approved for hero",
+  "generatedAt": "2026-07-19T08:10:32.412Z",
+  "sourceArtwork": {
+    "path": "brand-v2/source/higgsfield-motion/00-input-ti-scale-core-5634dadb.png",
+    "sha256": "4becf93da9ce55dd96d59833870b21ccae128b5e5fd2679443863afc43606107",
+    "width": 1344,
+    "height": 768,
+    "visibleBoundsPixels": [
+      371,
+      42,
+      975,
+      725
+    ],
+    "protectedAperturePixels": [
+      [
+        699,
+        267
+      ],
+      [
+        801,
+        414
+      ],
+      [
+        675,
+        542
+      ],
+      [
+        499,
+        379
+      ]
+    ]
+  },
+  "coordinateContract": {
+    "axes": {
+      "x": "east/right",
+      "y": "north/up",
+      "z": "toward viewer"
+    },
+    "canvasCenterPixels": [
+      672,
+      384
+    ],
+    "worldUnitsPerPixel": 0.01,
+    "interpolation": "unseat on Z during the first 22%, then translate through the audited outward corridor; no random rotation or physics"
+  },
+  "camera": {
+    "kind": "perspective",
+    "fieldOfViewDegrees": 34,
+    "near": 0.1,
+    "far": 100,
+    "position": [
+      0.35,
+      0.2,
+      14.5
+    ],
+    "target": [
+      0,
+      0.15,
+      0.2
+    ],
+    "defaultYawDegrees": -5,
+    "defaultPitchDegrees": -3,
+    "minimumDistance": 8,
+    "maximumDistance": 32,
+    "maximumDistanceProvenance": "bounded review-camera extension derived from the audited progress-1 transformed sphere, the current-aspect limiting field of view, and an 18% framing margin; locked geometry and explosion transforms remain unchanged"
+  },
+  "lights": [
+    {
+      "id": "hemisphere",
+      "kind": "hemisphere",
+      "sky": "#f8fbff",
+      "ground": "#a7a099",
+      "intensity": 1.35
+    },
+    {
+      "id": "key",
+      "kind": "directional",
+      "color": "#dcecff",
+      "intensity": 4.2,
+      "position": [
+        4.5,
+        6.5,
+        8
+      ]
+    },
+    {
+      "id": "rim",
+      "kind": "directional",
+      "color": "#aac8df",
+      "intensity": 2.2,
+      "position": [
+        -6,
+        2.5,
+        5
+      ]
+    },
+    {
+      "id": "gold",
+      "kind": "directional",
+      "color": "#ffd69a",
+      "intensity": 1.35,
+      "position": [
+        5,
+        -3.5,
+        6
+      ]
+    },
+    {
+      "id": "fill",
+      "kind": "directional",
+      "color": "#ffffff",
+      "intensity": 0.95,
+      "position": [
+        -2,
+        -4,
+        8
+      ]
+    }
+  ],
+  "fastenerGeometry": {
+    "kind": "instanced-low-profile-cap",
+    "count": 26,
+    "radialSegments": 20,
+    "depthWorld": 0.028,
+    "material": {
+      "color": "#c7a267",
+      "metalness": 0.92,
+      "roughness": 0.24
+    }
+  },
+  "models": [
+    {
+      "number": 1,
+      "id": "NW_TI_OVERPLATE_02",
+      "name": "Middle Crown Return",
+      "path": "review-assets/ti-scale-14-elements/v1/models/01-nw-ti-overplate-02-cbc6639a57e9.glb",
+      "sha256": "cbc6639a57e9d0460b006f4f64d2f874a85a98d42cbfc66d2da4cf9e612c3ee2",
+      "bytes": 7820,
+      "triangleCount": 18,
+      "meshPrimitiveCount": 4,
+      "materialFamily": "cool-brushed-titanium",
+      "pivot": {
+        "pixel": [
+          678.5,
+          176.5
+        ],
+        "localModel": [
+          -0.88458557,
+          0.96789292,
+          0.304611142
+        ],
+        "provenance": "F09/F10 midpoint projected into the deterministic CAD top surface by its audited four-corner homography"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0.88458557,
+          -0.96789292,
+          -0.304611142
+        ],
+        "uniformScale": 0.454501938,
+        "provenance": "uniform fit inside the audited 257 x 263 pixel source envelope; no non-uniform repair"
+      },
+      "assembly": {
+        "position": [
+          0.065,
+          2.075,
+          0.34
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 85
+      },
+      "explosion": {
+        "direction": [
+          0.47,
+          0.62,
+          0.55
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.3,
+        "position": [
+          1.146,
+          3.501,
+          1.885
+        ],
+        "provenance": "deterministic interpolation between the neighboring audited crown release corridors"
+      }
+    },
+    {
+      "number": 2,
+      "id": "NW_TI_OVERPLATE_01",
+      "name": "Outer Crown Return",
+      "path": "review-assets/ti-scale-14-elements/v1/models/02-nw-ti-overplate-01-57c0080706c5.glb",
+      "sha256": "57c0080706c5b7d492d14912e23140115958d63922344e35134be196982b2fd6",
+      "bytes": 8300,
+      "triangleCount": 24,
+      "meshPrimitiveCount": 4,
+      "materialFamily": "cool-brushed-titanium",
+      "pivot": {
+        "pixel": [
+          680,
+          109
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "primary crown fold and fastener line"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          0.08,
+          2.75,
+          0.3
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 75
+      },
+      "explosion": {
+        "direction": [
+          0.45,
+          0.75,
+          0.48
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.4,
+        "position": [
+          1.16,
+          4.55,
+          1.732
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 3,
+      "id": "NW_TI_OVERPLATE_03",
+      "name": "Inner Crown Return",
+      "path": "review-assets/ti-scale-14-elements/v1/models/03-nw-ti-overplate-03-382d4a07f003.glb",
+      "sha256": "382d4a07f0030a3ffad2ea29140b90e94e9d6a0da388bf43028a45989c3c4ab4",
+      "bytes": 7908,
+      "triangleCount": 20,
+      "meshPrimitiveCount": 4,
+      "materialFamily": "cool-brushed-titanium",
+      "pivot": {
+        "pixel": [
+          679,
+          256
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "inner crown fold and fastener seam"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          0.07,
+          1.28,
+          0.38
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 95
+      },
+      "explosion": {
+        "direction": [
+          0.48,
+          0.48,
+          0.62
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.2,
+        "position": [
+          1.126,
+          2.336,
+          2.024
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 4,
+      "id": "NW_TI_DESCENT_01",
+      "name": "Outer Titanium Descent",
+      "path": "review-assets/ti-scale-14-elements/v1/models/04-nw-ti-descent-01-76936c9287d1.glb",
+      "sha256": "76936c9287d1eee8dcaee718355bc28554f04318d841b75d0b01498ffdbabecf",
+      "bytes": 6560,
+      "triangleCount": 12,
+      "meshPrimitiveCount": 3,
+      "materialFamily": "cool-brushed-titanium",
+      "pivot": {
+        "pixel": [
+          676,
+          52
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "fastened crown seam"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          0.04,
+          3.32,
+          0.28
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 70
+      },
+      "explosion": {
+        "direction": [
+          -0.72,
+          0.55,
+          0.42
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.5,
+        "position": [
+          -1.76,
+          4.695,
+          1.61
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 5,
+      "id": "NW_TI_DESCENT_02",
+      "name": "Middle Titanium Descent",
+      "path": "review-assets/ti-scale-14-elements/v1/models/05-nw-ti-descent-02-ec4ad823f76f.glb",
+      "sha256": "ec4ad823f76f3c515d1c5b2c884828e0997cc85735ea18e712fb5d68e48a269b",
+      "bytes": 6512,
+      "triangleCount": 12,
+      "meshPrimitiveCount": 3,
+      "materialFamily": "cool-brushed-titanium",
+      "pivot": {
+        "pixel": [
+          586,
+          173
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "middle entry seam"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          -0.86,
+          2.11,
+          0.32
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 80
+      },
+      "explosion": {
+        "direction": [
+          -0.82,
+          0.2,
+          0.46
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.5,
+        "position": [
+          -2.91,
+          2.61,
+          1.75
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 6,
+      "id": "NW_TI_DESCENT_03",
+      "name": "Inner Tail Descent",
+      "path": "review-assets/ti-scale-14-elements/v1/models/06-nw-ti-descent-03-6575b6981f4c.glb",
+      "sha256": "6575b6981f4c1ed377161015ece714d34fe01be71dd3aa439bade7782429c846",
+      "bytes": 6896,
+      "triangleCount": 16,
+      "meshPrimitiveCount": 3,
+      "materialFamily": "cool-brushed-titanium",
+      "pivot": {
+        "pixel": [
+          587,
+          246
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "inner entry seam"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          -0.85,
+          1.38,
+          0.36
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 90
+      },
+      "explosion": {
+        "direction": [
+          -0.82,
+          -0.25,
+          0.5
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.6,
+        "position": [
+          -2.982,
+          0.73,
+          1.94
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 7,
+      "id": "SW_TI_BRIDGE_01",
+      "name": "Southwest Aperture Bridge",
+      "path": "review-assets/ti-scale-14-elements/v1/models/07-sw-ti-bridge-01-2e3130fd1fb5.glb",
+      "sha256": "2e3130fd1fb510a84aec4f8a493a5184d2f4cee67c7c39b0e173781b5fc7c236",
+      "bytes": 9120,
+      "triangleCount": 32,
+      "meshPrimitiveCount": 4,
+      "materialFamily": "cool-brushed-titanium",
+      "pivot": {
+        "pixel": [
+          504,
+          371
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "aperture-left hidden attachment; intentionally above visible bounds"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          -1.68,
+          0.13,
+          0.4
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 100
+      },
+      "explosion": {
+        "direction": [
+          -0.6,
+          -0.65,
+          0.46
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.6,
+        "position": [
+          -3.24,
+          -1.56,
+          1.876
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 8,
+      "id": "E_TI_SPEAR_01",
+      "name": "Titanium Attack Spear",
+      "path": "review-assets/ti-scale-14-elements/v1/models/08-e-ti-spear-01-c4d1bc166bd9.glb",
+      "sha256": "c4d1bc166bd96ccf9fb77f7d1ac546f29d515d229a5804f1f5604a984a4b85af",
+      "bytes": 9472,
+      "triangleCount": 36,
+      "meshPrimitiveCount": 4,
+      "materialFamily": "cool-brushed-titanium",
+      "pivot": {
+        "pixel": [
+          766,
+          494
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "lower fold and deterministic fastener seam"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          0.94,
+          -1.1,
+          0.24
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 60
+      },
+      "explosion": {
+        "direction": [
+          0.84,
+          0.25,
+          0.48
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.7,
+        "position": [
+          3.208,
+          -0.425,
+          1.816
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 9,
+      "id": "E_GR_SPEAR_01",
+      "name": "Graphite Attack Spear",
+      "path": "review-assets/ti-scale-14-elements/v1/models/09-e-gr-spear-01-7d40e53bcdbe.glb",
+      "sha256": "7d40e53bcdbe20d099de5117cdd49a11acc29c4aa4c79f210029e7194c9d62bc",
+      "bytes": 6368,
+      "triangleCount": 16,
+      "meshPrimitiveCount": 2,
+      "materialFamily": "architectural-graphite",
+      "pivot": {
+        "pixel": [
+          824,
+          447
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "inner chevron knee"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          1.52,
+          -0.63,
+          0.2
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 50
+      },
+      "explosion": {
+        "direction": [
+          0.86,
+          -0.05,
+          0.37
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.6,
+        "position": [
+          3.756,
+          -0.76,
+          1.442
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 10,
+      "id": "SE_GR_STEP_01",
+      "name": "Upper Graphite Step",
+      "path": "review-assets/ti-scale-14-elements/v1/models/10-se-gr-step-01-2b54b9cee127.glb",
+      "sha256": "2b54b9cee1275cb2bd8e7b28d064967349c008359335a3f6c9cec3584d720382",
+      "bytes": 7132,
+      "triangleCount": 24,
+      "meshPrimitiveCount": 2,
+      "materialFamily": "architectural-graphite",
+      "pivot": {
+        "pixel": [
+          764,
+          559
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "right step seam"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          0.92,
+          -1.75,
+          0.16
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 40
+      },
+      "explosion": {
+        "direction": [
+          0.5,
+          -0.6,
+          0.36
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.5,
+        "position": [
+          2.17,
+          -3.25,
+          1.34
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 11,
+      "id": "SE_GR_STEP_02",
+      "name": "Middle Graphite Step",
+      "path": "review-assets/ti-scale-14-elements/v1/models/11-se-gr-step-02-6b320726014a.glb",
+      "sha256": "6b320726014a82b603e76b88b39705c813e3bc810fcbb3ad42893d74b0bf1d77",
+      "bytes": 6756,
+      "triangleCount": 20,
+      "meshPrimitiveCount": 2,
+      "materialFamily": "architectural-graphite",
+      "pivot": {
+        "pixel": [
+          764,
+          617
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "middle step right seam"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          0.92,
+          -2.33,
+          0.12
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 30
+      },
+      "explosion": {
+        "direction": [
+          0,
+          -0.9,
+          0.34
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.5,
+        "position": [
+          0.92,
+          -4.58,
+          1.25
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 12,
+      "id": "SE_GR_STEP_03",
+      "name": "Terminal Graphite Step",
+      "path": "review-assets/ti-scale-14-elements/v1/models/12-se-gr-step-03-949ee9a185dd.glb",
+      "sha256": "949ee9a185dd2c462faf449e4a344f8d34b07451b6d99c9b383ba9f6499092b8",
+      "bytes": 6768,
+      "triangleCount": 20,
+      "meshPrimitiveCount": 2,
+      "materialFamily": "architectural-graphite",
+      "pivot": {
+        "pixel": [
+          762,
+          660
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "terminal step upper seam"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          0.9,
+          -2.76,
+          0.08
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 20
+      },
+      "explosion": {
+        "direction": [
+          -0.42,
+          -0.78,
+          0.28
+        ],
+        "unseatWorld": 0.28,
+        "radialDistanceWorld": 2.5,
+        "position": [
+          -0.15,
+          -4.71,
+          1.06
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 13,
+      "id": "NW_GOLD_BACKING_01",
+      "name": "Northwest Perforated Carrier",
+      "path": "review-assets/ti-scale-14-elements/v1/models/13-nw-gold-backing-01-6daaac6c79a0.glb",
+      "sha256": "6daaac6c79a0ce245643a519c3b966b9b44178aea74fd22b831fc9db83a2f6e7",
+      "bytes": 251452,
+      "triangleCount": 2568,
+      "meshPrimitiveCount": 2,
+      "materialFamily": "champagne-gold-carrier",
+      "pivot": {
+        "pixel": [
+          490,
+          233
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "area-weighted carrier centroid"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          -1.82,
+          1.51,
+          0.02
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 5
+      },
+      "explosion": {
+        "direction": [
+          -0.75,
+          0.55,
+          -0.35
+        ],
+        "unseatWorld": -0.28,
+        "radialDistanceWorld": 2.8,
+        "position": [
+          -3.92,
+          3.05,
+          -1.24
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    },
+    {
+      "number": 14,
+      "id": "SE_GOLD_BACKING_01",
+      "name": "Southeast Perforated Carrier",
+      "path": "review-assets/ti-scale-14-elements/v1/models/14-se-gold-backing-01-d199fc951fb0.glb",
+      "sha256": "d199fc951fb0ffd533c3538f8b2ceedbab625d001cd23e98b569064ef21901fa",
+      "bytes": 246468,
+      "triangleCount": 2516,
+      "meshPrimitiveCount": 2,
+      "materialFamily": "champagne-gold-carrier",
+      "pivot": {
+        "pixel": [
+          838,
+          557
+        ],
+        "localModel": [
+          0,
+          0,
+          0
+        ],
+        "provenance": "area-weighted carrier centroid"
+      },
+      "canonicalization": {
+        "rootOffset": [
+          0,
+          0,
+          0
+        ],
+        "uniformScale": 1,
+        "provenance": "pivot-local canonical GLB"
+      },
+      "assembly": {
+        "position": [
+          1.66,
+          -1.73,
+          0.02
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "zLayer": 5
+      },
+      "explosion": {
+        "direction": [
+          0.65,
+          -0.65,
+          -0.35
+        ],
+        "unseatWorld": -0.28,
+        "radialDistanceWorld": 2.8,
+        "position": [
+          3.48,
+          -3.55,
+          -1.24
+        ],
+        "provenance": "audited elements-02-14 generation specification"
+      }
+    }
+  ],
+  "fasteners": [
+    {
+      "id": "F01",
+      "owner": "NW_TI_DESCENT_01",
+      "seam": "apex",
+      "pixel": [
+        669,
+        48
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -0.03,
+        3.36,
+        0.345
+      ],
+      "ownerLocalOffset": [
+        -0.07,
+        0.04,
+        0.065
+      ],
+      "jointBetween": [
+        "NW_TI_DESCENT_01",
+        "NW_TI_OVERPLATE_01"
+      ]
+    },
+    {
+      "id": "F02",
+      "owner": "NW_TI_DESCENT_01",
+      "seam": "apex",
+      "pixel": [
+        686,
+        56
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        0.14,
+        3.28,
+        0.345
+      ],
+      "ownerLocalOffset": [
+        0.1,
+        -0.04,
+        0.065
+      ],
+      "jointBetween": [
+        "NW_TI_DESCENT_01",
+        "NW_TI_OVERPLATE_01"
+      ]
+    },
+    {
+      "id": "F03",
+      "owner": "NW_GOLD_BACKING_01",
+      "seam": "backing seam",
+      "pixel": [
+        580,
+        100
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -0.92,
+        2.84,
+        0.085
+      ],
+      "ownerLocalOffset": [
+        0.9,
+        1.33,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F04",
+      "owner": "NW_GOLD_BACKING_01",
+      "seam": "backing seam",
+      "pixel": [
+        598,
+        108
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -0.74,
+        2.76,
+        0.085
+      ],
+      "ownerLocalOffset": [
+        1.08,
+        1.25,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F05",
+      "owner": "NW_TI_OVERPLATE_01",
+      "seam": "fold",
+      "pixel": [
+        669,
+        106
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -0.03,
+        2.78,
+        0.365
+      ],
+      "ownerLocalOffset": [
+        -0.11,
+        0.03,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F06",
+      "owner": "NW_TI_OVERPLATE_01",
+      "seam": "fold",
+      "pixel": [
+        690,
+        117
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        0.18,
+        2.67,
+        0.365
+      ],
+      "ownerLocalOffset": [
+        0.1,
+        -0.08,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F07",
+      "owner": "NW_TI_DESCENT_02",
+      "seam": "entry seam",
+      "pixel": [
+        578,
+        169
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -0.94,
+        2.15,
+        0.385
+      ],
+      "ownerLocalOffset": [
+        -0.08,
+        0.04,
+        0.065
+      ],
+      "jointBetween": [
+        "NW_TI_DESCENT_02",
+        "NW_TI_OVERPLATE_02"
+      ]
+    },
+    {
+      "id": "F08",
+      "owner": "NW_TI_DESCENT_02",
+      "seam": "entry seam",
+      "pixel": [
+        595,
+        177
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -0.77,
+        2.07,
+        0.385
+      ],
+      "ownerLocalOffset": [
+        0.09,
+        -0.04,
+        0.065
+      ],
+      "jointBetween": [
+        "NW_TI_DESCENT_02",
+        "NW_TI_OVERPLATE_02"
+      ]
+    },
+    {
+      "id": "F09",
+      "owner": "NW_TI_OVERPLATE_02",
+      "seam": "fold",
+      "pixel": [
+        670,
+        173
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -0.02,
+        2.11,
+        0.405
+      ],
+      "ownerLocalOffset": [
+        -0.085,
+        0.035,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F10",
+      "owner": "NW_TI_OVERPLATE_02",
+      "seam": "fold",
+      "pixel": [
+        687,
+        180
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        0.15,
+        2.04,
+        0.405
+      ],
+      "ownerLocalOffset": [
+        0.085,
+        -0.035,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F11",
+      "owner": "NW_TI_DESCENT_03",
+      "seam": "entry seam",
+      "pixel": [
+        579,
+        242
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -0.93,
+        1.42,
+        0.425
+      ],
+      "ownerLocalOffset": [
+        -0.08,
+        0.04,
+        0.065
+      ],
+      "jointBetween": [
+        "NW_TI_DESCENT_03",
+        "NW_TI_OVERPLATE_03"
+      ]
+    },
+    {
+      "id": "F12",
+      "owner": "NW_TI_DESCENT_03",
+      "seam": "entry seam",
+      "pixel": [
+        594,
+        250
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -0.78,
+        1.34,
+        0.425
+      ],
+      "ownerLocalOffset": [
+        0.07,
+        -0.04,
+        0.065
+      ],
+      "jointBetween": [
+        "NW_TI_DESCENT_03",
+        "NW_TI_OVERPLATE_03"
+      ]
+    },
+    {
+      "id": "F13",
+      "owner": "NW_TI_OVERPLATE_03",
+      "seam": "fold",
+      "pixel": [
+        669,
+        252
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -0.03,
+        1.32,
+        0.445
+      ],
+      "ownerLocalOffset": [
+        -0.1,
+        0.04,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F14",
+      "owner": "NW_TI_OVERPLATE_03",
+      "seam": "fold",
+      "pixel": [
+        688,
+        260
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        0.16,
+        1.24,
+        0.445
+      ],
+      "ownerLocalOffset": [
+        0.09,
+        -0.04,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F15",
+      "owner": "SW_TI_BRIDGE_01",
+      "seam": "aperture-left seam",
+      "pixel": [
+        504,
+        371
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -1.68,
+        0.13,
+        0.465
+      ],
+      "ownerLocalOffset": [
+        0,
+        0,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F16",
+      "owner": "NW_TI_OVERPLATE_03",
+      "seam": "aperture-right seam",
+      "pixel": [
+        783,
+        393
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        1.11,
+        -0.09,
+        0.445
+      ],
+      "ownerLocalOffset": [
+        1.04,
+        -1.37,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F17",
+      "owner": "E_TI_SPEAR_01",
+      "seam": "lower fold",
+      "pixel": [
+        759,
+        490
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        0.87,
+        -1.06,
+        0.305
+      ],
+      "ownerLocalOffset": [
+        -0.07,
+        0.04,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F18",
+      "owner": "E_TI_SPEAR_01",
+      "seam": "lower fold",
+      "pixel": [
+        772,
+        498
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        1,
+        -1.14,
+        0.305
+      ],
+      "ownerLocalOffset": [
+        0.06,
+        -0.04,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F19",
+      "owner": "SE_GR_STEP_01",
+      "seam": "step seam",
+      "pixel": [
+        756,
+        554
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        0.84,
+        -1.7,
+        0.225
+      ],
+      "ownerLocalOffset": [
+        -0.08,
+        0.05,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F20",
+      "owner": "SE_GR_STEP_01",
+      "seam": "step seam",
+      "pixel": [
+        771,
+        563
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        0.99,
+        -1.79,
+        0.225
+      ],
+      "ownerLocalOffset": [
+        0.07,
+        -0.04,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F21",
+      "owner": "SE_GR_STEP_02",
+      "seam": "step seam",
+      "pixel": [
+        757,
+        614
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        0.85,
+        -2.3,
+        0.185
+      ],
+      "ownerLocalOffset": [
+        -0.07,
+        0.03,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F22",
+      "owner": "SE_GR_STEP_02",
+      "seam": "step seam",
+      "pixel": [
+        771,
+        620
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        0.99,
+        -2.36,
+        0.185
+      ],
+      "ownerLocalOffset": [
+        0.07,
+        -0.03,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F23",
+      "owner": "SE_GR_STEP_03",
+      "seam": "upper seam",
+      "pixel": [
+        751,
+        655
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        0.79,
+        -2.71,
+        0.145
+      ],
+      "ownerLocalOffset": [
+        -0.11,
+        0.05,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F24",
+      "owner": "SE_GR_STEP_03",
+      "seam": "upper seam",
+      "pixel": [
+        774,
+        665
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        1.02,
+        -2.81,
+        0.145
+      ],
+      "ownerLocalOffset": [
+        0.12,
+        -0.05,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F25",
+      "owner": "SE_GR_STEP_03",
+      "seam": "base tip",
+      "pixel": [
+        660,
+        709
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        -0.12,
+        -3.25,
+        0.145
+      ],
+      "ownerLocalOffset": [
+        -1.02,
+        -0.49,
+        0.065
+      ],
+      "jointBetween": null
+    },
+    {
+      "id": "F26",
+      "owner": "SE_GR_STEP_03",
+      "seam": "base tip",
+      "pixel": [
+        678,
+        718
+      ],
+      "radiusWorld": 0.044,
+      "assembledPosition": [
+        0.06,
+        -3.34,
+        0.145
+      ],
+      "ownerLocalOffset": [
+        -0.84,
+        -0.58,
+        0.065
+      ],
+      "jointBetween": null
+    }
+  ],
+  "visualIntegrity": {
+    "expectedModelMeshCount": 41,
+    "minimumDrawCalls": 42,
+    "minimumVisibleModelCoverage": 0.03,
+    "assay": "model-only framebuffer coverage with deterministic fasteners hidden"
+  },
+  "budgets": {
+    "maximumModels": 14,
+    "maximumFasteners": 26,
+    "maximumTotalTriangles": 6000,
+    "maximumTotalModelBytes": 2000000,
+    "maximumDevicePixelRatio": 1.75
+  },
+  "provenance": {
+    "lockReceiptSha256": "62cd3a46bfb1dc45c561d741ebfea8775f57db03ba0e2f5e33b8811686cc9f26",
+    "transformSpecSha256": "7babfd283bbe244e7c4d7bea63c84506bec6280d74226735325917241a9dc231",
+    "segmentationSha256": "d2d4ebcebf63eb6d5eb73c1ec971682b23ffe3bc13f3105c92a95adfdaee9551",
+    "paidGenerationCalls": 0,
+    "geometryMutated": false
+  }
+}

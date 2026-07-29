@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "ti-scale.historical-source-roots.v2",
+  "configurationVersion": "historical-supplemental-only-2026.07.21-v1",
+  "roots": [
+    {
+      "id": "historical-home-htb-workspaces",
+      "path": "/home/chillspwn/htb/boxes",
+      "mode": "children",
+      "required": true
+    },
+    {
+      "id": "historical-runtime-state",
+      "path": "/var/lib/chillspwn/state",
+      "mode": "history-root",
+      "required": true
+    },
+    {
+      "id": "historical-hermes-runtime",
+      "path": "/var/lib/chillspwn/hermes",
+      "mode": "history-root",
+      "required": true
+    },
+    {
+      "id": "historical-service-claude-projects",
+      "path": "/var/lib/chillspwn/claude/projects",
+      "mode": "history-root",
+      "required": true
+    },
+    {
+      "id": "historical-operator-claude-projects",
+      "path": "/root/.claude/projects",
+      "mode": "history-root",
+      "required": true
+    },
+    {
+      "id": "historical-operator-grok-sessions",
+      "path": "/root/.grok/sessions",
+      "mode": "history-root",
+      "required": true
+    },
+    {
+      "id": "historical-operator-grok-logs",
+      "path": "/root/.grok/logs",
+      "mode": "history-root",
+      "required": true
+    },
+    {
+      "id": "historical-operator-codex-sessions",
+      "path": "/root/.codex/sessions",
+      "mode": "history-root",
+      "required": true
+    }
+  ]
+}

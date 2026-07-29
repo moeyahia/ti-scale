@@ -1,0 +1,473 @@
+/* Ti-Scale-owned form disclosure and suspended panel response. */
+.ti-scale .os-titanium-select {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+}
+
+/* Canonical form control: it keeps name/value/required semantics and remains
+   available to deterministic browser automation, but cannot receive a pointer
+   or expose a second combobox to assistive technology. Opacity is intentional:
+   display:none would remove native constraint validation and form behavior. */
+.ti-scale .os-titanium-select__form-proxy {
+  position: absolute;
+  z-index: -1;
+  inset: 0 auto auto 0;
+  width: 1px;
+  height: 1px;
+  min-width: 1px;
+  min-height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.ti-scale .os-titanium-select__trigger {
+  position: relative;
+  width: 100%;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+  padding: .72rem 3.2rem .72rem .8rem !important;
+  border: 1px solid var(--os-line);
+  border-radius: var(--os-radius-md);
+  appearance: none;
+  -webkit-appearance: none;
+  background:
+    linear-gradient(90deg, transparent 0 calc(100% - 42px), color-mix(in srgb, var(--os-metal) 8%, transparent) calc(100% - 42px)),
+    var(--os-canvas);
+  color: var(--os-text);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.8);
+  font-family: var(--os-font-sans);
+  font-size: .8rem;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  outline: none;
+  text-align: left;
+  touch-action: manipulation;
+  transition: border-color var(--os-duration-fast) var(--os-ease), box-shadow var(--os-duration) var(--os-ease), background-color var(--os-duration) var(--os-ease);
+}
+
+.ti-scale .os-titanium-select__value {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ti-scale .os-titanium-select__trigger:hover { border-color: var(--os-line-strong); }
+.ti-scale .os-titanium-select__trigger:focus-visible {
+  border-color: var(--os-accent);
+  outline: 2px solid var(--os-focus);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 3px var(--os-accent-soft), inset 0 1px 0 rgba(255,255,255,.9);
+}
+.ti-scale .os-titanium-select__trigger:disabled { cursor: not-allowed; opacity: .56; }
+
+.ti-scale .os-titanium-select__mechanism {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  right: 13px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+.ti-scale .os-titanium-select__mechanism::before,
+.ti-scale .os-titanium-select__mechanism::after {
+  content: "";
+  position: absolute;
+  width: 7px;
+  height: 1px;
+  background: var(--os-text-secondary);
+  transition: background-color 180ms var(--os-ease), width 220ms var(--os-ease-mechanical);
+}
+.ti-scale .os-titanium-select__mechanism::before { transform: translateX(-2px) rotate(42deg); }
+.ti-scale .os-titanium-select__mechanism::after { transform: translateX(2px) rotate(-42deg); }
+.ti-scale .os-titanium-select__mechanism i {
+  position: absolute;
+  right: -4px;
+  width: 2px;
+  height: 2px;
+  border: 1px solid var(--os-line-strong);
+  background: var(--os-surface-1);
+}
+.ti-scale .os-titanium-select__mechanism i:nth-child(1) { top: 1px; }
+.ti-scale .os-titanium-select__mechanism i:nth-child(2) { top: 8px; }
+.ti-scale .os-titanium-select__mechanism i:nth-child(3) { bottom: 1px; }
+.ti-scale .os-titanium-select.is-open .os-titanium-select__mechanism::before,
+.ti-scale .os-titanium-select.is-open .os-titanium-select__mechanism::after {
+  width: 10px;
+  background: var(--os-accent);
+}
+
+.ti-scale .os-titanium-select__listbox {
+  position: absolute;
+  z-index: var(--os-z-portal-disclosure);
+  top: calc(100% + 6px);
+  left: 0;
+  width: max(100%, min(34rem, calc(100vw - 2rem)));
+  max-width: min(34rem, calc(100vw - 2rem));
+  max-height: min(19rem, 48dvh);
+  display: grid;
+  padding: 5px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--os-line-strong);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--os-surface-1) 97%, var(--os-metal) 3%);
+  box-shadow: 0 24px 60px rgba(17,19,21,.16), 0 3px 0 rgba(108,115,122,.14);
+  overscroll-behavior: contain;
+  transform-origin: 50% 0;
+  animation: none;
+}
+
+/* The application portal promotes every disclosure above cards, drawers, and
+   nested scroll regions without invoking native Popover/OS picker compositor
+   paths. The base absolute rules remain a pre-mount safety fallback. */
+.ti-scale .os-titanium-select__listbox[data-top-layer="true"] {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  min-width: 0;
+  max-width: calc(100vw - 2rem);
+}
+
+/* A deterministic titanium command sheet keeps all engines on the same branded
+   path and requires neither CSS anchors nor CSP-blocked inline coordinates. */
+.ti-scale .os-titanium-select__listbox[data-positioning="sheet"] {
+  inset: auto 1rem max(1rem, env(safe-area-inset-bottom)) 1rem;
+  width: min(34rem, calc(100vw - 2rem));
+  max-width: calc(100vw - 2rem);
+  max-height: min(24rem, 70dvh);
+  margin-inline: auto;
+  transform-origin: 50% 100%;
+}
+.ti-scale .os-titanium-select__listbox::before {
+  content: "SELECT // LOCK";
+  position: sticky;
+  z-index: 3;
+  top: -5px;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--os-line-soft);
+  background: var(--os-surface-1);
+  color: var(--os-text-muted);
+  font: 620 .53rem/1 var(--os-font-mono);
+  letter-spacing: .12em;
+}
+.ti-scale .os-titanium-select__rail {
+  position: absolute;
+  z-index: 4;
+  top: 5px;
+  right: 5px;
+  width: 24px;
+  height: 28px;
+  pointer-events: none;
+  border-top: 2px solid var(--os-metal);
+  border-right: 2px solid var(--os-metal);
+}
+.ti-scale .os-titanium-select__option {
+  position: relative;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 28px minmax(0,1fr) 16px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--os-line-soft);
+  background: transparent;
+  color: var(--os-text-secondary);
+  text-align: left;
+  font-size: .72rem;
+  font-weight: 560;
+  cursor: pointer;
+  transition: color var(--os-duration-fast) var(--os-ease), background-color var(--os-duration-fast) var(--os-ease);
+  appearance: none;
+  -webkit-appearance: none;
+  font-family: var(--os-font-sans);
+}
+.ti-scale .os-titanium-select__option:last-child { border-bottom: 0; }
+.ti-scale .os-titanium-select__option.is-active {
+  color: var(--os-text);
+  background: linear-gradient(90deg, var(--os-metal-soft), transparent 82%);
+}
+.ti-scale .os-titanium-select__option.is-selected { font-weight: 720; }
+.ti-scale .os-titanium-select__option[aria-disabled="true"] { cursor: not-allowed; opacity: .42; }
+.ti-scale .os-titanium-select__index { color: var(--os-text-muted); font: .55rem/1 var(--os-font-mono); }
+.ti-scale .os-titanium-select__lock {
+  width: 7px;
+  height: 7px;
+  justify-self: center;
+  border: 1px solid var(--os-line-strong);
+  transform: rotate(45deg);
+  transition: background-color 180ms var(--os-ease), border-color 180ms var(--os-ease);
+}
+.ti-scale .os-titanium-select__option.is-selected .os-titanium-select__lock {
+  border-color: var(--os-accent);
+  background: var(--os-accent);
+}
+.ti-scale .os-titanium-select__error { display: block; margin-top: 6px; color: var(--os-danger); font-size: .63rem; }
+.ti-scale .os-titanium-select.has-error .os-titanium-select__trigger { border-color: var(--os-danger); }
+.ti-scale .os-titanium-select.is-loading .os-titanium-select__mechanism { animation: ti-select-calibrate 640ms steps(4,end) 3 both; }
+
+/* Four deterministic chassis cuts translate the central titanium facets into
+   the operational surface. Only the behind-content chassis is clipped: the
+   semantic section, its hit area, focus rings, and top-layer disclosures stay
+   rectangular and fully reachable. */
+.ti-scale {
+  --ti-plate-keel: polygon(0 0, calc(100% - 46px) 0, 100% 28px, 100% 100%, 24px 100%, 0 calc(100% - 24px));
+  --ti-plate-aero: polygon(20px 0, 100% 0, 100% calc(100% - 34px), calc(100% - 42px) 100%, 0 100%, 0 18px);
+  --ti-plate-prism: polygon(0 0, calc(100% - 30px) 0, 100% 20px, 100% calc(100% - 18px), calc(100% - 18px) 100%, 38px 100%, 0 calc(100% - 30px));
+  --ti-plate-truss: polygon(28px 0, 100% 0, 100% calc(100% - 24px), calc(100% - 26px) 100%, 0 100%, 0 36px);
+}
+
+.ti-scale [data-ti-plate="keel"] { --ti-plate-shape: var(--ti-plate-keel); --ti-leading-x: 3px; --ti-trailing-x: -3px; }
+.ti-scale [data-ti-plate="aero"] { --ti-plate-shape: var(--ti-plate-aero); --ti-leading-x: -3px; --ti-trailing-x: 4px; }
+.ti-scale [data-ti-plate="prism"] { --ti-plate-shape: var(--ti-plate-prism); --ti-leading-x: 4px; --ti-trailing-x: -2px; }
+.ti-scale [data-ti-plate="truss"] { --ti-plate-shape: var(--ti-plate-truss); --ti-leading-x: -2px; --ti-trailing-x: 3px; }
+
+.ti-scale .os-card[data-ti-plate] {
+  overflow: visible;
+  border-color: transparent;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  transition: none;
+}
+.ti-scale .os-card[data-ti-plate] > :not(.os-card__chassis) {
+  position: relative;
+  z-index: 2;
+}
+.ti-scale .os-card[data-ti-plate]::before,
+.ti-scale .os-card[data-ti-plate]::after { content: none; }
+.ti-scale .os-card__chassis {
+  position: absolute;
+  z-index: 0;
+  inset: -1px;
+  display: block;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--os-line-strong);
+  clip-path: var(--ti-plate-shape);
+  transform: none;
+  transform-origin: 50% 70%;
+}
+.ti-scale .os-card__chassis > i { position: absolute; display: block; pointer-events: none; }
+.ti-scale .os-card__face {
+  z-index: 0;
+  inset: 1px;
+  background:
+    radial-gradient(circle at calc(100% - 13px) 13px, rgba(72,78,84,.78) 0 1px, rgba(255,255,255,.96) 1.5px 2.6px, transparent 3px),
+    linear-gradient(122deg, rgba(255,255,255,.93), rgba(255,254,250,.98) 46%, rgba(211,214,216,.48) 100%),
+    var(--os-surface-1);
+  clip-path: var(--ti-plate-shape);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.94);
+}
+.ti-scale .os-card__facet {
+  z-index: 1;
+  opacity: .72;
+  background: linear-gradient(142deg, rgba(255,255,255,.78), rgba(130,137,143,.16));
+  transform: translate3d(0,0,0);
+}
+.ti-scale .os-card__facet--leading {
+  top: 1px;
+  left: 1px;
+  width: min(34%, 180px);
+  height: 54px;
+  clip-path: polygon(0 0, 100% 0, 73% 100%, 13% 78%);
+}
+.ti-scale .os-card__facet--trailing {
+  right: 1px;
+  bottom: 1px;
+  width: min(29%, 150px);
+  height: 64px;
+  background: linear-gradient(132deg, rgba(105,112,119,.05), rgba(91,98,104,.2));
+  clip-path: polygon(30% 0, 100% 18%, 100% 100%, 0 100%);
+}
+.ti-scale .os-card__fastener {
+  z-index: 3;
+  top: 10px;
+  right: 10px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(78,84,90,.58);
+  background: linear-gradient(90deg, transparent 42%, rgba(62,68,74,.72) 43% 57%, transparent 58%);
+  transform: rotate(45deg);
+}
+.ti-scale .os-card__specular-seam {
+  z-index: 2;
+  top: -20%;
+  bottom: -20%;
+  left: -16%;
+  width: 34%;
+  opacity: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.88) 46% 52%, transparent);
+  transform: translate3d(-150%,0,0) skewX(-16deg);
+}
+
+/* Mission intake is a high-churn command surface: every policy adjustment is
+   reflected immediately in the contract summary. Keep its titanium geometry
+   on the paint plane instead of resizing a full-card clipped compositor layer
+   for each represented option. Static corner rails preserve the mechanical
+   silhouette without weakening any surrounding animated module. */
+.ti-scale .os-contract-form > .os-card[data-ti-plate] {
+  border: 1px solid var(--os-line-strong);
+  border-radius: 0;
+  background: var(--os-surface-1);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.92), var(--os-shadow-card);
+}
+.ti-scale .os-contract-form > .os-card[data-ti-plate] > .os-card__chassis { display: none; }
+.ti-scale .os-contract-form > .os-card[data-ti-plate]::before,
+.ti-scale .os-contract-form > .os-card[data-ti-plate]::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  width: 34px;
+  height: 14px;
+  pointer-events: none;
+}
+.ti-scale .os-contract-form > .os-card[data-ti-plate]::before {
+  top: -2px;
+  right: -2px;
+  border-top: 2px solid var(--os-text-secondary);
+  border-right: 2px solid var(--os-text-secondary);
+}
+.ti-scale .os-contract-form > .os-card[data-ti-plate]::after {
+  bottom: -2px;
+  left: -2px;
+  border-bottom: 2px solid var(--os-text-secondary);
+  border-left: 2px solid var(--os-text-secondary);
+}
+
+/* Journey and readiness surfaces use the same tokenized chassis shape while
+   preserving their existing, unclipped semantic DOM. */
+.ti-scale :is(.os-journey-card, .os-readiness-band)[data-ti-plate] {
+  position: relative;
+  isolation: isolate;
+  overflow: visible;
+  border-color: transparent;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  transition: none;
+}
+.ti-scale :is(.os-journey-card, .os-readiness-band)[data-ti-plate] > * { position: relative; z-index: 2; }
+.ti-scale :is(.os-journey-card, .os-readiness-band)[data-ti-plate]::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset: -1px;
+  width: auto;
+  height: auto;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at calc(100% - 13px) 13px, rgba(72,78,84,.7) 0 1px, rgba(255,255,255,.96) 1.5px 2.6px, transparent 3px),
+    linear-gradient(142deg, rgba(255,255,255,.96), rgba(255,254,250,.98) 52%, rgba(190,195,199,.42)),
+    var(--os-line-strong);
+  clip-path: var(--ti-plate-shape);
+  opacity: 1;
+  transform: translate3d(0,0,0);
+  transform-origin: 50% 70%;
+}
+.ti-scale :is(.os-journey-card, .os-readiness-band)[data-ti-plate]::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset: -12% auto -12% -18%;
+  width: 28%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.86) 48% 53%, transparent);
+  clip-path: none;
+  opacity: 0;
+  transform: translate3d(-150%,0,0) skewX(-16deg);
+}
+
+/* The hover response is deliberately finite and layout-neutral: the chassis
+   rises, two facets shear by two-to-four pixels, the fastener turns a quarter
+   revolution, and one specular seam crosses before reversing deterministically. */
+@media (hover: hover) and (pointer: fine) {
+  .ti-scale[data-motion-state="active"] .os-card[data-ti-plate]:hover,
+  .ti-scale[data-motion-state="active"] :is(.os-journey-card, .os-readiness-band)[data-ti-plate]:hover {
+    border-color: transparent;
+    box-shadow: none;
+    transform: none;
+  }
+  .ti-scale[data-motion-state="active"] .os-card__chassis,
+  .ti-scale[data-motion-state="active"] .os-card__facet,
+  .ti-scale[data-motion-state="active"] .os-card__fastener,
+  .ti-scale[data-motion-state="active"] .os-card__specular-seam,
+  .ti-scale[data-motion-state="active"] :is(.os-journey-card, .os-readiness-band)[data-ti-plate]::before,
+  .ti-scale[data-motion-state="active"] :is(.os-journey-card, .os-readiness-band)[data-ti-plate]::after {
+    transition-property: transform, opacity;
+    transition-duration: 320ms;
+    transition-timing-function: var(--os-ease-mechanical);
+  }
+  .ti-scale[data-motion-state="active"] .os-card[data-ti-plate]:hover .os-card__chassis,
+  .ti-scale[data-motion-state="active"] :is(.os-journey-card, .os-readiness-band)[data-ti-plate]:hover::before {
+    transform: translate3d(0,-3px,0);
+  }
+  .ti-scale[data-motion-state="active"] .os-card[data-ti-plate]:hover .os-card__facet--leading {
+    opacity: .94;
+    transform: translate3d(var(--ti-leading-x),-2px,0);
+  }
+  .ti-scale[data-motion-state="active"] .os-card[data-ti-plate]:hover .os-card__facet--trailing {
+    opacity: .92;
+    transform: translate3d(var(--ti-trailing-x),2px,0);
+  }
+  .ti-scale[data-motion-state="active"] .os-card[data-ti-plate]:hover .os-card__fastener { transform: rotate(135deg); }
+  .ti-scale[data-motion-state="active"] .os-card[data-ti-plate]:hover .os-card__specular-seam,
+  .ti-scale[data-motion-state="active"] :is(.os-journey-card, .os-readiness-band)[data-ti-plate]:hover::after {
+    opacity: .78;
+    transform: translate3d(520%,0,0) skewX(-16deg);
+  }
+}
+
+@keyframes ti-select-calibrate { to { transform: translateY(-50%) rotate(180deg); } }
+
+@media (max-width: 640px) {
+  .ti-scale .os-titanium-select__listbox { width: 100%; max-width: calc(100vw - 2rem); }
+  .ti-scale .os-titanium-select__listbox[data-positioning="sheet"] {
+    inset: max(1rem, env(safe-area-inset-top)) 1rem auto 1rem;
+    max-height: calc(100dvh - 2rem);
+    transform-origin: 50% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ti-scale .os-titanium-select__listbox,
+  .ti-scale .os-titanium-select.is-loading .os-titanium-select__mechanism { animation: none !important; }
+  .ti-scale .os-card__chassis,
+  .ti-scale .os-card__facet,
+  .ti-scale .os-card__fastener,
+  .ti-scale .os-card__specular-seam,
+  .ti-scale :is(.os-journey-card, .os-readiness-band)[data-ti-plate]::before,
+  .ti-scale :is(.os-journey-card, .os-readiness-band)[data-ti-plate]::after {
+    transition: none !important;
+  }
+  .ti-scale[data-motion-state] .os-card[data-ti-plate]:hover,
+  .ti-scale[data-motion-state] :is(.os-journey-card, .os-readiness-band)[data-ti-plate]:hover,
+  .ti-scale[data-motion-state] .os-card[data-ti-plate]:hover .os-card__chassis,
+  .ti-scale[data-motion-state] .os-card[data-ti-plate]:hover .os-card__facet,
+  .ti-scale[data-motion-state] :is(.os-journey-card, .os-readiness-band)[data-ti-plate]:hover::before {
+    transform: none !important;
+  }
+  .ti-scale[data-motion-state] .os-card[data-ti-plate]:hover .os-card__fastener { transform: rotate(45deg) !important; }
+  .ti-scale[data-motion-state] .os-card[data-ti-plate]:hover .os-card__specular-seam,
+  .ti-scale[data-motion-state] :is(.os-journey-card, .os-readiness-band)[data-ti-plate]:hover::after { opacity: 0 !important; transform: none !important; }
+}

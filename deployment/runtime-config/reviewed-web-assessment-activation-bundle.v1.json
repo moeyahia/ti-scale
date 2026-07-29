@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "ti-scale.reviewed-web-assessment-activation-bundle.v1",
+  "bundleVersion": "reviewed-web-assessment-2026.07.20-v1",
+  "serviceUnit": "ti-scale.service",
+  "installRoot": "/etc/ti-scale/runtime/bundles",
+  "dropInDirectory": "/etc/systemd/system/ti-scale.service.d",
+  "dropInName": "70-reviewed-web-assessment.conf",
+  "environment": {
+    "sourcePath": "deployment/runtime-config/reviewed-web-assessment-activation-environment.v1.conf",
+    "installName": "activation-environment.v1.conf",
+    "sha256": "fb6a67dab85ae66c7befe0c9e045aba33e830b5f57d25b1533d014454bef4a5e",
+    "sourceMode": 420,
+    "installMode": 288
+  },
+  "dropIn": {
+    "sourcePath": "deployment/systemd/ti-scale.service.d/70-reviewed-web-assessment.conf",
+    "sha256": "5e0b819fb487b6b3345b8cd36748cccc670c0f3dada139faeb01367f790f0aa6",
+    "sourceMode": 420,
+    "installMode": 420
+  },
+  "rollbackReceiptName": "rollback-receipt.v1.json",
+  "activationRequires": [
+    "systemctl daemon-reload",
+    "systemctl restart ti-scale.service",
+    "authenticated capability readiness verification"
+  ]
+}

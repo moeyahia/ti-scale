@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "ti-scale.engagement-workspace-mappings.v1",
+  "mappingVersion": "standalone-workspaces-2026.07.19",
+  "mappings": [
+    {
+      "logicalRoot": "/engagements",
+      "runtimeRoot": "/var/lib/ti-scale/workspaces/engagements"
+    }
+  ]
+}
+

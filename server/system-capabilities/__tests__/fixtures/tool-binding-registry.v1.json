@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "ti-scale.tool-binding-registry.v1",
+  "registryVersion": "fixture-2026.07.18",
+  "bindings": [
+    {
+      "toolId": "kali:curl",
+      "executablePath": "/usr/bin/curl",
+      "probeArguments": ["--version"],
+      "expectedExitCodes": [0],
+      "timeoutMs": 2000,
+      "maximumOutputBytes": 16384,
+      "ttlMs": 60000
+    },
+    {
+      "toolId": "kali:nmap",
+      "executablePath": "/usr/bin/nmap",
+      "probeArguments": ["--version"],
+      "expectedExitCodes": [0],
+      "timeoutMs": 2000,
+      "maximumOutputBytes": 16384,
+      "ttlMs": 60000
+    }
+  ]
+}

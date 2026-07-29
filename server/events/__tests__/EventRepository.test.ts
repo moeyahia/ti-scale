@@ -1,0 +1,275 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import {
+  createDatabaseConnection,
+  inImmediateTransaction,
+  migrateDatabase,
+} from "../../db";
+import { EventRepository } from "../EventRepository";
+
+const temporaryDirectories: string[] = [];
+
+function temporaryDirectory(): string {
+  const directory = mkdtempSync(join(tmpdir(), "ti-scale-events-"));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function seedRun(
+  database: ReturnType<typeof createDatabaseConnection>,
+  missionId = "mission-1",
+  runId = "run-1",
+): void {
+  const now = new Date().toISOString();
+  database
+    .prepare(`
+      INSERT INTO missions (
+        id, name, objective, journey, created_by, created_at, updated_at
+      ) VALUES (?, ?, ?, 'autonomous', 'operator', ?, ?)
+    `)
+    .run(missionId, "Authorized mission", "Collect evidence", now, now);
+  database
+    .prepare(`
+      INSERT INTO runs (
+        id, mission_id, journey, status, created_at, updated_at
+      ) VALUES (?, ?, 'autonomous', 'running', ?, ?)
+    `)
+    .run(runId, missionId, now, now);
+}
+
+describe("EventRepository", () => {
+  test("allocates monotonic per-run sequences and writes a durable outbox atomically", () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    try {
+      migrateDatabase(database);
+      seedRun(database);
+      const repository = new EventRepository(database);
+
+      const first = repository.append({
+        id: "event-1",
+        runId: "run-1",
+        eventType: "run.started",
+        actorType: "system",
+        summary: "Autonomous execution started",
+        payload: { phase: "recon" },
+      });
+      const second = repository.append({
+        id: "event-2",
+        runId: "run-1",
+        eventType: "evidence.added",
+        actorType: "agent",
+        actorId: "reconscout",
+        summary: "Recon specialist added unique service evidence",
+        payload: { evidenceDelta: 1 },
+      });
+
+      expect(first.sequence).toBe(1);
+      expect(second.sequence).toBe(2);
+      expect(repository.listAfter("run-1", 1).map((event) => event.id)).toEqual([
+        "event-2",
+      ]);
+
+      const claimed = repository.claimOutbox("publisher-1");
+      expect(claimed).toHaveLength(2);
+      expect(claimed[0]?.attemptCount).toBe(1);
+      expect(claimed[0]?.payload).toMatchObject({
+        runId: "run-1",
+        sequence: 1,
+        journey: "autonomous",
+      });
+      expect(repository.markDelivered(claimed[0]!.id)).toBe(true);
+      expect(
+        repository.markFailed(
+          claimed[1]!.id,
+          "temporary stream outage",
+          new Date(Date.now() + 1_000).toISOString(),
+        ),
+      ).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
+
+  test("rolls back the event and sequence when the outbox write fails", () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    try {
+      migrateDatabase(database);
+      seedRun(database);
+      const repository = new EventRepository(database);
+      database.exec(`
+        CREATE TRIGGER reject_test_outbox
+        BEFORE INSERT ON event_outbox BEGIN
+          SELECT RAISE(ABORT, 'test outbox failure');
+        END;
+      `);
+
+      expect(() =>
+        repository.append({
+          runId: "run-1",
+          eventType: "test.failed",
+          actorType: "system",
+          summary: "This transaction must roll back",
+        }),
+      ).toThrow("test outbox failure");
+      expect(
+        (database.prepare("SELECT COUNT(*) AS count FROM events").get() as { count: number })
+          .count,
+      ).toBe(0);
+      expect(
+        (
+          database
+            .prepare("SELECT COUNT(*) AS count FROM run_event_sequences")
+            .get() as { count: number }
+        ).count,
+      ).toBe(0);
+
+      database.exec("DROP TRIGGER reject_test_outbox");
+      const persisted = repository.append({
+        runId: "run-1",
+        eventType: "test.recovered",
+        actorType: "system",
+        summary: "Outbox recovered",
+      });
+      expect(persisted.sequence).toBe(1);
+    } finally {
+      database.close();
+    }
+  });
+
+  test("coordinates sequences across independent WAL connections", () => {
+    const path = join(temporaryDirectory(), "events.sqlite");
+    const firstDatabase = createDatabaseConnection({ filename: path });
+    migrateDatabase(firstDatabase);
+    seedRun(firstDatabase);
+    const secondDatabase = createDatabaseConnection({
+      filename: path,
+      fileMustExist: true,
+    });
+    try {
+      const firstRepository = new EventRepository(firstDatabase);
+      const secondRepository = new EventRepository(secondDatabase);
+      const sequences: number[] = [];
+      for (let index = 0; index < 20; index += 1) {
+        const repository = index % 2 === 0 ? firstRepository : secondRepository;
+        sequences.push(
+          repository.append({
+            id: `event-${index}`,
+            runId: "run-1",
+            eventType: "test.sequence",
+            actorType: "worker",
+            actorId: `worker-${index % 2}`,
+            summary: `Allocated sequence ${index + 1}`,
+          }).sequence,
+        );
+      }
+      expect(sequences).toEqual(Array.from({ length: 20 }, (_, index) => index + 1));
+    } finally {
+      secondDatabase.close();
+      firstDatabase.close();
+    }
+  });
+
+  test("repairs a stale allocator after a production-shaped atomic result event", () => {
+    const path = join(temporaryDirectory(), "result-events.sqlite");
+    const runtimeDatabase = createDatabaseConnection({ filename: path });
+    migrateDatabase(runtimeDatabase);
+    seedRun(runtimeDatabase);
+    const resultDatabase = createDatabaseConnection({
+      filename: path,
+      fileMustExist: true,
+    });
+    try {
+      const repository = new EventRepository(runtimeDatabase);
+      expect(repository.append({
+        id: "event-action-authorized",
+        runId: "run-1",
+        eventType: "action.authorized",
+        actorType: "worker",
+        summary: "The reviewed action was authorized",
+      }).sequence).toBe(1);
+
+      // Production result verifiers historically committed immutable evidence
+      // and its semantic event atomically using MAX(sequence) + 1. That event
+      // is valid, but it does not advance the repository's allocation row.
+      inImmediateTransaction(resultDatabase, () => {
+        const next = resultDatabase.prepare(`
+          SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
+          FROM events WHERE run_id = ?
+        `).get("run-1") as { readonly sequence: number };
+        resultDatabase.prepare(`
+          INSERT INTO events (
+            id, mission_id, run_id, sequence, event_type, occurred_at,
+            actor_type, actor_id, summary, payload_json, schema_version,
+            journey, sensitivity, redaction_json, created_at
+          ) VALUES (
+            'event-cve-result', 'mission-1', 'run-1', ?,
+            'autonomous_cve_applicability_completed', ?,
+            'agent', 'vuln-intel', 'CVE applicability evidence committed',
+            '{}', 1, 'autonomous', 'private', '{}', ?
+          )
+        `).run(next.sequence, "2026-07-23T05:17:50.526Z", "2026-07-23T05:17:50.526Z");
+      });
+
+      expect(
+        (runtimeDatabase.prepare(`
+          SELECT last_sequence FROM run_event_sequences WHERE run_id = ?
+        `).get("run-1") as { readonly last_sequence: number }).last_sequence,
+      ).toBe(1);
+
+      const accepted = repository.append({
+        id: "event-action-completed",
+        runId: "run-1",
+        eventType: "action.completed",
+        actorType: "worker",
+        summary: "The durable result was accepted",
+      });
+      expect(accepted.sequence).toBe(3);
+      expect(repository.listAfter("run-1").map(({ sequence }) => sequence)).toEqual([1, 2, 3]);
+      expect(
+        (runtimeDatabase.prepare(`
+          SELECT last_sequence FROM run_event_sequences WHERE run_id = ?
+        `).get("run-1") as { readonly last_sequence: number }).last_sequence,
+      ).toBe(3);
+    } finally {
+      resultDatabase.close();
+      runtimeDatabase.close();
+    }
+  });
+
+  test("rejects mission and journey mismatches before persisting", () => {
+    const database = createDatabaseConnection({ filename: ":memory:" });
+    try {
+      migrateDatabase(database);
+      seedRun(database);
+      const repository = new EventRepository(database);
+      expect(() =>
+        repository.append({
+          runId: "run-1",
+          missionId: "another-mission",
+          eventType: "invalid.mission",
+          actorType: "system",
+          summary: "Invalid mission",
+        }),
+      ).toThrow("does not match");
+      expect(() =>
+        repository.append({
+          runId: "run-1",
+          journey: "guided",
+          eventType: "invalid.journey",
+          actorType: "system",
+          summary: "Invalid journey",
+        }),
+      ).toThrow("does not match");
+    } finally {
+      database.close();
+    }
+  });
+});
