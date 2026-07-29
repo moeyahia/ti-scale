@@ -43,6 +43,7 @@ interface ConfigurationRow {
 
 interface PreferenceRow {
   readonly id: string;
+  readonly assignment_purpose: ModelAssignmentPurpose;
   readonly scope_type: ModelPreferenceScopeType;
   readonly scope_id: string;
   readonly agent_id: string | null;
@@ -139,6 +140,7 @@ function configuration(row: ConfigurationRow): StoredModelConfiguration {
 function preference(row: PreferenceRow): ModelAssignmentPreference {
   return {
     id: row.id,
+    purpose: row.assignment_purpose,
     scopeType: row.scope_type,
     scopeId: row.scope_id,
     agentId: row.agent_id,
@@ -181,7 +183,7 @@ const CONFIGURATION_SELECT = `
 `;
 
 const PREFERENCE_SELECT = `
-  SELECT id, scope_type, scope_id, agent_id, primary_configuration_id,
+  SELECT id, assignment_purpose, scope_type, scope_id, agent_id, primary_configuration_id,
     fallback_configuration_id, resolution_reason, version, created_by, created_at
   FROM model_assignment_preferences
 `;
@@ -313,6 +315,10 @@ export class ModelConfigurationRepository {
   listPreferences(filters: ModelPreferenceFilters = {}): ModelAssignmentPreference[] {
     const clauses = ["is_current = 1"];
     const values: string[] = [];
+    if (filters.purpose) {
+      clauses.push("assignment_purpose = ?");
+      values.push(filters.purpose);
+    }
     if (filters.scopeType) {
       clauses.push("scope_type = ?");
       values.push(filters.scopeType);
@@ -337,13 +343,15 @@ export class ModelConfigurationRepository {
     scopeType: ModelPreferenceScopeType,
     scopeId: string,
     agentId: string | null,
+    purpose: ModelAssignmentPurpose = "execution",
   ): ModelAssignmentPreference | null {
     const row = this.database.prepare(`
       ${PREFERENCE_SELECT}
       WHERE scope_type = ? AND scope_id = ?
         AND agent_id IS ?
+        AND assignment_purpose = ?
         AND is_current = 1
-    `).get(scopeType, scopeId, agentId) as PreferenceRow | undefined;
+    `).get(scopeType, scopeId, agentId, purpose) as PreferenceRow | undefined;
     return row ? preference(row) : null;
   }
 
@@ -352,6 +360,7 @@ export class ModelConfigurationRepository {
     actorId: string,
   ): ModelAssignmentPreference {
     return inImmediateTransaction(this.database, () => {
+      const purpose = input.purpose ?? "execution";
       const lineage = this.scopeLineage(
         input.scopeType,
         input.scopeId,
@@ -365,6 +374,7 @@ export class ModelConfigurationRepository {
         input.scopeType,
         input.scopeId,
         input.agentId,
+        purpose,
       );
       const actualVersion = current?.version ?? 0;
       if (actualVersion !== input.expectedVersion) {
@@ -378,13 +388,14 @@ export class ModelConfigurationRepository {
       const id = `modelpref_${randomUUID()}`;
       this.database.prepare(`
         INSERT INTO model_assignment_preferences (
-          id, scope_type, scope_id, agent_id, mission_id, run_id, step_id,
+          id, assignment_purpose, scope_type, scope_id, agent_id, mission_id, run_id, step_id,
           primary_configuration_id, fallback_configuration_id,
           version, active, is_current, supersedes_preference_id,
           resolution_reason, created_by, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?)
       `).run(
         id,
+        purpose,
         input.scopeType,
         input.scopeId,
         input.agentId,
@@ -403,6 +414,7 @@ export class ModelConfigurationRepository {
         input.scopeType,
         input.scopeId,
         input.agentId,
+        purpose,
       );
       if (!created || created.id !== id) {
         throw new Error("Model preference was not committed as the current version");
@@ -414,6 +426,7 @@ export class ModelConfigurationRepository {
   resolvePreference(
     agentId: string,
     context: ScopeLineage,
+    purpose: ModelAssignmentPurpose = "execution",
   ): ModelAssignmentPreference | null {
     this.assertAgent(agentId);
     this.validateContext(context);
@@ -434,6 +447,7 @@ export class ModelConfigurationRepository {
         scopeType,
         scopeId,
         preferenceAgentId,
+        purpose,
       );
       if (current) return current;
     }
@@ -491,6 +505,12 @@ export class ModelConfigurationRepository {
       };
       this.assertAgent(input.agentId);
       this.validateContext(context);
+      const purpose = input.purpose ?? "execution";
+      if (preferenceValue.purpose !== purpose) {
+        throw modelConfigurationScopeConflict(
+          `A ${preferenceValue.purpose} preference cannot create a ${purpose} model assignment`,
+        );
+      }
       const now = this.clock().toISOString();
       const id = `modelassign_${randomUUID()}`;
       this.database.prepare(`
@@ -507,7 +527,7 @@ export class ModelConfigurationRepository {
         context.missionId,
         context.runId,
         context.stepId,
-        input.purpose ?? "execution",
+        purpose,
         preferenceValue.primaryConfigurationId,
         preferenceValue.fallbackConfigurationId,
         preferenceValue.scopeType,

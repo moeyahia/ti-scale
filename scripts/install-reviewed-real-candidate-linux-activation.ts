@@ -44,6 +44,7 @@ export function reviewedRealCandidateLinuxActivationUsage(): string {
     "  --source-trust-root <absolute-directory>",
     "  --profile-path <absolute-path> --profile-sha256 <sha256>",
     "  --adapter-path <absolute-path> --adapter-sha256 <sha256>",
+    "  --procedure-path <absolute-path> --procedure-sha256 <sha256>",
     "  --broker-path <absolute-path> --broker-sha256 <sha256>",
     "  --register-path <absolute-path> --register-sha256 <sha256>",
     "",
@@ -51,9 +52,12 @@ export function reviewedRealCandidateLinuxActivationUsage(): string {
     `  ${REVIEWED_REAL_CANDIDATE_LINUX_PRODUCTION_PATHS.adapterExecutable}`,
     `  ${REVIEWED_REAL_CANDIDATE_LINUX_PRODUCTION_PATHS.adapterSocket}`,
     "",
-    "install is forward-only, creates no backup, refuses every existing",
-    "destination, and never reloads, enables, starts, or restarts systemd.",
+    "install is forward-only, creates no backup, and treats an exact verified",
+    "reinstall as a no-op. Partial or changed destinations are rejected. It",
+    "never reloads, enables, starts, or restarts systemd.",
     "Registration and both live attestations remain separate explicit steps.",
+    "Use candidate-linux:activate-reviewed-real for the coupled, verified",
+    "forward-only registration/start/restart sequence.",
   ].join("\n");
 }
 
@@ -111,6 +115,8 @@ export function parseReviewedRealCandidateLinuxActivationArguments(
     "--profile-sha256",
     "--adapter-path",
     "--adapter-sha256",
+    "--procedure-path",
+    "--procedure-sha256",
     "--broker-path",
     "--broker-sha256",
     "--register-path",
@@ -165,6 +171,11 @@ export function parseReviewedRealCandidateLinuxActivationArguments(
       profileSha256: requiredHash(values, "--profile-sha256"),
       adapterExecutablePath: requiredAbsolute(values, "--adapter-path"),
       adapterExecutableSha256: requiredHash(values, "--adapter-sha256"),
+      procedureExecutablePath: requiredAbsolute(values, "--procedure-path"),
+      procedureExecutableSha256: requiredHash(
+        values,
+        "--procedure-sha256",
+      ),
       brokerExecutablePath: requiredAbsolute(values, "--broker-path"),
       brokerExecutableSha256: requiredHash(values, "--broker-sha256"),
       registerExecutablePath: requiredAbsolute(values, "--register-path"),

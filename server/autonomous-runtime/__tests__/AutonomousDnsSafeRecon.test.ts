@@ -6,6 +6,7 @@ import {
 import type { RuntimeProjectionInput } from "../../app/RuntimeProjectionService";
 import type { ExecutionResult, ExecutionResultReceipt } from "../../command-runtime";
 import { createDatabaseConnection, migrateDatabase, type SqliteDatabase } from "../../db";
+import { OperationalTruthService } from "../../intelligence-v24";
 import {
   LOCAL_PROCESS_INVOCATION_SCHEMA_VERSION,
   LocalToolCapabilityManifest,
@@ -19,6 +20,7 @@ import {
   REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION,
   type DurableAction,
 } from "../../orchestration";
+import { ReconDigitalTwinService } from "../../run-intelligence";
 import type {
   SpecialistToolInvocation,
   SpecialistToolInvocationResultSink,
@@ -28,6 +30,7 @@ import {
   AUTONOMOUS_DNS_SAFE_RECON_ACTION_CLASS,
   AUTONOMOUS_DNS_SAFE_RECON_ADAPTER_ID,
   AUTONOMOUS_DNS_SAFE_RECON_TOOL_ID,
+  AutonomousReconTopologyProjector,
   AutonomousDnsLocalProcessExecutionFactory,
   AutonomousDnsEvidenceVerifier,
   AutonomousDnsSpecialistAdapter,
@@ -682,6 +685,42 @@ describe("Autonomous DNS Safe Recon", () => {
       .get(action.id)).toEqual({ count: 1 });
     expect(db.prepare("SELECT COUNT(*) AS count FROM observations WHERE step_id = ?")
       .get(STEP_ID)).toEqual({ count: 1 });
+    const graph = new ReconDigitalTwinService(db).getGraph(MISSION_ID, RUN_ID);
+    expect(graph.nodes).toHaveLength(2);
+    expect(graph.edges).toHaveLength(1);
+    const domain = graph.nodes.find(({ nodeType }) => nodeType === "domain")!;
+    const address = graph.nodes.find(({ nodeType }) => nodeType === "asset")!;
+    expect(domain).toMatchObject({
+      primaryLabel: TARGET,
+      scopeStatus: "allowed",
+      verificationState: "verified",
+      properties: { dnsRecordType: "A", dnsNoRecord: false, answerCount: 1 },
+    });
+    expect(address).toMatchObject({
+      primaryLabel: "192.0.2.10",
+      scopeStatus: "unknown",
+      verificationState: "verified",
+      properties: { contactAuthorityGrantedByDnsObservation: false },
+    });
+    expect(graph.edges[0]).toMatchObject({
+      sourceNodeId: domain.id,
+      targetNodeId: address.id,
+      edgeType: "resolves_to",
+      verificationState: "verified",
+    });
+    expect(graph.nodes.every(({ evidence }) =>
+      evidence.some(({ evidenceId: linked }) => linked === evidenceId))).toBeTrue();
+    expect(JSON.stringify(graph)).not.toContain(`${TARGET} has address`);
+    expect(db.prepare(`
+      SELECT osi_layer, category, value, derivation, evidence_id
+      FROM asset_layer_observations WHERE asset_node_id = ?
+    `).get(address.id)).toEqual({
+      osi_layer: 3,
+      category: "dns.a_record",
+      value: `${TARGET} → 192.0.2.10`,
+      derivation: "observed",
+      evidence_id: evidenceId,
+    });
 
     new ActionRepository(db).complete({
       actionId: action.id,
@@ -736,6 +775,12 @@ describe("Autonomous DNS Safe Recon", () => {
     expect(duplicate.duplicate).toBe(true);
     expect(db.prepare("SELECT COUNT(*) AS count FROM evidence WHERE action_id = ?")
       .get(action.id)).toEqual({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM topology_nodes").get())
+      .toEqual({ count: 2 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM topology_edges").get())
+      .toEqual({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM asset_layer_observations").get())
+      .toEqual({ count: 1 });
   });
 
   test("safe-stops an overlapping prohibited target before creating evidence", () => {
@@ -769,6 +814,69 @@ describe("Autonomous DNS Safe Recon", () => {
       .get(action.id)).toEqual({ count: 0 });
     expect(db.prepare("SELECT severity FROM engagement_log_records WHERE action_id = ?")
       .get(action.id)).toEqual({ severity: "error" });
+  });
+
+  test("keeps an attributable DNS observation observation-only without canonical verified evidence", () => {
+    const db = database();
+    const action = seed(db);
+    const truth = new OperationalTruthService(db, { clock: () => NOW });
+    const log = truth.appendEngagementLog({
+      missionId: MISSION_ID,
+      runId: RUN_ID,
+      planId: PLAN_ID,
+      stepId: STEP_ID,
+      actionId: action.id,
+      agentId: AGENT_ID,
+      severity: "notice",
+      domain: "autonomous_dns_safe_recon",
+      recordType: "bounded_dns_process_output",
+      humanSummary: "Attributable DNS output retained without verified evidence.",
+      technicalPayload: {
+        stdout: `${TARGET} has address 192.0.2.10`,
+        rawProcessOutputPromoted: false,
+      },
+      sensitivity: "private",
+      occurredAt: NOW.toISOString(),
+    });
+    const observation = truth.createObservation({
+      missionId: MISSION_ID,
+      runId: RUN_ID,
+      stepId: STEP_ID,
+      observationType: "dns_record_query",
+      statement: "The exact DNS A query returned one parsed answer.",
+      normalizedValue: {
+        schemaVersion: "ti-scale.autonomous-dns-evidence-verifier.v1",
+        queryName: TARGET,
+        recordType: "A",
+        noRecord: false,
+        answerCount: 1,
+        answers: [{ kind: "address", value: "192.0.2.10" }],
+        actionId: action.id,
+        toolCallId: "tool-observation-only",
+        toolId: AUTONOMOUS_DNS_SAFE_RECON_TOOL_ID,
+        outputSha256: "9".repeat(64),
+      },
+      confidence: 0.95,
+      verificationState: "unverified",
+      sourceAgentId: AGENT_ID,
+      sourceTool: AUTONOMOUS_DNS_SAFE_RECON_TOOL_ID,
+      firstSeenAt: NOW.toISOString(),
+      lastSeenAt: NOW.toISOString(),
+      sensitivity: "private",
+      sources: [{
+        logRecordId: log.id,
+        parserId: "test-observation-only",
+        parserVersion: "1.0.0",
+      }],
+    });
+    expect(new AutonomousReconTopologyProjector(db).project(observation, []))
+      .toMatchObject({ status: "skipped", reason: "evidence_not_verified" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM topology_nodes").get())
+      .toEqual({ count: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM topology_edges").get())
+      .toEqual({ count: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM asset_layer_observations").get())
+      .toEqual({ count: 0 });
   });
 
   test("safe-stops contradictory negative and positive DNS output instead of promoting it", () => {

@@ -77,7 +77,7 @@ Every schema migration therefore runs as a bounded forward-only transaction:
 bun run db:migrate --db /var/lib/ti-scale/data/ti-scale.sqlite
 ```
 
-The legacy paired `--no-backup --acknowledge-no-backup-risk` spelling remains
+The compatibility spelling `--no-backup --acknowledge-no-backup-risk` remains
 accepted for command compatibility. `--backup-dir` is rejected. The migration
 either commits the new schema or leaves the original transaction intact; after
 commit, recovery is forward-only. The content-free release journal records
@@ -154,13 +154,36 @@ Interrupted historical
 and recoverable with their original `legacyIdentitySha256` commitment; that
 compatibility path is never used when creating a new release.
 
-The active deployment path accepts the canonical schema-60 database and can
-activate a new schema-60 application/static release without manufacturing a
-database migration. That database phase is an integrity-checked, attested
-no-op. Because an unchanged schema cannot identify which release owns the
-application and static pointers, recovery uses the durable target-commit
-record: an interruption before that record restores the prior pointers, while
-an interruption after it completes the exact committed target forward.
+The active deployment path accepts the exact canonical schema-60 source
+database and migrates it forward to the selected source tree's canonical
+migration ceiling (schema 63 for this activation). The controller derives that
+ceiling from the ordered migration registry and requires the independently
+staged release attestation to match it byte-for-byte. Recovery classifies every
+committed schema from 61 through 63 as forward-only: an interruption before the
+first schema commit restores the prior pointers, while an interruption after
+any schema commit completes the exact committed target forward. Historical
+schema-47-to-60 and schema-60-to-60 receipts remain recoverable using the
+immutable schema boundary recorded in those receipts; they do not alter the
+target of a new release.
+
+Candidate Linux activation files are not treated as a backup payload or as a
+side effect of application-pointer publication. Their separate forward-only
+installer accepts an exact repeated bundle as a verified no-op and rejects
+partial or changed destinations. Once its application drop-in is installed,
+Ti-Scale is systemd-bound to a fully notified broker; application startup
+cannot pass through a missing, skipped, timed-out, or unattested candidate
+transport dependency.
+
+Use `bun run candidate-linux:activate-reviewed-real -- inspect ...` for the
+read-only source and installed-file check. Use
+`bun run candidate-linux:activate-reviewed-real -- activate --execute
+--confirmation ACTIVATE_TI_SCALE_REVIEWED_REAL_CANDIDATE_LINUX_ON_3132 ...`
+for the explicit forward-only registration, systemd reload, ordered
+adapter/broker activation, Ti-Scale restart, broker attestation, and live
+health/readiness/authentication proof. This command creates no backup or
+rollback payload and is restricted to the pinned Ti-Scale service and reviewed
+candidate dependencies. Exact pins and receipt semantics are documented in
+[`reviewed-real-candidate-linux-activation.md`](reviewed-real-candidate-linux-activation.md).
 
 ## Environment
 

@@ -62,7 +62,10 @@ it does not weaken exact revalidation for any included file.
 
 ## Knowledge projection contract
 
-`attack-knowledge-only` suppresses the legacy per-engagement mission, run, asset, artifact, target, IP, and per-file Brain projection. It creates a private source inventory and allows the bounded semantic extractor to create reusable candidates such as:
+`attack-knowledge-only` suppresses the full historical per-engagement mission,
+run, asset, artifact, target, IP, and per-file Brain projection. It creates a
+private source inventory and allows the bounded semantic extractor to create
+reusable candidates such as:
 
 - product and application version fingerprints;
 - kernel or operating-system family/version observations;

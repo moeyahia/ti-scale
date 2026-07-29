@@ -47,10 +47,10 @@ export function createLocalSessionRouter(options: LocalSessionRouterOptions): Ro
         status: 503,
         code: "ti_scale_authentication_unconfigured",
         message: "Ti-Scale operator authentication is not configured",
-        humanMessage: "This isolated Ti-Scale preview is not ready for sign-in.",
+        humanMessage: "Ti-Scale is not ready for sign-in.",
         retryable: false,
         category: "authentication_missing",
-        remediation: "Set TI_SCALE_OPERATOR_TOKEN to a private value of at least 24 bytes and restart only V2.",
+        remediation: "Set TI_SCALE_OPERATOR_TOKEN to a private value of at least 24 bytes and restart Ti-Scale.",
       });
       return;
     }
@@ -63,7 +63,7 @@ export function createLocalSessionRouter(options: LocalSessionRouterOptions): Ro
         humanMessage: "The local operator token was not accepted.",
         retryable: false,
         category: "authentication_missing",
-        remediation: "Use the private token configured for this isolated Ti-Scale process.",
+        remediation: "Use the private operator token configured for Ti-Scale.",
       });
       return;
     }

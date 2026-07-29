@@ -26,9 +26,14 @@ ss -ltnp | grep ':3132'
 
 ## A mission says execution is unavailable
 
-Read `/api/v2/system/readiness`. The default server has no attached production provider or tool execution adapter, so Autonomous execution and agent-run Guided steps return a structured `503`.
+Read `/api/v2/system/readiness` and locate the exact provider, specialist,
+MCP, or local-tool binding required by the action. A structured `503` means
+that requested path is absent, stale, incompatible, or not authorized; it does
+not imply that every Guided or Autonomous capability is unavailable.
 
-This response is intentional when the adapter is absent. Do not replace it with fixture progress. Attach and attest the provider, specialist, policy, cancellation, and tool boundaries, then rerun readiness.
+This response is intentional when the required binding cannot pass readiness.
+Do not replace it with fixture progress. Attach or repair the exact provider,
+specialist, policy, cancellation, and tool boundaries, then rerun readiness.
 
 ## A run is blocked
 

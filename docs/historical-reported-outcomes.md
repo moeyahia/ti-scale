@@ -23,7 +23,7 @@ source files or inspect raw logs. Accepted signals are deliberately narrow:
 
 - typed operational-hazard outcome records;
 - typed `outcome` facts with `reportedOutcome` or `reportedStatus`;
-- the legacy compiler shape `{status, verification: "candidate"}`.
+- the earlier compiler shape `{status, verification: "candidate"}`.
 
 Titles, summaries, nearby graph nodes, filenames, target names, IP addresses,
 and free-form keyword matches do not classify an outcome. A bundle must retain

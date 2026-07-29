@@ -96,7 +96,10 @@ export default defineConfig({
   // never run against this managed invocation's disposable database/Vault.
   // Keeping the file in the audited browser inventory while excluding it
   // here preserves test-policy coverage without fabricating live state.
-  testIgnore: "live-readonly-3132.spec.ts",
+  testIgnore: [
+    "live-readonly-3132.spec.ts",
+    "live-autonomous-3132.spec.ts",
+  ],
   globalSetup: "./tests/e2e/globalSetup.ts",
   globalTeardown: "./tests/e2e/globalTeardown.ts",
   outputDir: `./test-results/playwright/${evidenceRunId}`,

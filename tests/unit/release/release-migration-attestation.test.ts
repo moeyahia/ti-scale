@@ -14,6 +14,12 @@ import {
   attestReleaseMigrationCeiling,
 } from "../../../scripts/release/ReleaseMigrationAttestation";
 import { stageServerRelease } from "../../../scripts/release/FunctionalReleasePrimitives";
+import {
+  attestedNoBackupForwardSchemas,
+  NO_BACKUP_SOURCE_SCHEMA,
+  NO_BACKUP_TARGET_SCHEMA,
+} from "../../../scripts/release/NoBackupPreviewRelease";
+import { DATABASE_MIGRATIONS } from "../../../server/db/migrations";
 
 const roots: string[] = [];
 
@@ -66,15 +72,33 @@ function createMigrationSource(count: number): string {
 }
 
 describe("release migration ceiling attestation", () => {
-  test("selects a schema-37 source independently of the schema-60 controller checkout", () => {
+  test("selects a schema-37 source independently of the canonical controller ceiling", () => {
     const controller = attestReleaseMigrationCeiling(process.cwd());
     const selectedSource = attestReleaseMigrationCeiling(createMigrationSource(37));
+    const canonicalTarget = DATABASE_MIGRATIONS.at(-1);
+    if (!canonicalTarget) throw new Error("Canonical migration registry is empty");
 
-    expect(controller.targetSchema).toBe(60);
-    expect(controller.migrationCount).toBe(60);
+    expect(controller.targetSchema).toBe(NO_BACKUP_TARGET_SCHEMA);
+    expect(controller.targetSchema).toBe(canonicalTarget.version);
+    expect(controller.migrationCount).toBe(DATABASE_MIGRATIONS.length);
     expect(selectedSource.targetSchema).toBe(37);
     expect(selectedSource.migrationCount).toBe(37);
     expect(selectedSource.attestationSha256).not.toBe(controller.attestationSha256);
+  });
+
+  test("attests every exact forward migration from schema 60 to the canonical ceiling", () => {
+    const controller = attestReleaseMigrationCeiling(process.cwd());
+    const expectedForwardSchemas = Array.from(
+      { length: NO_BACKUP_TARGET_SCHEMA - NO_BACKUP_SOURCE_SCHEMA },
+      (_, index) => NO_BACKUP_SOURCE_SCHEMA + index + 1,
+    );
+
+    expect(controller.targetSchema).toBe(NO_BACKUP_TARGET_SCHEMA);
+    expect(attestedNoBackupForwardSchemas(
+      controller,
+      NO_BACKUP_SOURCE_SCHEMA,
+      NO_BACKUP_TARGET_SCHEMA,
+    )).toEqual(expectedForwardSchemas);
   });
 
   test("accepts an exact staged copy and rejects content drift after source attestation", () => {

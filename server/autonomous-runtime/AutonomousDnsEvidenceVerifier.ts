@@ -31,6 +31,7 @@ import {
   type AutonomousDnsRecordType,
   type AutonomousDnsSafeReconConfiguration,
 } from "./AutonomousDnsSafeRecon";
+import { AutonomousReconTopologyProjector } from "./AutonomousReconTopologyProjector";
 
 export const AUTONOMOUS_DNS_EVIDENCE_VERIFIER_SCHEMA_VERSION =
   "ti-scale.autonomous-dns-evidence-verifier.v1" as const;
@@ -264,6 +265,7 @@ export class AutonomousDnsEvidenceVerifier {
   readonly #now: () => Date;
   readonly #tool: NonNullable<ReturnType<LocalToolCapabilityManifest["resolve"]>>;
   readonly #actions: ActionRepository;
+  readonly #topology: AutonomousReconTopologyProjector;
 
   constructor(private readonly options: AutonomousDnsEvidenceVerifierOptions) {
     this.#configuration = validateAutonomousDnsSafeReconConfiguration(
@@ -273,6 +275,7 @@ export class AutonomousDnsEvidenceVerifier {
     this.#tool = options.manifest.resolve(AUTONOMOUS_DNS_SAFE_RECON_TOOL_ID)!;
     this.#now = options.now ?? (() => new Date());
     this.#actions = new ActionRepository(options.database);
+    this.#topology = new AutonomousReconTopologyProjector(options.database);
   }
 
   private receiptKey(invocationId: string): string {
@@ -723,6 +726,13 @@ export class AutonomousDnsEvidenceVerifier {
           || receipt.invocationId !== invocation.invocationId
           || receipt.outputSha256 !== result.outputSha256
         ) throw new Error("Autonomous DNS evidence receipt conflicts with this result");
+        if (receipt.observationId && receipt.evidenceId) {
+          const observation = new OperationalTruthService(
+            this.options.database,
+            { clock: this.#now },
+          ).repository.getObservation(receipt.observationId);
+          this.#topology.project(observation, [receipt.evidenceId]);
+        }
         return {
           executionResult: receipt.executionResult,
           logRecordId: receipt.logRecordId,
@@ -933,6 +943,7 @@ export class AutonomousDnsEvidenceVerifier {
         details: { observationId: observation.id, logRecordId: log.id, criterionId, rawOutputPromoted: false },
         occurredAt: createdAt,
       });
+      this.#topology.project(observation, [evidenceId]);
       const executionResult: ExecutionResult = {
         actionId: invocation.action.id,
         runId: invocation.action.runId,

@@ -25,6 +25,9 @@ import {
   sep,
 } from "node:path";
 import type { SqliteDatabase } from "../../server/db";
+import type {
+  CandidateLinuxTargetScope,
+} from "../../server/autonomous-runtime/CandidateLinuxTargetScope";
 import {
   CANDIDATE_LINUX_TRANSPORT_BINDING_MANIFEST_SCHEMA_VERSION,
   CANDIDATE_LINUX_TRANSPORT_PROTOCOL_VERSION,
@@ -37,7 +40,7 @@ import {
 } from "../../server/autonomous-runtime";
 
 export const REVIEWED_REAL_CANDIDATE_LINUX_ACTIVATION_SCHEMA_VERSION =
-  "ti-scale.reviewed-real-candidate-linux-activation-bundle.v1" as const;
+  "ti-scale.reviewed-real-candidate-linux-activation-bundle.v3" as const;
 export const REVIEWED_REAL_CANDIDATE_LINUX_PRODUCTION_DATABASE_PATH =
   "/var/lib/ti-scale/data/ti-scale.sqlite" as const;
 
@@ -55,6 +58,8 @@ export interface ReviewedRealCandidateLinuxActivationPaths {
   readonly brokerEnvironment: string;
   readonly runtimeEnvironment: string;
   readonly adapterExecutable: string;
+  readonly procedureTrustRoot: string;
+  readonly procedureExecutable: string;
   readonly brokerExecutable: string;
   readonly registerExecutable: string;
   readonly adapterSocket: string;
@@ -70,7 +75,7 @@ ReviewedRealCandidateLinuxActivationPaths = Object.freeze({
   profile: "/etc/ti-scale/candidate-linux-reviewed/profile.v1.json",
   manifest: "/etc/ti-scale/candidate-linux-reviewed/manifest.v1.json",
   receipt:
-    "/etc/ti-scale/candidate-linux-reviewed/installation-receipt.v1.json",
+    "/etc/ti-scale/candidate-linux-reviewed/installation-receipt.v2.json",
   adapterEnvironment:
     "/etc/ti-scale/reviewed-real-candidate-linux-adapter.env",
   brokerEnvironment:
@@ -79,6 +84,10 @@ ReviewedRealCandidateLinuxActivationPaths = Object.freeze({
     "/etc/ti-scale/reviewed-real-candidate-linux-runtime.env",
   adapterExecutable:
     "/usr/local/libexec/ti-scale/reviewed-real-candidate-linux-adapter",
+  procedureTrustRoot:
+    "/var/lib/ti-scale-candidate-linux-reviewed/procedures",
+  procedureExecutable:
+    "/usr/local/libexec/ti-scale/reviewed-real-candidate-linux-procedure",
   brokerExecutable:
     "/usr/local/libexec/ti-scale/reviewed-real-candidate-linux-broker",
   registerExecutable:
@@ -101,6 +110,8 @@ export interface ReviewedRealCandidateLinuxSourceInput {
   readonly profileSha256: string;
   readonly adapterExecutablePath: string;
   readonly adapterExecutableSha256: string;
+  readonly procedureExecutablePath: string;
+  readonly procedureExecutableSha256: string;
   readonly brokerExecutablePath: string;
   readonly brokerExecutableSha256: string;
   readonly registerExecutablePath: string;
@@ -120,7 +131,11 @@ export interface ReviewedRealCandidateLinuxSourceAuthority {
   readonly postExploitSpecId: string;
   readonly postExploitSpecSha256: string;
   readonly bindingId: string;
-  readonly sourceSpecState: "registered" | "ready_for_registration";
+  /**
+   * Stable installation fact. Registration is an idempotent runtime/database
+   * transition and must not change the byte identity of the installed bundle.
+   */
+  readonly sourceSpecIdentityVerified: true;
 }
 
 export interface ReviewedRealCandidateLinuxActivationReceipt {
@@ -134,11 +149,18 @@ export interface ReviewedRealCandidateLinuxActivationReceipt {
   readonly servicesStarted: false;
   readonly candidateClass: "reviewed_real_candidate_v1";
   readonly realTargetSupport: true;
+  readonly targetScope: CandidateLinuxTargetScope;
   readonly missionExecutionReady: false;
+  readonly conditionalCapability: true;
+  readonly candidateProcedurePresentAtLaunch: true;
+  readonly procedureProviderPresentAtLaunch: true;
+  readonly runScopedProcedureActivationPresentAtLaunch: false;
+  readonly runScopedProcedureTrustRoot: string;
   readonly sourceAuthority: ReviewedRealCandidateLinuxSourceAuthority;
   readonly profile: Readonly<{ path: string; sha256: string }>;
   readonly manifest: Readonly<{ path: string; sha256: string }>;
   readonly adapter: Readonly<{ path: string; sha256: string; socketPath: string }>;
+  readonly procedure: Readonly<{ path: string; sha256: string }>;
   readonly broker: Readonly<{ path: string; sha256: string; socketPath: string }>;
   readonly register: Readonly<{ path: string; sha256: string }>;
   readonly invocationAuthority: Readonly<{
@@ -437,7 +459,7 @@ function inspectSourceAuthority(
     postExploitSpecId: profile.postExploitSpec.id,
     postExploitSpecSha256: expectedSpecSha256,
     bindingId: profile.bindingId,
-    sourceSpecState: registered ? "registered" : "ready_for_registration",
+    sourceSpecIdentityVerified: true,
   });
 }
 
@@ -458,9 +480,11 @@ function assertLayout(
     profile.adapter.executablePath !== resolve(paths.adapterExecutable)
     || profile.adapter.socketPath !== resolve(paths.adapterSocket)
     || profile.adapter.socketGid !== serviceGid
+    || profile.procedure.executablePath
+      !== resolve(paths.procedureExecutable)
   ) {
     throw new Error(
-      "Reviewed profile does not pin the exact installed adapter path, socket, and Ti-Scale group",
+      "Reviewed profile does not pin the exact installed adapter, procedure provider, socket, and Ti-Scale group",
     );
   }
 }
@@ -468,24 +492,33 @@ function assertLayout(
 export function reviewedRealCandidateLinuxSystemdFiles(
   paths: ReviewedRealCandidateLinuxActivationPaths =
     REVIEWED_REAL_CANDIDATE_LINUX_PRODUCTION_PATHS,
+  databasePath: string =
+    REVIEWED_REAL_CANDIDATE_LINUX_PRODUCTION_DATABASE_PATH,
 ): Readonly<{
   adapterService: string;
   brokerService: string;
   applicationDropIn: string;
 }> {
+  const databaseDirectory = dirname(
+    absolutePath(databasePath, "Database path"),
+  );
   const adapterService = [
     "[Unit]",
     "Description=Ti-Scale reviewed real-candidate Linux typed adapter",
     "After=network-online.target",
     "Wants=network-online.target",
+    "PartOf=ti-scale.service",
     "Before=ti-scale-reviewed-candidate-linux-broker.service",
-    `ConditionPathExists=${paths.adapterEnvironment}`,
+    `AssertPathExists=${paths.adapterEnvironment}`,
+    `AssertPathExists=${paths.adapterExecutable}`,
     "",
     "[Service]",
-    "Type=simple",
+    "Type=notify",
+    "NotifyAccess=all",
     "User=ti-scale",
     "Group=ti-scale",
     `EnvironmentFile=${paths.adapterEnvironment}`,
+    `ExecStartPre=/usr/bin/install -d -m 0700 ${paths.procedureTrustRoot}`,
     `ExecStart=${paths.adapterExecutable}`,
     "Restart=on-failure",
     "RestartSec=2s",
@@ -507,7 +540,7 @@ export function reviewedRealCandidateLinuxSystemdFiles(
     "ProtectKernelModules=yes",
     "ProtectKernelTunables=yes",
     "ProtectSystem=strict",
-    "ReadWritePaths=/run/ti-scale-candidate-linux-reviewed /var/lib/ti-scale-candidate-linux-reviewed",
+    `ReadWritePaths=/run/ti-scale-candidate-linux-reviewed /var/lib/ti-scale-candidate-linux-reviewed ${databaseDirectory}`,
     "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
     "RestrictNamespaces=yes",
     "RestrictRealtime=yes",
@@ -530,11 +563,14 @@ export function reviewedRealCandidateLinuxSystemdFiles(
     "Description=Ti-Scale reviewed real-candidate Linux typed transport broker",
     "After=local-fs.target ti-scale-reviewed-candidate-linux-adapter.service",
     "Requires=ti-scale-reviewed-candidate-linux-adapter.service",
+    "PartOf=ti-scale.service",
     "Before=ti-scale.service",
-    `ConditionPathExists=${paths.brokerEnvironment}`,
+    `AssertPathExists=${paths.brokerEnvironment}`,
+    `AssertPathExists=${paths.brokerExecutable}`,
     "",
     "[Service]",
-    "Type=simple",
+    "Type=notify",
+    "NotifyAccess=all",
     "User=ti-scale",
     "Group=ti-scale",
     `EnvironmentFile=${paths.brokerEnvironment}`,
@@ -580,11 +616,14 @@ export function reviewedRealCandidateLinuxSystemdFiles(
   ].join("\n");
   const applicationDropIn = [
     "[Unit]",
-    "Wants=ti-scale-reviewed-candidate-linux-broker.service",
+    "Requires=ti-scale-reviewed-candidate-linux-broker.service",
+    "BindsTo=ti-scale-reviewed-candidate-linux-broker.service",
     "After=ti-scale-reviewed-candidate-linux-broker.service",
+    `AssertPathExists=${paths.runtimeEnvironment}`,
     "",
     "[Service]",
     `EnvironmentFile=${paths.runtimeEnvironment}`,
+    `ReadWritePaths=${paths.procedureTrustRoot}`,
     "",
   ].join("\n");
   return Object.freeze({
@@ -616,6 +655,12 @@ export function prepareReviewedRealCandidateLinuxActivation(
     input.source.adapterExecutableSha256,
     true,
   );
+  const procedureBytes = readPinnedSource(
+    input.source,
+    input.source.procedureExecutablePath,
+    input.source.procedureExecutableSha256,
+    true,
+  );
   const brokerBytes = readPinnedSource(
     input.source,
     input.source.brokerExecutablePath,
@@ -634,6 +679,14 @@ export function prepareReviewedRealCandidateLinuxActivation(
   ) {
     throw new Error(
       "Reviewed adapter executable hash differs from the profile pin",
+    );
+  }
+  if (
+    input.source.procedureExecutableSha256
+      !== loadedProfile.value.procedure.executableSha256
+  ) {
+    throw new Error(
+      "Reviewed procedure provider hash differs from the profile pin",
     );
   }
   assertLayout(
@@ -677,6 +730,7 @@ export function prepareReviewedRealCandidateLinuxActivation(
       handlerProfilePath: paths.profile,
       handlerProfileSha256: loadedProfile.receipt.sourceSha256,
       realTargetSupport: true,
+      targetScope: loadedProfile.value.targetScope,
       operations: reviewedRealCandidateLinuxOperations(),
     }],
   });
@@ -694,7 +748,13 @@ export function prepareReviewedRealCandidateLinuxActivation(
       servicesStarted: false,
       candidateClass: "reviewed_real_candidate_v1",
       realTargetSupport: true,
+      targetScope: loadedProfile.value.targetScope,
       missionExecutionReady: false,
+      conditionalCapability: true,
+      candidateProcedurePresentAtLaunch: true,
+      procedureProviderPresentAtLaunch: true,
+      runScopedProcedureActivationPresentAtLaunch: false,
+      runScopedProcedureTrustRoot: paths.procedureTrustRoot,
       sourceAuthority,
       profile: Object.freeze({
         path: paths.profile,
@@ -708,6 +768,10 @@ export function prepareReviewedRealCandidateLinuxActivation(
         path: paths.adapterExecutable,
         sha256: input.source.adapterExecutableSha256,
         socketPath: paths.adapterSocket,
+      }),
+      procedure: Object.freeze({
+        path: paths.procedureExecutable,
+        sha256: input.source.procedureExecutableSha256,
       }),
       broker: Object.freeze({
         path: paths.brokerExecutable,
@@ -727,7 +791,10 @@ export function prepareReviewedRealCandidateLinuxActivation(
         cancellation: "abort_signal_and_lease_fence_required",
       }),
     });
-  const systemd = reviewedRealCandidateLinuxSystemdFiles(paths);
+  const systemd = reviewedRealCandidateLinuxSystemdFiles(
+    paths,
+    input.databasePath,
+  );
   const databasePath = absolutePath(input.databasePath, "Database path");
   const profileBytes = readPinnedSource(
     input.source,
@@ -739,6 +806,12 @@ export function prepareReviewedRealCandidateLinuxActivation(
     {
       path: paths.adapterExecutable,
       bytes: adapterBytes,
+      mode: 0o550,
+      gid: input.serviceGid,
+    },
+    {
+      path: paths.procedureExecutable,
+      bytes: procedureBytes,
       mode: 0o550,
       gid: input.serviceGid,
     },
@@ -778,6 +851,8 @@ export function prepareReviewedRealCandidateLinuxActivation(
         `TI_SCALE_CANDIDATE_LINUX_TRUST_ROOT=${paths.trustRoot}`,
         `TI_SCALE_CANDIDATE_LINUX_PROFILE_PATH=${paths.profile}`,
         `TI_SCALE_CANDIDATE_LINUX_PROFILE_SHA256=${loadedProfile.receipt.sourceSha256}`,
+        `TI_SCALE_CANDIDATE_LINUX_PROCEDURE_TRUST_ROOT=${paths.procedureTrustRoot}`,
+        `TI_SCALE_DATABASE_PATH=${databasePath}`,
         "",
       ].join("\n")),
       mode: 0o440,
@@ -801,6 +876,7 @@ export function prepareReviewedRealCandidateLinuxActivation(
         `TI_SCALE_AUTONOMOUS_LINUX_TRANSPORT_TRUST_ROOT=${paths.trustRoot}`,
         `TI_SCALE_AUTONOMOUS_LINUX_TRANSPORT_MANIFEST_PATH=${paths.manifest}`,
         `TI_SCALE_AUTONOMOUS_LINUX_TRANSPORT_MANIFEST_SHA256=${manifestSha256}`,
+        `TI_SCALE_AUTONOMOUS_LINUX_PROCEDURE_TRUST_ROOT=${paths.procedureTrustRoot}`,
         "",
       ].join("\n")),
       mode: 0o440,
@@ -881,6 +957,26 @@ function verifyInstalledFile(
   }
 }
 
+function verifyInstalledTrustRoot(
+  paths: ReviewedRealCandidateLinuxActivationPaths,
+  ownerUid: number,
+  serviceGid: number,
+): void {
+  const metadata = lstatSync(paths.trustRoot);
+  if (
+    metadata.isSymbolicLink()
+    || !metadata.isDirectory()
+    || metadata.uid !== ownerUid
+    || metadata.gid !== serviceGid
+    || (metadata.mode & 0o7777) !== 0o750
+    || realpathSync(paths.trustRoot) !== paths.trustRoot
+  ) {
+    throw new Error(
+      "Installed reviewed real-candidate trust root identity drifted",
+    );
+  }
+}
+
 function syncInstalledFile(path: string): void {
   const descriptor = openSync(path, constants.O_RDONLY | NO_FOLLOW);
   try { fsyncSync(descriptor); }
@@ -900,9 +996,10 @@ function syncDirectory(path: string): void {
  * Forward-only file publication for one separately reviewed candidate.
  *
  * It performs no database mutation, systemd reload, enable, start, restart,
- * socket call, target contact, or backup. Existing destinations are an error;
- * a failed invocation removes only files and the empty trust root created by
- * that same invocation.
+ * socket call, target contact, or backup. A repeated installation of the exact
+ * same owner-, mode-, and hash-pinned bundle is a verified no-op. Partial,
+ * changed, or unowned destinations are an error; a failed first invocation
+ * removes only files and the empty trust root created by that invocation.
  */
 export class ReviewedRealCandidateLinuxActivationInstaller {
   constructor(private readonly input: ReviewedRealCandidateLinuxActivationInput) {}
@@ -916,10 +1013,30 @@ export class ReviewedRealCandidateLinuxActivationInstaller {
     const prepared = this.prepare();
     const paths = this.input.paths
       ?? REVIEWED_REAL_CANDIDATE_LINUX_PRODUCTION_PATHS;
-    if (existsSync(paths.trustRoot)) {
-      throw new Error(
-        "Reviewed real-candidate trust root already exists; forward-only installation refuses replacement",
+    const trustRootExists = existsSync(paths.trustRoot);
+    const existingFiles = prepared.files.filter((file) =>
+      existsSync(file.path));
+    if (trustRootExists || existingFiles.length > 0) {
+      if (
+        !trustRootExists
+        || existingFiles.length !== prepared.files.length
+      ) {
+        throw new Error(
+          "Reviewed real-candidate installation is partial or conflicts with the forward-only bundle",
+        );
+      }
+      verifyInstalledTrustRoot(
+        paths,
+        ownerUid,
+        this.input.serviceGid,
       );
+      for (const file of prepared.files) {
+        if (dirname(file.path) !== paths.trustRoot) {
+          assertDestinationParent(file.path, ownerUid);
+        }
+        verifyInstalledFile(file, ownerUid);
+      }
+      return prepared.receipt;
     }
     for (const file of prepared.files) {
       if (existsSync(file.path)) {
@@ -975,7 +1092,17 @@ export class ReviewedRealCandidateLinuxActivationInstaller {
   verifyInstalled(): ReviewedRealCandidateLinuxActivationReceipt {
     const ownerUid = this.input.installedOwnerUid ?? 0;
     const prepared = this.prepare();
+    const paths = this.input.paths
+      ?? REVIEWED_REAL_CANDIDATE_LINUX_PRODUCTION_PATHS;
+    verifyInstalledTrustRoot(
+      paths,
+      ownerUid,
+      this.input.serviceGid,
+    );
     for (const file of prepared.files) {
+      if (dirname(file.path) !== paths.trustRoot) {
+        assertDestinationParent(file.path, ownerUid);
+      }
       verifyInstalledFile(file, ownerUid);
     }
     return prepared.receipt;

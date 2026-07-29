@@ -6,6 +6,7 @@ interface VisualBaselineRecord {
   readonly sourceFile: string;
   readonly testId: string;
   readonly carrierTitle: string;
+  readonly project: string;
 }
 
 interface VisualBaselineRegistry {
@@ -29,11 +30,12 @@ const registry = JSON.parse(
 ) as VisualBaselineRegistry;
 const carriers = [...new Map(
   registry.baselines.map((baseline) => [
-    `${baseline.sourceFile}\u0000${baseline.carrierTitle}`,
+    `${baseline.sourceFile}\u0000${baseline.carrierTitle}\u0000${baseline.project}`,
     Object.freeze({
       sourceFile: baseline.sourceFile,
       testId: baseline.testId,
       carrierTitle: baseline.carrierTitle,
+      project: baseline.project,
     }),
   ]),
 ).values()];
@@ -66,7 +68,7 @@ for (let index = 0; index < carriers.length; index += 1) {
     "run",
     runner,
     "--config=playwright.config.ts",
-    "--project=chromium-1440",
+    `--project=${carrier.project}`,
     "--workers=1",
     "--retries=0",
     "--update-snapshots=none",

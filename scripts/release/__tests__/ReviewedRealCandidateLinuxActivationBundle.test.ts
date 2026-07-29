@@ -9,15 +9,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { createDatabaseConnection, type SqliteDatabase } from "../../../server/db";
 import {
   REVIEWED_REAL_CANDIDATE_LINUX_ADAPTER_PROTOCOL_VERSION,
+  REVIEWED_REAL_CANDIDATE_LINUX_PROCEDURE_PROTOCOL_VERSION,
   REVIEWED_REAL_CANDIDATE_LINUX_PROFILE_SCHEMA_VERSION,
   candidateLinuxPostExploitSpecificationHash,
   reviewedRealCandidateLinuxOperations,
 } from "../../../server/autonomous-runtime";
+import {
+  exactCandidateLinuxTargetScope,
+} from "../../../server/autonomous-runtime/CandidateLinuxTargetScope";
 import {
   parseReviewedRealCandidateLinuxActivationArguments,
   reviewedRealCandidateLinuxActivationUsage,
@@ -50,6 +54,27 @@ afterEach(() => {
 
 function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function registerFixtureSpec(database: SqliteDatabase): void {
+  const specHash = candidateLinuxPostExploitSpecificationHash({
+    exploitOutcomeObserverSpecId: OBSERVER_ID,
+    scriptArtifactId: SCRIPT_ID,
+    scriptContentHash: SCRIPT_HASH,
+    transportType: "candidate_runtime_session_v1",
+    transportBindingId: BINDING_ID,
+    transportOrigin: null,
+    expectedPrincipal: "operator",
+    expectedUid: 1_000,
+    declaredUserFlagPath: "/home/operator/user.txt",
+  });
+  database.prepare(`
+    INSERT INTO candidate_linux_post_exploit_specs VALUES (
+      ?, ?, ?, 'candidate_runtime_session_v1', ?, NULL,
+      'operator', 1000, '/home/operator/user.txt', '/root/root.txt',
+      ?, 'active'
+    )
+  `).run(SPEC_ID, OBSERVER_ID, SCRIPT_ID, BINDING_ID, specHash);
 }
 
 function createDatabase(registered = false): SqliteDatabase {
@@ -127,26 +152,7 @@ function createDatabase(registered = false): SqliteDatabase {
     INSERT INTO exploit_outcome_observer_specs
     VALUES (?, ?, ?, 'active')
   `).run(OBSERVER_ID, SCRIPT_ID, SCRIPT_HASH);
-  if (registered) {
-    const specHash = candidateLinuxPostExploitSpecificationHash({
-      exploitOutcomeObserverSpecId: OBSERVER_ID,
-      scriptArtifactId: SCRIPT_ID,
-      scriptContentHash: SCRIPT_HASH,
-      transportType: "candidate_runtime_session_v1",
-      transportBindingId: BINDING_ID,
-      transportOrigin: null,
-      expectedPrincipal: "operator",
-      expectedUid: 1_000,
-      declaredUserFlagPath: "/home/operator/user.txt",
-    });
-    database.prepare(`
-      INSERT INTO candidate_linux_post_exploit_specs VALUES (
-        ?, ?, ?, 'candidate_runtime_session_v1', ?, NULL,
-        'operator', 1000, '/home/operator/user.txt', '/root/root.txt',
-        ?, 'active'
-      )
-    `).run(SPEC_ID, OBSERVER_ID, SCRIPT_ID, BINDING_ID, specHash);
-  }
+  if (registered) registerFixtureSpec(database);
   return database;
 }
 
@@ -178,6 +184,8 @@ function fixture(registered = false): Readonly<{
     brokerEnvironment: join(destination, "env", "broker.env"),
     runtimeEnvironment: join(destination, "env", "runtime.env"),
     adapterExecutable: join(destination, "bin", "adapter"),
+    procedureTrustRoot: join(root, "state", "procedures"),
+    procedureExecutable: join(destination, "bin", "procedure"),
     brokerExecutable: join(destination, "bin", "broker"),
     registerExecutable: join(destination, "bin", "register"),
     adapterSocket: join(root, "run", "adapter.sock"),
@@ -188,11 +196,18 @@ function fixture(registered = false): Readonly<{
   });
   const adapterPath = join(sourceRoot, "candidate-adapter");
   const brokerPath = join(sourceRoot, "candidate-broker");
+  const procedurePath = join(sourceRoot, "candidate-procedure");
   const registerPath = join(sourceRoot, "candidate-register");
   writeFileSync(adapterPath, "#!/bin/false\nreviewed adapter\n", { mode: 0o500 });
+  writeFileSync(
+    procedurePath,
+    "#!/bin/false\nreviewed typed candidate procedure\n",
+    { mode: 0o500 },
+  );
   writeFileSync(brokerPath, "#!/bin/false\nreviewed broker\n", { mode: 0o500 });
   writeFileSync(registerPath, "#!/bin/false\nreviewed register\n", { mode: 0o500 });
   const adapterHash = sha256(readFileSync(adapterPath));
+  const procedureHash = sha256(readFileSync(procedurePath));
   const specHash = candidateLinuxPostExploitSpecificationHash({
     exploitOutcomeObserverSpecId: OBSERVER_ID,
     scriptArtifactId: SCRIPT_ID,
@@ -209,6 +224,7 @@ function fixture(registered = false): Readonly<{
     profileId: "profile.reviewed-real.install-test",
     candidateClass: "reviewed_real_candidate_v1",
     realTargetSupport: true,
+    targetScope: exactCandidateLinuxTargetScope("127.0.0.1"),
     bindingId: BINDING_ID,
     postExploitSpec: {
       id: SPEC_ID,
@@ -227,6 +243,12 @@ function fixture(registered = false): Readonly<{
       socketGid: SERVICE_GID,
       protocolVersion:
         REVIEWED_REAL_CANDIDATE_LINUX_ADAPTER_PROTOCOL_VERSION,
+    },
+    procedure: {
+      executablePath: paths.procedureExecutable,
+      executableSha256: procedureHash,
+      protocolVersion:
+        REVIEWED_REAL_CANDIDATE_LINUX_PROCEDURE_PROTOCOL_VERSION,
     },
     boundary: {
       typedOperationsOnly: true,
@@ -261,6 +283,8 @@ function fixture(registered = false): Readonly<{
         profileSha256: sha256(profileBytes),
         adapterExecutablePath: adapterPath,
         adapterExecutableSha256: adapterHash,
+        procedureExecutablePath: procedurePath,
+        procedureExecutableSha256: sha256(readFileSync(procedurePath)),
         brokerExecutablePath: brokerPath,
         brokerExecutableSha256: sha256(readFileSync(brokerPath)),
         registerExecutablePath: registerPath,
@@ -289,17 +313,55 @@ describe("reviewed real-candidate Linux activation bundle", () => {
       "utf8",
     )).toBe(generated.applicationDropIn);
     expect(generated.adapterService).toContain("NoNewPrivileges=yes");
+    expect(generated.adapterService).toContain("Type=notify");
+    expect(generated.adapterService).toContain("NotifyAccess=all");
+    expect(generated.adapterService).toContain("PartOf=ti-scale.service");
+    expect(generated.adapterService).toContain(
+      `AssertPathExists=${REVIEWED_REAL_CANDIDATE_LINUX_PRODUCTION_PATHS.adapterExecutable}`,
+    );
     expect(generated.adapterService).toContain(
       "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
     );
+    expect(generated.adapterService).toContain(
+      "ReadWritePaths=/run/ti-scale-candidate-linux-reviewed /var/lib/ti-scale-candidate-linux-reviewed /var/lib/ti-scale/data",
+    );
+    expect(generated.brokerService).toContain("Type=notify");
+    expect(generated.brokerService).toContain("NotifyAccess=all");
     expect(generated.brokerService).toContain(
       "RestrictAddressFamilies=AF_UNIX",
     );
     expect(generated.brokerService).toContain(
       "Requires=ti-scale-reviewed-candidate-linux-adapter.service",
     );
+    expect(generated.applicationDropIn).toContain(
+      "Requires=ti-scale-reviewed-candidate-linux-broker.service",
+    );
+    expect(generated.applicationDropIn).toContain(
+      "BindsTo=ti-scale-reviewed-candidate-linux-broker.service",
+    );
+    expect(generated.applicationDropIn).not.toContain(
+      "Wants=ti-scale-reviewed-candidate-linux-broker.service",
+    );
     expect(`${generated.adapterService}${generated.brokerService}`)
       .not.toMatch(/ExecStart=.*(?:sh|bash)\s/u);
+    const adapterEntrypoint = readFileSync(
+      "server/autonomous-runtime/reviewed-real-candidate-linux-adapter-cli.ts",
+      "utf8",
+    );
+    expect(adapterEntrypoint.indexOf(
+      "await startReviewedRealCandidateLinuxAdapter",
+    )).toBeLessThan(
+      adapterEntrypoint.indexOf("notifySystemdServiceReady("),
+    );
+    const brokerEntrypoint = readFileSync(
+      "server/autonomous-runtime/reviewed-real-candidate-linux-broker-cli.ts",
+      "utf8",
+    );
+    expect(
+      brokerEntrypoint.indexOf("await registry.attest("),
+    ).toBeLessThan(
+      brokerEntrypoint.indexOf("notifySystemdServiceReady("),
+    );
   });
 
   test("prepares and publishes only exact owner-controlled files, never activation", () => {
@@ -313,11 +375,21 @@ describe("reviewed real-candidate Linux activation bundle", () => {
       systemdReloaded: false,
       servicesStarted: false,
       realTargetSupport: true,
+      targetScope: exactCandidateLinuxTargetScope("127.0.0.1"),
       missionExecutionReady: false,
+      conditionalCapability: true,
+      candidateProcedurePresentAtLaunch: true,
+      procedureProviderPresentAtLaunch: true,
+      runScopedProcedureActivationPresentAtLaunch: false,
+      runScopedProcedureTrustRoot: paths.procedureTrustRoot,
       sourceAuthority: {
-        sourceSpecState: "registered",
+        sourceSpecIdentityVerified: true,
         contractHash: CONTRACT_HASH,
         bindingId: BINDING_ID,
+      },
+      procedure: {
+        path: paths.procedureExecutable,
+        sha256: input.source.procedureExecutableSha256,
       },
       invocationAuthority: {
         exactTarget: "current_canonical_action_only",
@@ -333,21 +405,71 @@ describe("reviewed real-candidate Linux activation bundle", () => {
     expect(readFileSync(paths.registerExecutable)).toEqual(
       readFileSync(input.source.registerExecutablePath),
     );
-    expect(() => installer.install()).toThrow(
-      "forward-only installation refuses replacement",
+    expect(readFileSync(paths.procedureExecutable)).toEqual(
+      readFileSync(input.source.procedureExecutablePath),
     );
+    expect(readFileSync(paths.adapterEnvironment, "utf8")).toContain(
+      `TI_SCALE_CANDIDATE_LINUX_PROCEDURE_TRUST_ROOT=${paths.procedureTrustRoot}`,
+    );
+    expect(readFileSync(paths.adapterEnvironment, "utf8")).toContain(
+      `TI_SCALE_DATABASE_PATH=${input.databasePath}`,
+    );
+    expect(readFileSync(paths.adapterService, "utf8")).toContain(
+      ` ${dirname(input.databasePath)}`,
+    );
+    expect(readFileSync(paths.adapterEnvironment, "utf8")).not.toContain(
+      "TI_SCALE_CANDIDATE_LINUX_PROCEDURE_SHA256",
+    );
+    expect(installer.install()).toEqual(prepared.receipt);
     expect(
       prepared.files.some(({ path }) =>
         /backup|snapshot|rollback/u.test(path)),
     ).toBeFalse();
   });
 
+  test("makes exact reinstall idempotent and rejects a partial destination", () => {
+    const exact = fixture(true);
+    const exactInstaller =
+      new ReviewedRealCandidateLinuxActivationInstaller(exact.input);
+    const receipt = exactInstaller.install();
+    expect(exactInstaller.install()).toEqual(receipt);
+    expect(exactInstaller.verifyInstalled()).toEqual(receipt);
+    chmodSync(dirname(exact.paths.adapterExecutable), 0o777);
+    expect(() => exactInstaller.verifyInstalled()).toThrow(
+      "Installation parent is not owner-controlled",
+    );
+
+    const partial = fixture(true);
+    mkdirSync(partial.paths.trustRoot, { mode: 0o750 });
+    chmodSync(partial.paths.trustRoot, 0o750);
+    expect(() =>
+      new ReviewedRealCandidateLinuxActivationInstaller(
+        partial.input,
+      ).install()
+    ).toThrow("installation is partial or conflicts");
+  });
+
+  test("keeps the installed receipt stable across exact registration and retry", () => {
+    const exact = fixture(false);
+    const installer =
+      new ReviewedRealCandidateLinuxActivationInstaller(exact.input);
+    const beforeRegistration = installer.install();
+    expect(beforeRegistration.sourceAuthority).toMatchObject({
+      sourceSpecIdentityVerified: true,
+      postExploitSpecId: SPEC_ID,
+      bindingId: BINDING_ID,
+    });
+    registerFixtureSpec(exact.input.database);
+    expect(installer.verifyInstalled()).toEqual(beforeRegistration);
+    expect(installer.install()).toEqual(beforeRegistration);
+  });
+
   test("validates the DB lineage and recomputed spec before any destination write", () => {
     const { input, paths } = fixture();
     expect(
       prepareReviewedRealCandidateLinuxActivation(input)
-        .receipt.sourceAuthority.sourceSpecState,
-    ).toBe("ready_for_registration");
+        .receipt.sourceAuthority.sourceSpecIdentityVerified,
+    ).toBeTrue();
     input.database.prepare(`
       UPDATE script_artifacts SET content_hash = ?
       WHERE id = ?
@@ -372,6 +494,8 @@ describe("reviewed real-candidate Linux activation bundle", () => {
       "--profile-sha256", hash,
       "--adapter-path", "/root/reviewed-candidate/adapter",
       "--adapter-sha256", hash,
+      "--procedure-path", "/root/reviewed-candidate/procedure",
+      "--procedure-sha256", hash,
       "--broker-path", "/root/reviewed-candidate/broker",
       "--broker-sha256", hash,
       "--register-path", "/root/reviewed-candidate/register",

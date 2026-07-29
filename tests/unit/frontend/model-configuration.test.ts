@@ -6,6 +6,7 @@ import {
   fetchModelConfigurations,
   fetchModelPreferences,
   fetchModelResolution,
+  fetchRunModelAssignments,
   updateModelPreference,
 } from "../../../src/data/api/modelConfiguration";
 import {
@@ -14,6 +15,7 @@ import {
   parseModelPreferenceMutation,
   parseModelPreferences,
   parseModelResolution,
+  parseRunModelAssignments,
 } from "../../../src/domain/schemas/modelConfiguration";
 
 const NOW = "2026-07-23T13:00:00.000Z";
@@ -79,6 +81,7 @@ function configuration(overrides: Record<string, unknown> = {}) {
 function preference(overrides: Record<string, unknown> = {}) {
   return {
     id: "model-preference-recon",
+    purpose: "execution",
     scopeType: "agent",
     scopeId: "recon-scout",
     agentId: "recon-scout",
@@ -97,6 +100,7 @@ function preference(overrides: Record<string, unknown> = {}) {
 function resolution(overrides: Record<string, unknown> = {}) {
   return {
     agentId: "recon-scout",
+    purpose: "execution",
     context: { missionId: null, runId: null, stepId: null },
     source: {
       scopeType: "global",
@@ -132,6 +136,38 @@ function assignmentSemantics() {
     saveEffect: "future_resolutions_only",
     activeRunPinning: "immutable",
     planningRoute: "autonomous_mission_contract",
+  };
+}
+
+function pinnedAssignment(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "assignment-recon-run",
+    agentId: "recon-scout",
+    missionId: "mission-one",
+    runId: "run-one",
+    stepId: null,
+    purpose: "execution",
+    primaryConfigurationId: "configuration-openai-high",
+    fallbackConfigurationId: null,
+    inheritanceLevel: "agent",
+    pinned: true,
+    resolutionReason: "Pinned from the reviewed ReconScout assignment.",
+    resolvedAt: NOW,
+    createdAt: NOW,
+    ...overrides,
+  };
+}
+
+function runModelAssignments(overrides: Record<string, unknown> = {}) {
+  return {
+    schemaVersion: "2.4",
+    activeRunPinning: "immutable",
+    items: [{
+      assignment: pinnedAssignment(),
+      primaryConfiguration: configuration(),
+      fallbackConfiguration: null,
+    }],
+    ...overrides,
   };
 }
 
@@ -224,6 +260,22 @@ describe("model configuration schema boundary", () => {
         agentId: "recon-scout",
       },
     });
+    expect(parseRunModelAssignments(runModelAssignments())).toMatchObject({
+      activeRunPinning: "immutable",
+      items: [{
+        assignment: {
+          agentId: "recon-scout",
+          purpose: "execution",
+          inheritanceLevel: "agent",
+          pinned: true,
+        },
+        primaryConfiguration: {
+          providerId: "openai",
+          modelId: "gpt-5.6",
+        },
+        fallbackConfiguration: null,
+      }],
+    });
   });
 
   test("rejects unsupported enum values, malformed versions, and invalid live catalog fields", () => {
@@ -302,7 +354,7 @@ describe("model configuration schema boundary", () => {
       schemaVersion: "2.4",
       assignmentSemantics: {
         ...assignmentSemantics(),
-        purpose: "planning",
+        purpose: "research",
       },
       resolution: resolution(),
       availability: availability(),
@@ -317,11 +369,28 @@ describe("model configuration schema boundary", () => {
       observedAt: NOW,
       items: [],
     })).toThrow("unsupported Ti-Scale schema version");
+    expect(() => parseRunModelAssignments(runModelAssignments({
+      activeRunPinning: "mutable",
+    }))).toThrow("activeRunPinning is invalid");
+    expect(() => parseRunModelAssignments(runModelAssignments({
+      items: [{
+        assignment: pinnedAssignment({ pinned: false }),
+        primaryConfiguration: configuration(),
+        fallbackConfiguration: null,
+      }],
+    }))).toThrow("assignment.pinned must be true");
+    expect(() => parseRunModelAssignments(runModelAssignments({
+      items: [{
+        assignment: pinnedAssignment({ purpose: "unbounded_reasoning" }),
+        primaryConfiguration: configuration(),
+        fallbackConfiguration: null,
+      }],
+    }))).toThrow("assignment purpose is invalid");
   });
 });
 
 describe("model configuration API client", () => {
-  test("reads the live catalog, exact configurations, scoped preferences, and inherited resolution", async () => {
+  test("reads the live catalog, exact configurations, scoped preferences, inherited resolution, and immutable run pins", async () => {
     responses.push(
       { schemaVersion: "2.4", observedAt: NOW, items: [catalogItem()] },
       { schemaVersion: "2.4", items: [configuration()] },
@@ -332,6 +401,7 @@ describe("model configuration API client", () => {
         resolution: resolution(),
         availability: availability(),
       },
+      runModelAssignments(),
     );
     const signal = new AbortController().signal;
 
@@ -351,12 +421,17 @@ describe("model configuration API client", () => {
       runId: "run/one",
       stepId: "step:one",
     }, signal)).resolution?.source.scopeType).toBe("global");
+    expect((await fetchRunModelAssignments(
+      "run/one",
+      signal,
+    )).items[0]?.assignment.pinned).toBe(true);
 
     expect(calls.map((call) => call.path)).toEqual([
       "/api/v2/model-catalog",
       "/api/v2/model-configurations?ids=configuration%2Fopenai+high%2Cfallback%3Alocal",
       "/api/v2/model-preferences?scopeType=agent&scopeId=recon%2Fscout&agentId=recon-scout",
       "/api/v2/model-resolution?agentId=recon%2Fscout&missionId=mission+one&runId=run%2Fone&stepId=step%3Aone",
+      "/api/v2/runs/run%2Fone/model-assignments",
     ]);
     expect(calls.every((call) => call.init?.method === "GET")).toBe(true);
     expect(calls.every((call) => call.init?.signal === signal)).toBe(true);
@@ -395,6 +470,63 @@ describe("model configuration API client", () => {
       fallbackConfigurationId: "configuration-local-safe",
       expectedVersion: 4,
       reason: "Use the attested tool-capable model for reconnaissance.",
+    });
+  });
+
+  test("sends planning purpose independently for advisory preference and resolution requests", async () => {
+    responses.push(
+      {
+        schemaVersion: "2.4",
+        items: [preference({ purpose: "planning" })],
+      },
+      {
+        schemaVersion: "2.4",
+        assignmentSemantics: {
+          ...assignmentSemantics(),
+          purpose: "planning",
+        },
+        resolution: resolution({ purpose: "planning" }),
+        availability: availability(),
+      },
+      {
+        schemaVersion: "2.4",
+        preference: preference({ purpose: "planning", version: 1 }),
+      },
+    );
+    const signal = new AbortController().signal;
+    expect((await fetchModelPreferences({
+      purpose: "planning",
+      scopeType: "agent",
+      scopeId: "recon-scout",
+      agentId: "recon-scout",
+    }, signal)).items[0]?.purpose).toBe("planning");
+    expect((await fetchModelResolution({
+      purpose: "planning",
+      agentId: "recon-scout",
+    }, signal)).resolution?.purpose).toBe("planning");
+    await updateModelPreference(
+      "agent",
+      "recon-scout",
+      {
+        purpose: "planning",
+        agentId: "recon-scout",
+        primaryConfigurationId: "configuration-openai-high",
+        fallbackConfigurationId: null,
+        expectedVersion: 0,
+        reason: "Use as a reasoning advisor only.",
+      },
+      undefined,
+      "model-preference-agent-advisory-0001",
+    );
+
+    expect(calls.map(({ path }) => path)).toEqual([
+      "/api/v2/model-preferences?purpose=planning&scopeType=agent&scopeId=recon-scout&agentId=recon-scout",
+      "/api/v2/model-resolution?purpose=planning&agentId=recon-scout",
+      "/api/v2/model-preferences/agent/recon-scout",
+    ]);
+    expect(JSON.parse(String(calls[2]?.init?.body))).toMatchObject({
+      purpose: "planning",
+      agentId: "recon-scout",
     });
   });
 });

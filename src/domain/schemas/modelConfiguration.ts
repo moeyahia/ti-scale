@@ -13,6 +13,7 @@ import type {
   ModelPreferencePage,
   ModelPreferenceScope,
   ModelResolutionResult,
+  RunModelAssignmentPage,
 } from "../types/modelConfiguration";
 import {
   array,
@@ -45,13 +46,14 @@ const executionBoundaries = [
   "local_deterministic_policy",
 ] as const;
 const scopes = ["global", "agent", "mission", "run", "step"] as const;
+const purposes = ["execution", "planning"] as const;
 
 function assignmentSemantics(value: unknown): ModelAssignmentSemantics {
   const item = object(value, "model resolution.assignmentSemantics");
   return {
     purpose: oneOf(
       item.purpose,
-      ["execution"] as const,
+      purposes,
       "model resolution assignment purpose",
     ),
     preferenceResolutionOrder: oneOf(
@@ -235,6 +237,11 @@ function preference(value: unknown, label = "model preference"): ModelPreference
   }
   return {
     id: nonEmpty(item.id, `${label}.id`),
+    purpose: oneOf(
+      item.purpose,
+      purposes,
+      `${label}.purpose`,
+    ),
     scopeType: scope(item.scopeType),
     scopeId: nonEmpty(item.scopeId, `${label}.scopeId`),
     agentId: nullableString(item.agentId, `${label}.agentId`),
@@ -339,6 +346,11 @@ export function parseModelResolution(payload: unknown): ModelResolutionResult {
     availability,
     resolution: {
       agentId: nonEmpty(resolution.agentId, "model resolution agentId"),
+      purpose: oneOf(
+        resolution.purpose,
+        purposes,
+        "model resolution purpose",
+      ),
       context: {
         missionId: nullableString(context.missionId, "model resolution missionId"),
         runId: nullableString(context.runId, "model resolution runId"),
@@ -365,5 +377,84 @@ export function parseModelResolution(payload: unknown): ModelResolutionResult {
           ),
       resolvedAt: nonEmpty(resolution.resolvedAt, "model resolution resolvedAt"),
     },
+  };
+}
+
+export function parseRunModelAssignments(payload: unknown): RunModelAssignmentPage {
+  const root = object(payload, "run model assignments");
+  schema(root);
+  const activeRunPinning = oneOf(
+    root.activeRunPinning,
+    ["immutable"] as const,
+    "run model assignments activeRunPinning",
+  );
+  return {
+    schemaVersion: "2.4",
+    activeRunPinning,
+    items: array(root.items, "run model assignments.items").map((value, index) => {
+      const item = object(value, `run model assignments.items[${index}]`);
+      const assignment = object(
+        item.assignment,
+        `run model assignments.items[${index}].assignment`,
+      );
+      const pinned = boolean(
+        assignment.pinned,
+        `run model assignments.items[${index}].assignment.pinned`,
+      );
+      if (!pinned) {
+        throw new Error(
+          `run model assignments.items[${index}].assignment.pinned must be true`,
+        );
+      }
+      return {
+        assignment: {
+          id: nonEmpty(assignment.id, "pinned model assignment id"),
+          agentId: nonEmpty(assignment.agentId, "pinned model assignment agentId"),
+          missionId: nullableString(
+            assignment.missionId,
+            "pinned model assignment missionId",
+          ),
+          runId: nullableString(assignment.runId, "pinned model assignment runId"),
+          stepId: nullableString(assignment.stepId, "pinned model assignment stepId"),
+          purpose: oneOf(
+            assignment.purpose,
+            purposes,
+            "pinned model assignment purpose",
+          ),
+          primaryConfigurationId: nonEmpty(
+            assignment.primaryConfigurationId,
+            "pinned model assignment primaryConfigurationId",
+          ),
+          fallbackConfigurationId: nullableString(
+            assignment.fallbackConfigurationId,
+            "pinned model assignment fallbackConfigurationId",
+          ),
+          inheritanceLevel: scope(assignment.inheritanceLevel),
+          pinned: true as const,
+          resolutionReason: nonEmpty(
+            assignment.resolutionReason,
+            "pinned model assignment resolutionReason",
+          ),
+          resolvedAt: nonEmpty(
+            assignment.resolvedAt,
+            "pinned model assignment resolvedAt",
+          ),
+          createdAt: nonEmpty(
+            assignment.createdAt,
+            "pinned model assignment createdAt",
+          ),
+        },
+        primaryConfiguration: configuration(
+          item.primaryConfiguration,
+          `run model assignments.items[${index}].primaryConfiguration`,
+        ),
+        fallbackConfiguration: item.fallbackConfiguration === null
+          ? null
+          : configuration(
+              item.fallbackConfiguration,
+              `run model assignments.items[${index}].fallbackConfiguration`,
+            ),
+      };
+    }),
   };
 }

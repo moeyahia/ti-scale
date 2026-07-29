@@ -3179,7 +3179,7 @@ export function composeAutonomousDnsActivation(
   const candidateLinuxTransportAttested =
     candidateLinuxTransportReadiness?.status === "ready";
   const candidateLinuxTransportReady =
-    input.candidateLinuxTransport?.missionExecutionReady() === true;
+    input.candidateLinuxTransport?.conditionalPlanningReady() === true;
   if (
     input.candidateLinuxTransportRequired === true
     && !candidateLinuxTransportAttested

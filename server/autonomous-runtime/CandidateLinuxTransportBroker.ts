@@ -15,6 +15,12 @@ import {
   type CandidateLinuxTransportCanonicalAuthorizer,
   type CandidateLinuxTransportRequest,
 } from "./CandidateLinuxTransportBindingRegistry";
+import {
+  candidateLinuxTargetScopeMatches,
+  candidateLinuxTargetScopesEqual,
+  parseCandidateLinuxTargetScope,
+  type CandidateLinuxTargetScope,
+} from "./CandidateLinuxTargetScope";
 
 const MAXIMUM_REQUEST_BYTES = 64 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -46,6 +52,7 @@ export interface CandidateLinuxTransportBindingHandler {
     | "reviewed_real_candidate_v1";
   readonly handlerProfileSha256: string;
   readonly realTargetSupport: boolean;
+  readonly targetScope: CandidateLinuxTargetScope;
   /**
    * Real candidate profiles may accept a current-run specification cloned
    * from their exact source specification. The database authorizer validates
@@ -256,6 +263,7 @@ function validateReviewedRealAdapterAttestation(
     "realTargetSupport",
     "receiptSha256",
     "schemaVersion",
+    "targetScope",
   ], "reviewed real-candidate adapter attestation");
   const boundary = plain(
     raw.boundary,
@@ -284,6 +292,7 @@ function validateReviewedRealAdapterAttestation(
     postExploitSpecId: raw.postExploitSpecId,
     candidateClass: raw.candidateClass,
     realTargetSupport: raw.realTargetSupport,
+    targetScope: raw.targetScope,
     operations,
     boundary: raw.boundary,
     observedAt,
@@ -297,6 +306,10 @@ function validateReviewedRealAdapterAttestation(
     || raw.postExploitSpecId !== binding.postExploitSpecId
     || raw.candidateClass !== "reviewed_real_candidate_v1"
     || raw.realTargetSupport !== true
+    || !candidateLinuxTargetScopesEqual(
+      parseCandidateLinuxTargetScope(raw.targetScope),
+      binding.targetScope,
+    )
     || typeof raw.adapterExecutableSha256 !== "string"
     || !SHA256.test(raw.adapterExecutableSha256)
     || !Array.isArray(operations)
@@ -372,7 +385,11 @@ export async function startCandidateLinuxTransportBroker(input: Readonly<{
       || handlers.get(binding.bindingId)?.handlerProfileSha256
         !== binding.handlerProfileSha256
       || handlers.get(binding.bindingId)?.realTargetSupport
-        !== binding.realTargetSupport)
+        !== binding.realTargetSupport
+      || !candidateLinuxTargetScopesEqual(
+        handlers.get(binding.bindingId)!.targetScope,
+        binding.targetScope,
+      ))
   ) {
     throw new Error(
       "Candidate broker handlers do not exactly match the pinned manifest",
@@ -465,6 +482,7 @@ export async function startCandidateLinuxTransportBroker(input: Readonly<{
                 bindingId: binding.bindingId,
                 candidateClass: binding.candidateClass,
                 realTargetSupport: binding.realTargetSupport,
+                targetScope: binding.targetScope,
               })),
               boundary: input.manifest.boundary,
               grantsMissionExecution: false as const,
@@ -507,6 +525,10 @@ export async function startCandidateLinuxTransportBroker(input: Readonly<{
               && handler.acceptsPostExploitSpecId?.(
                 request.postExploitSpecId,
               ) !== true
+            )
+            || !candidateLinuxTargetScopeMatches(
+              handler.targetScope,
+              request.exactTarget,
             )
           ) {
             throw new Error(

@@ -90,13 +90,12 @@ files. Application/server typecheck, E2E typecheck, and `git diff --check` all
 pass. These are source-quality gates; they do not replace browser activation,
 visual approval, soak evidence, or human release approval.
 
-The most recent recorded complete unit and integration run predates the current
-Windows/identity and SearchSploit expansion: it passed 2,844/2,844 tests across
-464 files with 30,016 assertions in 865.07 seconds, with zero failures and zero
-skips. The earlier focused migration-56 and Research
-mutation-authority rerun passed 15/15 tests with 1,080 assertions. Current
-source and authenticated active health are now at migration 60. These results
-do not close the nine known interaction gaps, four unapproved visual
+The current complete source suite passed 3,095 tests with zero failures and
+zero skips. The earlier focused migration-56 and Research mutation-authority
+rerun passed 15/15 tests with 1,080 assertions. The reviewed source migration
+ceiling is now 63; the last authenticated active-installation observation
+remains at migration 60 until the next reviewed forward activation. These
+results do not close the nine known interaction gaps, four unapproved visual
 candidates, soak period, or human sign-off.
 
 ### Current bounded local-tool intake receipts
@@ -149,16 +148,18 @@ These browser fixtures intercept only the mission-scoped HTTP result. They do no
 
 ### Current bounded visual registry
 
-Nineteen deterministic Chromium 1440 baselines currently provide 55 mappings
-across 54 unique interaction entries. The bounded Autonomous intake baseline
-maps only values and states visible in its final server-normalized review
-receipt; it does not claim visual coverage of the earlier edit controls or
-every option state. The Evidence baseline maps Begin validation only to the
-directly visible persisted non-evidence verification form, not to candidate
-selection, rejection, demotion, or later provenance/custody disclosures. The
-remaining 744 interaction groups have no mapped visual baseline. The registry
-is automated drift evidence only: cross-browser visual approval and human
-release approval remain false until the complete visual gate is reviewed.
+Twenty-one deterministic project-scoped baselines currently provide 57
+mappings across 56 unique interaction entries. Twenty use Chromium 1440 and
+the reduced-motion Recon Digital Twin list uses Android Chromium 390. The
+bounded Autonomous intake baseline maps only values and states visible in its
+final server-normalized review receipt; it does not claim visual coverage of
+the earlier edit controls or every option state. The Evidence baseline maps
+Begin validation only to the directly visible persisted non-evidence
+verification form, not to candidate selection, rejection, demotion, or later
+provenance/custody disclosures. The remaining 768 interaction entries have no
+mapped visual baseline. The registry is automated drift evidence only:
+cross-browser visual approval and human release approval remain false until
+the complete visual gate is reviewed.
 
 Run the registered carrier tests with `bun run test:e2e:visual-registry`. Each
 carrier receives its own disposable database, API process, UI process, and
@@ -258,9 +259,10 @@ A dedicated-worker teardown race found by this run was repaired only in the
 test harness; production application bytes were unchanged. This bounded
 performance result does not replace concurrent-load evidence, the 72-hour
 soak, acceptance testing, approved visuals, or human release sign-off.
-Reviewed source and authenticated active health both report migration 60; that
-schema alignment does not turn the earlier performance receipt into a complete
-current release receipt.
+The reviewed source migration ceiling is 63, while the last authenticated
+active-installation observation remains at migration 60. That deployment drift
+does not turn the earlier performance receipt into a complete current release
+receipt.
 
 ## Release evidence
 
@@ -279,7 +281,7 @@ A release review requires:
 The current no-retained-copy policy prevents the hosted workflow from
 preserving this complete evidence set after its runner exits. Therefore a
 successful hosted run is an execution result, not durable release attestation,
-and the cutover gate remains closed. Do not describe transient runner output as
-archived evidence.
+and does not by itself complete product-wide validation. Do not describe
+transient runner output as archived evidence.
 
 See [Release gates](release-gates.md) before describing any build as production-ready.

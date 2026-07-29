@@ -3,6 +3,7 @@ export * from "./AttackAttemptRepository";
 export * from "./AttackAttemptService";
 export * from "./ReconDigitalTwinRepository";
 export * from "./ReconDigitalTwinService";
+export * from "./RunScopedTopologyIdentity";
 export * from "./RunIntelligenceHttpError";
 export * from "./RunIntelligenceHttpValidation";
 export * from "./RunIntelligenceIdempotencyStore";

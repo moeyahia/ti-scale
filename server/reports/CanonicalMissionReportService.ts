@@ -177,6 +177,30 @@ function rowText(value: unknown): string {
   return typeof safe === "string" ? safe : String(safe ?? "");
 }
 
+type ReportTopologyLabelDisclosure =
+  | "included_authorized_scope"
+  | "withheld_non_authorized_scope";
+
+function reportTopologyLabel(item: Row): Readonly<{
+  label: string;
+  disclosure: ReportTopologyLabelDisclosure;
+}> {
+  if (item.scope_status === "allowed") {
+    return {
+      label: rowText(item.primary_label),
+      disclosure: "included_authorized_scope",
+    };
+  }
+  const nodeType = rowText(item.node_type).replaceAll("_", " ").trim();
+  const readableType = nodeType
+    ? `${nodeType[0]!.toUpperCase()}${nodeType.slice(1)}`
+    : "Topology node";
+  return {
+    label: `${readableType} identity withheld`,
+    disclosure: "withheld_non_authorized_scope",
+  };
+}
+
 function safeJson(value: unknown): unknown {
   return sanitizeJson(typeof value === "string" ? parseJson(value) : value);
 }
@@ -463,7 +487,7 @@ function renderMarkdown(report: Record<string, unknown>): string {
       ? [...evidenceAndFindingSections, ...planAndActivitySections]
       : [...planAndActivitySections, ...evidenceAndFindingSections]),
     ...listSection("Discovered environment", topology.nodes.map((item) =>
-      `- **${markdownText(item.label)}** — ${markdownText(item.nodeType)}, ${markdownText(item.verificationState)}, confidence ${markdownText(item.confidence)}.`), "No topology nodes were recorded."),
+      `- **${markdownText(item.label)}** — node \`${markdownCode(item.id)}\`; ${markdownText(item.nodeType)}, scope ${markdownText(item.scopeStatus)}, ${markdownText(item.verificationState)}, confidence ${markdownText(item.confidence)}.`), "No topology nodes were recorded."),
     ...listSection("Evidence-backed relationships", topology.edges.map((item) =>
       `- ${markdownText(item.sourceNodeId)} → ${markdownText(item.edgeType)} → ${markdownText(item.targetNodeId)} _(${markdownText(item.verificationState)})_`), "No topology relationships were recorded."),
     ...listSection("Failures and recovery", failures.records.map((item) =>
@@ -480,7 +504,7 @@ function renderMarkdown(report: Record<string, unknown>): string {
       `- \`${markdownText(item.id)}\` — ${markdownText(item.purpose)}; ${markdownText(item.itemCount)} scoped item(s), ${markdownText(item.usedItemCount)} used.`), "No Context Packs were recorded for this run."),
     "## Privacy and integrity",
     "",
-    "This report intentionally excludes raw technical payloads, command output bodies, extracted evidence text, provider prompts/responses, credentials, secrets, cookies, tokens, and unrestricted memory-note content. Credential-like fragments in included human summaries are deterministically redacted.",
+    "This report intentionally excludes raw technical payloads, command output bodies, extracted evidence text, topology identities outside confirmed authorized scope, provider prompts/responses, credentials, secrets, cookies, tokens, and unrestricted memory-note content. Credential-like fragments in included human summaries are deterministically redacted.",
     "",
   ];
   return `${lines.join("\n").replace(/\n{3,}/gu, "\n\n")}\n`;
@@ -1019,18 +1043,22 @@ export class CanonicalMissionReportService {
         truncated: findings.truncated,
       },
       topology: {
-        nodes: nodes.records.map((item) => ({
-          id: item.id,
-          nodeType: item.node_type,
-          label: rowText(item.primary_label),
-          scopeStatus: item.scope_status,
-          lifecycleState: item.lifecycle_state,
-          confidence: Number(item.confidence),
-          verificationState: item.verification_state,
-          originatingTool: item.originating_tool,
-          firstSeenAt: item.first_seen_at,
-          lastSeenAt: item.last_seen_at,
-        })),
+        nodes: nodes.records.map((item) => {
+          const label = reportTopologyLabel(item);
+          return {
+            id: item.id,
+            nodeType: item.node_type,
+            label: label.label,
+            labelDisclosure: label.disclosure,
+            scopeStatus: item.scope_status,
+            lifecycleState: item.lifecycle_state,
+            confidence: Number(item.confidence),
+            verificationState: item.verification_state,
+            originatingTool: item.originating_tool,
+            firstSeenAt: item.first_seen_at,
+            lastSeenAt: item.last_seen_at,
+          };
+        }),
         edges: edges.records.map((item) => ({
           id: item.id,
           sourceNodeId: item.source_node_id,
@@ -1042,6 +1070,7 @@ export class CanonicalMissionReportService {
           lastSeenAt: item.last_seen_at,
         })),
         propertiesOmitted: true,
+        identitiesOutsideAuthorizedScopeOmitted: true,
         truncated: nodes.truncated || edges.truncated,
       },
       failureDiagnoses: {
@@ -1094,6 +1123,7 @@ export class CanonicalMissionReportService {
           "technical payload JSON",
           "normalized action arguments",
           "evidence extracted text and provenance payloads",
+          "topology identities outside confirmed authorized scope",
           "provider prompts and responses",
           "memory node bodies and rejected context",
           "credentials, secrets, cookies, private keys, and tokens",

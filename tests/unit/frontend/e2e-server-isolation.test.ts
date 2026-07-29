@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 const playwrightConfig = readFileSync(new URL("../../../playwright.config.ts", import.meta.url), "utf8");
 const liveReadOnlyConfig = readFileSync(new URL("../../../playwright.live-readonly.config.ts", import.meta.url), "utf8");
+const liveAutonomousConfig = readFileSync(new URL("../../../playwright.live-autonomous.config.ts", import.meta.url), "utf8");
 const environment = readFileSync(new URL("../../../tests/e2e/support/environment.ts", import.meta.url), "utf8");
 const managedStaticLauncher = readFileSync(new URL("../../../scripts/start-managed-e2e-static-server.ts", import.meta.url), "utf8");
 const managedApiLauncher = readFileSync(new URL("../../../scripts/start-managed-e2e-api-server.ts", import.meta.url), "utf8");
@@ -90,8 +91,9 @@ describe("standalone browser-server isolation", () => {
     expect(environment).toContain("E2E_SCRIPT_SOURCE_ROOT");
   });
 
-  test("gives the live 3132 proof no managed server or credential-bearing artifacts", () => {
-    expect(playwrightConfig).toContain('testIgnore: "live-readonly-3132.spec.ts"');
+  test("keeps both live 3132 proofs outside the managed disposable server", () => {
+    expect(playwrightConfig).toContain('"live-readonly-3132.spec.ts"');
+    expect(playwrightConfig).toContain('"live-autonomous-3132.spec.ts"');
     expect(liveReadOnlyConfig).toContain('testMatch: "live-readonly-3132.spec.ts"');
     expect(liveReadOnlyConfig).not.toContain('testIgnore: "live-readonly-3132.spec.ts"');
     expect(liveReadOnlyConfig).toContain('webServer: undefined');
@@ -99,6 +101,16 @@ describe("standalone browser-server isolation", () => {
     expect(liveReadOnlyConfig).toContain('trace: "off"');
     expect(liveReadOnlyConfig).toContain('video: "off"');
     expect(liveReadOnlyConfig).not.toContain("E2E_OPERATOR_TOKEN");
+    expect(liveAutonomousConfig).toContain(
+      'testMatch: "live-autonomous-3132.spec.ts"',
+    );
+    expect(liveAutonomousConfig).toContain("webServer: undefined");
+    expect(liveAutonomousConfig).toContain(
+      "requires TI_SCALE_E2E_EXTERNAL_SERVERS=true",
+    );
+    expect(liveAutonomousConfig).toContain(
+      'baseURL.port !== "3132"',
+    );
   });
 
   test("keeps Playwright on Node so browser workers always return a reapable result", () => {

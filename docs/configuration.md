@@ -96,7 +96,11 @@ Provider, specialist, and tool adapters must report fresh typed manifests and re
 - exact-step Guided enforcement,
 - cancellation, heartbeat, lease, and result handling.
 
-The default server includes a local, manual-only Guided planner that cannot contact a provider, target, tool, or MCP server. It intentionally reports Autonomous execution, specialist execution, and generic tool/MCP execution as unavailable until independently attested adapters are attached.
+Ti-Scale composes deployment-reviewed provider, specialist, MCP, and local-tool
+adapters from exact runtime configuration. Readiness reports only execution
+paths backed by fresh manifests and receipts. An absent, stale, or mismatched
+path remains fail-closed; readiness for one bounded binding never implies
+generic provider, specialist, MCP, or tool authority.
 
 ### Capability readiness records
 

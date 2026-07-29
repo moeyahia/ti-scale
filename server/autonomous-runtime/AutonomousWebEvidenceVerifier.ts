@@ -35,6 +35,7 @@ import {
   authorizeAutonomousDerivedWebOrigins,
   type AuthorizedDerivedWebOrigins,
 } from "./AutonomousWebOriginAuthorization";
+import { AutonomousReconTopologyProjector } from "./AutonomousReconTopologyProjector";
 
 export const AUTONOMOUS_WEB_EVIDENCE_VERIFIER_SCHEMA_VERSION =
   AUTONOMOUS_WEB_EVIDENCE_PROVENANCE_SCHEMA_VERSION;
@@ -306,6 +307,7 @@ export class AutonomousWebEvidenceVerifier {
   private readonly actions: ActionRepository;
   private readonly events: EventRepository;
   private readonly now: () => Date;
+  private readonly topology: AutonomousReconTopologyProjector;
 
   constructor(private readonly options: Readonly<{
     database: SqliteDatabase;
@@ -317,6 +319,16 @@ export class AutonomousWebEvidenceVerifier {
     this.actions = new ActionRepository(options.database);
     this.events = new EventRepository(options.database);
     this.now = options.now ?? (() => new Date());
+    this.topology = new AutonomousReconTopologyProjector(options.database);
+  }
+
+  private project(promotion: AutonomousWebEvidencePromotionResult): void {
+    if (!promotion.observationId || promotion.evidenceIds.length !== 1) return;
+    const observation = new OperationalTruthService(
+      this.options.database,
+      { clock: this.now },
+    ).repository.getObservation(promotion.observationId);
+    this.topology.project(observation, promotion.evidenceIds);
   }
 
   private validate(result: AutonomousWebSurfaceResult): Readonly<{
@@ -482,8 +494,11 @@ export class AutonomousWebEvidenceVerifier {
       .get(key) as { readonly value_json: string } | undefined;
     if (existing) {
       const duplicate = duplicateReceipt(existing.value_json, result);
-      if (commit) inImmediateTransaction(this.options.database, () => commit(duplicate));
-      return duplicate;
+      return inImmediateTransaction(this.options.database, () => {
+        this.project(duplicate);
+        commit?.(duplicate);
+        return duplicate;
+      });
     }
     const verified = this.validate(result);
     return inImmediateTransaction(this.options.database, () => {
@@ -491,6 +506,7 @@ export class AutonomousWebEvidenceVerifier {
         .get(key) as { readonly value_json: string } | undefined;
       if (concurrent) {
         const duplicate = duplicateReceipt(concurrent.value_json, result);
+        this.project(duplicate);
         commit?.(duplicate);
         return duplicate;
       }
@@ -764,6 +780,7 @@ export class AutonomousWebEvidenceVerifier {
         JSON.stringify({ method: "deterministic_derived_origin_local_process_validation", criterionId, outcome: verified.outcome }),
         createdAt,
       );
+      this.topology.project(observation, [evidenceId]);
       const executionResult: ExecutionResult = Object.freeze({
         actionId: verified.action.id,
         runId: verified.action.runId,

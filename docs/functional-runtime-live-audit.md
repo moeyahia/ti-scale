@@ -1,4 +1,4 @@
-# Functional Runtime Live Audit
+# Historical Functional Runtime Live Audit
 
 Audited: 2026-07-20 UTC
 Scope: Ti-Scale service on `127.0.0.1:3132`
@@ -6,10 +6,14 @@ Method: authenticated health inspection, deterministic production mission smoke,
 read-only browser validation, database integrity inspection, and terminal-work
 reconciliation.
 
+This is a point-in-time validation receipt. It preserves what the audited
+installation proved on 2026-07-20 and is not current capability or deployment
+truth.
+
 ## Outcome
 
-The deployed Ti-Scale preview is now an operational, bounded mission runtime.
-It is not release-approved and the default-entry cutover remains closed.
+The audited Ti-Scale installation provided an operational, bounded mission
+runtime for the capabilities listed below.
 
 The live service reports:
 
@@ -140,10 +144,10 @@ mutation. It verified:
 - durable mission and run deep links;
 - zero unexpected console errors or page exceptions.
 
-## Release status
+## Historical validation boundary
 
-This audit proves the deployed bounded runtime slice; it does not approve a
-release or cutover. The remaining release program still includes:
+This audit proved the deployed bounded runtime slice at the time. It did not
+complete the product-wide validation program, which still included:
 
 - completion of every interaction-manifest gap;
 - full retry-free browser and viewport matrix;
@@ -151,8 +155,10 @@ release or cutover. The remaining release program still includes:
 - complete accessibility and performance evidence;
 - migration, restore, restart, and rollback rehearsals for the final candidate;
 - 72-hour automated soak;
-- preview acceptance period;
+- operator acceptance period;
 - zero known release-scope defects;
 - explicit human release sign-off.
 
-Until those gates pass, Ti-Scale remains a separately operated preview.
+These items describe the remaining work recorded by this historical receipt.
+Consult [Validation status](validation-status.md) and live readiness for the
+current standalone service state.

@@ -14,6 +14,7 @@ import {
   autonomousSuccessCriterionId,
   LocalAutonomousContractPlanner,
   LocalVerifiedEvidenceOutcomeEvaluator,
+  type AutonomousPostReconPlanExpansion,
   type LocalAutonomousPlannerBindingReceipt,
   type LocalAutonomousPlanningPolicy,
 } from "../../autonomous-runtime";
@@ -1431,6 +1432,136 @@ describe("disposable Autonomous activation proof", () => {
     expect(item.db.prepare("SELECT COUNT(*) AS count FROM provider_turns WHERE run_id = ?").get(RUN_ID))
       .toEqual({ count: 0 });
     expect(waitingGuidedCount(item.db)).toBe(0);
+  });
+
+  test("binds the immutable run model assignment before dispatching an evidence-driven plan expansion", async () => {
+    const item = await fixture();
+    const twoActionBudget = JSON.stringify({
+      toolCalls: 2,
+      retries: 0,
+      replans: 0,
+      concurrency: 1,
+    });
+    item.db.prepare(`
+      UPDATE mission_contracts SET budgets_json = ? WHERE id = ?
+    `).run(twoActionBudget, CONTRACT_ID);
+    item.db.prepare(`
+      UPDATE runs SET budget_json = ? WHERE id = ?
+    `).run(twoActionBudget, RUN_ID);
+    item.runtime.configureAutonomousPostReconPlanExpansion({
+      async prepare(request) {
+        return {
+          basePlanId: request.basePlanId,
+          exactTarget: TARGET,
+          cveApplicabilityId: "cve-applicability-fixture",
+          versionEvidenceId: "version-evidence-fixture",
+          materialization: {
+            materializedScriptArtifactId: "script-artifact-fixture",
+            contextPackId: "context-pack-evidence-expansion-fixture",
+            memoryNodeIds: [],
+          } as unknown as AutonomousPostReconPlanExpansion["materialization"],
+          plan: {
+            strategySummary:
+              "Corroborate the evidence-derived route through one represented specialist action",
+            rationaleSummary:
+              "The second plan boundary must retain the immutable launch-pinned specialist model assignment.",
+            steps: [{
+              phase: "Evidence-derived validation",
+              title: "Corroborate the evidence-derived route",
+              objective:
+                "Prove the dynamically expanded plan remains dispatchable through its pinned specialist route",
+              explanation:
+                "The runtime adds this step only after the first represented action produced attributable evidence.",
+              rationale:
+                "A dynamically created plan must pass the same trusted model-binding boundary as the initial plan.",
+              successCriteria: [CRITERION],
+              assignedAgentId: AGENT_ID,
+              riskClass: "medium",
+              reversibility:
+                "The in-memory fixture has no external side effect and supports cooperative cancellation.",
+              action: {
+                actionType: "active_host_discovery",
+                actionClass: "active_host_discovery",
+                target: TARGET,
+                arguments: {
+                  mcpServer: MCP_SERVER_ID,
+                  toolName: TOOL_ID,
+                  parameters: {
+                    mode: "disposable_fixture_only",
+                    target: TARGET,
+                  },
+                },
+                intentSummary:
+                  "Corroborate the evidence-derived route for the exact disposable target",
+                kind: "tool",
+                idempotent: false,
+                destructive: false,
+              },
+            }],
+          },
+        };
+      },
+      bindPersistedPlanStep() {
+        return "attack-attempt-evidence-expansion-fixture";
+      },
+      async ensureCandidateProcedureActivation() {},
+    });
+
+    await item.runtime.processRunNow(RUN_ID);
+    const firstInvocation = item.adapter.invocation!;
+    const evidenceId = recordVerifiedFixtureEvidence(item.db, firstInvocation);
+
+    const receipt = await item.adapter.emit({
+      actionId: firstInvocation.action.id,
+      runId: firstInvocation.action.runId,
+      actionFingerprint: firstInvocation.action.fingerprint,
+      success: true,
+      summary:
+        "The first represented action produced the evidence required for bounded plan expansion.",
+      progress: {
+        stepStates: { [firstInvocation.action.stepId]: "completed" },
+        evidenceIds: [evidenceId],
+        discoveredEntityIds: ["asset-disposable-authorized-host"],
+        successCriteria: { [autonomousSuccessCriterionId(CRITERION)]: 1 },
+      },
+      usage: { wallClockMs: 1, evidenceBytes: 256 },
+    });
+
+    expect(receipt).toMatchObject({
+      accepted: true,
+      duplicate: false,
+      runState: "running",
+    });
+    expect(item.adapter.dispatchCount).toBe(2);
+    const expandedInvocation = item.adapter.invocation!;
+    expect(expandedInvocation.action.id).not.toBe(firstInvocation.action.id);
+    expect(expandedInvocation.action.runtimeModelBinding).toMatchObject({
+      agentId: AGENT_ID,
+      modelAssignmentId: MODEL_ASSIGNMENT_ID,
+      modelConfigurationId: MODEL_CONFIGURATION_ID,
+      providerId: "fixture-enforcing-provider",
+      modelId: "fixture-reviewed-model",
+    });
+    const persisted = item.db.prepare(`
+      SELECT normalized_arguments_json
+      FROM actions WHERE id = ?
+    `).get(expandedInvocation.action.id) as {
+      readonly normalized_arguments_json: string;
+    };
+    const normalized = JSON.parse(persisted.normalized_arguments_json) as {
+      readonly orchestration: {
+        readonly runtimeModelBinding: {
+          readonly modelAssignmentId: string;
+          readonly modelConfigurationId: string;
+        };
+      };
+    };
+    expect(normalized.orchestration.runtimeModelBinding).toEqual(
+      expect.objectContaining({
+        modelAssignmentId: MODEL_ASSIGNMENT_ID,
+        modelConfigurationId: MODEL_CONFIGURATION_ID,
+      }),
+    );
   });
 
   test("creates a reviewed mission through intake and closes the production runtime through reports, Brain, and a disposable Vault", async () => {

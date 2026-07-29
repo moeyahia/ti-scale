@@ -7,6 +7,7 @@ import {
 import { productAgentIdsForRuntimeManifestAgent } from "../agents";
 import {
   invalidModelConfiguration,
+  ModelConfigurationError,
   modelConfigurationNotFound,
   modelConfigurationPolicyDenied,
   modelConfigurationScopeConflict,
@@ -21,6 +22,7 @@ import type {
   AutonomousPlanningSelection,
   ModelCatalogItem,
   ModelConfigurationServiceDependencies,
+  ModelAssignmentPurpose,
   ModelPreferenceFilters,
   ModelResolution,
   PinModelAssignmentInput,
@@ -497,6 +499,58 @@ function planningItemReadinessReasons(
   return sorted(reasons);
 }
 
+function specialistAdvisoryItemReadinessReasons(
+  item: ModelCatalogItem,
+  agentId: string | null,
+  role: "primary" | "fallback",
+): string[] {
+  const reasons = [...item.unavailableReasons];
+  if (agentId && !item.compatibleAgentIds.includes(agentId)) {
+    reasons.push(
+      `The ${role} advisory configuration is not declared compatible with ${agentId}.`,
+    );
+  }
+  if (item.enforcementMode !== "advisor_only") {
+    reasons.push(
+      `The ${role} advisory configuration is ${item.enforcementMode.replaceAll("_", " ")}; specialist reasoning must remain advisor only.`,
+    );
+  }
+  if (item.executionBoundary !== "provider_tool_calling") {
+    reasons.push(
+      `The ${role} advisory configuration is not backed by an attested provider route.`,
+    );
+  }
+  if (item.authState !== "authenticated") {
+    reasons.push(
+      `The ${role} advisory provider authentication state is ${item.authState}.`,
+    );
+  }
+  if (item.healthState !== "healthy") {
+    reasons.push(
+      `The ${role} advisory provider health state is ${item.healthState}.`,
+    );
+  }
+  if (!item.capabilities.structuredOutput) {
+    reasons.push(
+      `The ${role} advisory configuration does not support structured output.`,
+    );
+  }
+  if (item.disclosureClass === "unavailable") {
+    reasons.push(
+      `The ${role} advisory configuration has no usable disclosure classification.`,
+    );
+  }
+  if (
+    !item.catalogRetrievedAt
+    || !Number.isFinite(Date.parse(item.catalogRetrievedAt))
+  ) {
+    reasons.push(
+      `The ${role} advisory configuration has no valid live-catalog freshness receipt.`,
+    );
+  }
+  return sorted(reasons);
+}
+
 export function autonomousModelCatalogItemReadinessReasons(
   item: ModelCatalogItem,
   agentId: string,
@@ -915,6 +969,30 @@ export class ModelConfigurationService {
         `Fallback configuration is unavailable: ${fallback.unavailableReasons.join(" ")}`,
       );
     }
+    if (input.purpose === "planning") {
+      const primaryAdvisoryReasons = specialistAdvisoryItemReadinessReasons(
+        primary,
+        input.agentId,
+        "primary",
+      );
+      const fallbackAdvisoryReasons = fallback
+        ? specialistAdvisoryItemReadinessReasons(
+            fallback,
+            input.agentId,
+            "fallback",
+          )
+        : [];
+      const advisoryReasons = sorted([
+        ...primaryAdvisoryReasons,
+        ...fallbackAdvisoryReasons,
+      ]);
+      if (advisoryReasons.length > 0) {
+        throw modelConfigurationPolicyDenied(
+          `Specialist advisory assignment is not ready: ${advisoryReasons.join(" ")}`,
+          "Choose a current authenticated, healthy advisor-only provider configuration declared for this specialist. The execution model remains configured separately.",
+        );
+      }
+    }
     if (input.scopeType === "global") {
       const primaryMissingAgents = missingWorkspaceSpecialistAgentIds(primary);
       if (primaryMissingAgents.length > 0) {
@@ -955,6 +1033,7 @@ export class ModelConfigurationService {
 
   resolve(input: {
     readonly agentId: string;
+    readonly purpose?: ModelAssignmentPurpose;
     readonly missionId?: string;
     readonly runId?: string;
     readonly stepId?: string;
@@ -972,6 +1051,7 @@ export class ModelConfigurationService {
 
   resolveOptional(input: {
     readonly agentId: string;
+    readonly purpose?: ModelAssignmentPurpose;
     readonly missionId?: string;
     readonly runId?: string;
     readonly stepId?: string;
@@ -981,7 +1061,12 @@ export class ModelConfigurationService {
       runId: input.runId ?? null,
       stepId: input.stepId ?? null,
     };
-    const preference = this.repository.resolvePreference(input.agentId, context);
+    const purpose = input.purpose ?? "execution";
+    const preference = this.repository.resolvePreference(
+      input.agentId,
+      context,
+      purpose,
+    );
     if (!preference) return null;
     const primary = this.repository.getConfiguration(
       preference.primaryConfigurationId,
@@ -1001,6 +1086,7 @@ export class ModelConfigurationService {
     }
     return {
       agentId: input.agentId,
+      purpose,
       context,
       source: {
         scopeType: preference.scopeType,
@@ -1030,6 +1116,7 @@ export class ModelConfigurationService {
       resolution.source.scopeType,
       resolution.source.scopeId,
       resolution.source.scopeType === "global" ? null : input.agentId,
+      input.purpose ?? "execution",
     );
     if (!preference || preference.id !== resolution.source.preferenceId) {
       throw modelConfigurationScopeConflict(
@@ -1095,6 +1182,80 @@ export class ModelConfigurationService {
     assertExecutor("primary", resolution.primaryConfiguration);
     if (resolution.fallbackConfiguration) {
       assertExecutor("fallback", resolution.fallbackConfiguration);
+    }
+  }
+
+  /**
+   * Pins optional per-specialist reasoning advice independently from the
+   * signed execution authority. A missing or no-longer-attested advisory
+   * route is omitted so an unconfigured public provider never becomes a
+   * hidden Autonomous launch dependency.
+   */
+  pinSelectedSpecialistAdvisoryAssignments(input: {
+    readonly specialistAgentIds: readonly string[];
+    readonly missionId: string;
+    readonly runId: string;
+  }): readonly PinnedModelAssignment[] {
+    const pinned: PinnedModelAssignment[] = [];
+    for (const agentId of sorted(input.specialistAgentIds)) {
+      if (!PRODUCT_AGENT_IDS.has(agentId)) continue;
+      let resolution: ModelResolution | null;
+      try {
+        resolution = this.resolveOptional({
+          agentId,
+          purpose: "planning",
+          missionId: input.missionId,
+          runId: input.runId,
+        });
+        if (!resolution) continue;
+        this.assertSpecialistAdvisorySelectable(resolution);
+      } catch (error) {
+        if (error instanceof ModelConfigurationError) continue;
+        throw error;
+      }
+      const preference = this.repository.getCurrentPreference(
+        resolution.source.scopeType,
+        resolution.source.scopeId,
+        resolution.source.scopeType === "global" ? null : agentId,
+        "planning",
+      );
+      if (!preference || preference.id !== resolution.source.preferenceId) {
+        continue;
+      }
+      pinned.push(this.repository.createPinnedAssignment({
+        agentId,
+        missionId: input.missionId,
+        runId: input.runId,
+        purpose: "planning",
+        resolutionReason:
+          `Pinned optional specialist advisory reasoning from ${preference.scopeType} preference ${preference.id} version ${preference.version}; execution authority remains separately pinned`,
+      }, preference));
+    }
+    return pinned;
+  }
+
+  assertSpecialistAdvisorySelectable(resolution: ModelResolution): void {
+    this.assertCurrentlySelectable(resolution);
+    const assertAdvisor = (
+      label: "primary" | "fallback",
+      configuration: StoredModelConfiguration,
+    ): void => {
+      if (
+        configuration.enforcementMode !== "advisor_only"
+        || configuration.executionBoundary !== "provider_tool_calling"
+        || configuration.authState !== "authenticated"
+        || configuration.healthState !== "healthy"
+        || configuration.capabilities.structuredOutput !== true
+      ) {
+        throw modelConfigurationPolicyDenied(
+          `Resolved ${label} specialist reasoning configuration is not a current authenticated advisor-only provider route`,
+          "Choose an attested advisor-only provider configuration for reasoning. Keep execution on its separate enforced model assignment.",
+        );
+      }
+    };
+    assertAdvisor("primary", resolution.primaryConfiguration);
+    if (resolution.fallbackConfiguration) {
+      assertAdvisor("fallback", resolution.fallbackConfiguration);
     }
   }
 

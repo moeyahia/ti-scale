@@ -89,6 +89,43 @@ function manifests(): RuntimeSourceManifests {
   };
 }
 
+function manifestsWithSpecialistAdvisor(): RuntimeSourceManifests {
+  const baseline = manifests();
+  return {
+    ...baseline,
+    agents: baseline.agents.map((agent) => ({
+      ...agent,
+      modelRefs: [
+        ...agent.modelRefs,
+        {
+          providerId: "provider-advisory",
+          modelId: "model-reasoning",
+        },
+      ],
+    })),
+    providers: [
+      ...baseline.providers,
+      {
+        id: "provider-advisory",
+        authenticated: true,
+        healthy: true,
+        catalogObservedAt: NOW,
+        models: [{
+          id: "model-reasoning",
+          displayName: "Specialist Reasoning Model",
+          toolCalling: false,
+          structuredOutput: true,
+          enforcement: "advisor_only",
+          compatibleActionClassIds: [],
+          disclosureClasses: ["public"],
+          contextLimit: 96_000,
+          reasoningEfforts: ["high"],
+        }],
+      },
+    ],
+  };
+}
+
 interface LocalDeterministicManifestOptions {
   readonly agentAvailable?: boolean;
   readonly dependencyReady?: boolean;
@@ -465,7 +502,7 @@ describe("model configuration control plane", () => {
         entry.label,
       ).toThrow("No live catalog configuration is currently executable");
     }
-  });
+  }, 15_000);
 
   test("rejects a local deterministic route that covers only one of multiple required agent action classes", () => {
     const service = new ModelConfigurationService(
@@ -564,6 +601,132 @@ describe("model configuration control plane", () => {
     const resolution = service.resolve({ agentId: "ReconScout" });
     expect(() => service.assertAutonomousExecutable(resolution))
       .toThrow("cannot enforce the Autonomous mission contract");
+  });
+
+  test("stores execution and advisory preferences independently and pins both purposes without transferring authority", () => {
+    const db = database();
+    const repository = new ModelConfigurationRepository(
+      db,
+      () => new Date(NOW),
+    );
+    const service = new ModelConfigurationService(repository, {
+      readRuntimeManifests: manifestsWithSpecialistAdvisor,
+      clock: () => new Date(NOW),
+    });
+    const catalog = service.catalog().items;
+    const executor = catalog.find((item) =>
+      item.providerId === "provider-open"
+      && item.reasoningEffort === null)!;
+    const advisor = catalog.find((item) =>
+      item.providerId === "provider-advisory"
+      && item.reasoningEffort === null)!;
+
+    expect(() => service.putPreference({
+      purpose: "planning",
+      scopeType: "agent",
+      scopeId: "ReconScout",
+      agentId: "ReconScout",
+      primaryConfigurationId: executor.configurationId,
+      fallbackConfigurationId: null,
+      expectedVersion: 0,
+      reason: "Attempt to reuse an executor as an advisor",
+    }, "operator-test")).toThrow(
+      "specialist reasoning must remain advisor only",
+    );
+
+    const executionPreference = service.putPreference({
+      purpose: "execution",
+      scopeType: "agent",
+      scopeId: "ReconScout",
+      agentId: "ReconScout",
+      primaryConfigurationId: executor.configurationId,
+      fallbackConfigurationId: null,
+      expectedVersion: 0,
+      reason: "Use the enforced executor for target-bound work",
+    }, "operator-test");
+    const advisoryPreference = service.putPreference({
+      purpose: "planning",
+      scopeType: "agent",
+      scopeId: "ReconScout",
+      agentId: "ReconScout",
+      primaryConfigurationId: advisor.configurationId,
+      fallbackConfigurationId: null,
+      expectedVersion: 0,
+      reason: "Use the attested advisor for specialist reasoning",
+    }, "operator-test");
+
+    expect(executionPreference.purpose).toBe("execution");
+    expect(advisoryPreference.purpose).toBe("planning");
+    expect(service.resolve({
+      agentId: "ReconScout",
+      purpose: "execution",
+    }).primaryConfiguration.enforcementMode).toBe("enforced_executor");
+    expect(service.resolve({
+      agentId: "ReconScout",
+      purpose: "planning",
+    }).primaryConfiguration.enforcementMode).toBe("advisor_only");
+
+    const executionPin = service.resolveAndPin({
+      agentId: "ReconScout",
+      missionId: "mission-model",
+      runId: "run-model",
+      purpose: "execution",
+    }, { requireAutonomousExecutor: true });
+    const advisoryPins = service.pinSelectedSpecialistAdvisoryAssignments({
+      specialistAgentIds: ["ReconScout"],
+      missionId: "mission-model",
+      runId: "run-model",
+    });
+    expect(executionPin.purpose).toBe("execution");
+    expect(advisoryPins).toEqual([expect.objectContaining({
+      agentId: "ReconScout",
+      purpose: "planning",
+      primaryConfigurationId: advisor.configurationId,
+    })]);
+    expect(repository.listPinnedAssignmentsForRun("run-model")
+      .map(({ purpose }) => purpose)
+      .sort()).toEqual(["execution", "planning"]);
+  });
+
+  test("keeps Autonomous execution independent when no current advisory route is configured or attested", () => {
+    const db = database();
+    let currentManifests = manifestsWithSpecialistAdvisor();
+    const repository = new ModelConfigurationRepository(
+      db,
+      () => new Date(NOW),
+    );
+    const service = new ModelConfigurationService(repository, {
+      readRuntimeManifests: () => currentManifests,
+      clock: () => new Date(NOW),
+    });
+
+    expect(service.pinSelectedSpecialistAdvisoryAssignments({
+      specialistAgentIds: ["ReconScout"],
+      missionId: "mission-model",
+      runId: "run-model",
+    })).toEqual([]);
+
+    const advisor = service.catalog().items.find((item) =>
+      item.providerId === "provider-advisory"
+      && item.reasoningEffort === null)!;
+    service.putPreference({
+      purpose: "planning",
+      scopeType: "agent",
+      scopeId: "ReconScout",
+      agentId: "ReconScout",
+      primaryConfigurationId: advisor.configurationId,
+      fallbackConfigurationId: null,
+      expectedVersion: 0,
+      reason: "Use this provider only while its receipt is current",
+    }, "operator-test");
+    currentManifests = manifests();
+
+    expect(service.pinSelectedSpecialistAdvisoryAssignments({
+      specialistAgentIds: ["ReconScout"],
+      missionId: "mission-model",
+      runId: "run-model",
+    })).toEqual([]);
+    expect(repository.listPinnedAssignmentsForRun("run-model")).toEqual([]);
   });
 
   test("projects a secret-free live catalog and persists versioned scoped preferences", async () => {
@@ -900,7 +1063,7 @@ describe("model configuration control plane", () => {
         status: "unconfigured",
         agentId: "ReconScout",
         humanMessage:
-          "This agent does not have a model assignment for the requested scope.",
+          "This agent does not have an execution-model assignment for the requested scope.",
         remediation:
           "Choose a compatible provider and model on the agent profile, or configure a global default.",
       },

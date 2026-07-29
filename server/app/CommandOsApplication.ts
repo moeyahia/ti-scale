@@ -555,6 +555,8 @@ export function createCommandOsApplication(
     modelConfigurations,
     readRuntimeManifests: () => readRuntimeProjection().capabilityManifests
       ?? { riskClasses: [], evidenceKinds: [], capabilities: [], tools: [], mcpServers: [], agents: [], providers: [] },
+    readCandidateLinuxTransportReadiness: () =>
+      readRuntimeProjection().readiness.candidateLinuxTransport,
     ...(options.projectMemoryNodes ? { projectMemoryNodes: options.projectMemoryNodes } : {}),
     ...(options.assertRunMutationLease
       ? { assertRunMutationLease: options.assertRunMutationLease }

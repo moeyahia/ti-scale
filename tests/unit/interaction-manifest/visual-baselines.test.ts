@@ -23,6 +23,10 @@ type PendingVisualBaseline = {
   captureReason: string;
 };
 const pendingBaselines = baselineRegistry.pendingBaselines as readonly PendingVisualBaseline[];
+const PROJECT_VIEWPORTS = {
+  "chromium-1440": "1440x900",
+  "android-chromium-390": "390x844",
+} as const;
 const AUTONOMOUS_REVIEW_INTERACTION_IDS = [
   "autonomous-intake.scope.template",
   "autonomous-intake.scope.targets",
@@ -112,16 +116,16 @@ describe("Ti-Scale approved and pending visual baseline registry", () => {
     expect(baselineRegistry.approvalScope).toBe("automated-drift-baseline");
     expect(baselineRegistry.humanReleaseApproval).toBe(false);
     expect(baselineRegistry.scope).toContain("do not imply cross-browser visual approval or release sign-off");
-    expect(baselineRegistry.baselines).toHaveLength(19);
+    expect(baselineRegistry.baselines).toHaveLength(21);
     expect(baselineRegistry.pendingBaselines).toHaveLength(0);
 
     const approvedIds = baselineRegistry.baselines.map((baseline) => baseline.id);
     const pendingIds = pendingBaselines.map((baseline) => baseline.id);
     const registryIds = [...approvedIds, ...pendingIds];
     const carrierKeys = baselineRegistry.baselines.map(
-      (baseline) => `${baseline.sourceFile}\u0000${baseline.carrierTitle}`,
+      (baseline) => `${baseline.sourceFile}\u0000${baseline.carrierTitle}\u0000${baseline.project}`,
     );
-    expect(new Set(carrierKeys).size).toBe(14);
+    expect(new Set(carrierKeys).size).toBe(16);
     const mappedIds = manifest.entries.flatMap((entry) => entry.screenshotsRequired);
     expect(new Set(registryIds).size).toBe(registryIds.length);
     expect([...new Set(mappedIds)].sort()).toEqual([...registryIds].sort());
@@ -139,8 +143,10 @@ describe("Ti-Scale approved and pending visual baseline registry", () => {
 
     for (const baseline of baselineRegistry.baselines) {
       expect(baseline.id).toMatch(/^visual\.[a-z0-9][a-z0-9.-]+$/u);
-      expect(baseline.project).toBe("chromium-1440");
-      expect(baseline.viewport).toBe("1440x900");
+      expect(Object.keys(PROJECT_VIEWPORTS)).toContain(baseline.project);
+      expect(baseline.viewport).toBe(
+        PROJECT_VIEWPORTS[baseline.project as keyof typeof PROJECT_VIEWPORTS],
+      );
       expect(baseline.platform).toBe("linux");
       expect(baseline.state.length).toBeGreaterThan(30);
       expect(baseline.normalizedFields.length).toBeGreaterThan(0);
@@ -166,8 +172,10 @@ describe("Ti-Scale approved and pending visual baseline registry", () => {
 
     for (const pending of pendingBaselines) {
       expect(pending.id).toMatch(/^visual\.[a-z0-9][a-z0-9.-]+$/u);
-      expect(pending.project).toBe("chromium-1440");
-      expect(pending.viewport).toBe("1440x900");
+      expect(Object.keys(PROJECT_VIEWPORTS)).toContain(pending.project);
+      expect(pending.viewport).toBe(
+        PROJECT_VIEWPORTS[pending.project as keyof typeof PROJECT_VIEWPORTS],
+      );
       expect(pending.platform).toBe("linux");
       expect(pending.state.length).toBeGreaterThan(30);
       expect(pending.normalizedFields.length).toBeGreaterThan(0);

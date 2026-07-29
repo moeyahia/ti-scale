@@ -135,5 +135,8 @@ forward recovery and passes integrity, readiness, and browser checks.
   attestation, or matching deployed mission-read adapter keeps the public NVD
   route unavailable. The source implementation alone is not deployment proof.
 - OpenRouter metadata attestation alone is not a Guided execution adapter and cannot satisfy Guided provider callability.
-- The standalone server currently advertises no specialist execution fleet, no general MCP execution route, and no Autonomous enforcement path. Those states must remain unavailable rather than being overridden by configuration.
+- The active service must advertise only the provider, specialist, MCP, and
+  local-tool paths backed by its installed manifests and fresh readiness
+  receipts. Any absent, stale, or mismatched path remains unavailable rather
+  than being overridden by configuration.
 - A Vault connection without configured sandbox access, a reachable path, and its real round-trip audit receipt is degraded even when Markdown files exist on disk.

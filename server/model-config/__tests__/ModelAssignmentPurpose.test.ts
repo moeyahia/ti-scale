@@ -147,6 +147,7 @@ describe("ModelConfigurationRepository assignment purpose", () => {
       purpose: "planning",
     }, {
       id: "preference-planning",
+      purpose: "planning",
       scopeType: "run",
       scopeId: RUN_ID,
       agentId: "ReconScout",

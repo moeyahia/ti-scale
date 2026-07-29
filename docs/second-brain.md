@@ -100,7 +100,10 @@ A Context Pack is the bounded, inspectable result of one memory query. It record
 
 The Context Pack contract defines purposes for intake, planning, assignment acceptance, tool selection, attack attempts, phase transitions, failure, replanning, finding validation, reporting, lesson proposals, evaluation, and closeout. A purpose is not proof that a running adapter invoked it.
 
-The default server provides the memory services and uses them in the bounded Guided paths that explicitly persist a Context Pack. It does not execute Autonomous agent work. Do not claim that an agent used the Brain unless a persisted Context Pack and usage record exist.
+Ti-Scale provides the memory services used by reviewed Guided and Autonomous
+runtime paths. A path may claim Brain use only when it persists the required
+Context Pack and usage record; availability of memory services alone is not
+proof that an agent consulted them.
 
 ## Retrieval policy
 

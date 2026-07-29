@@ -66,7 +66,7 @@ bun run db:migrate --db ./data/ti-scale.sqlite
 bun run db:verify --db ./data/ti-scale.sqlite
 ```
 
-The legacy paired `--no-backup --acknowledge-no-backup-risk` spelling remains
+The compatibility spelling `--no-backup --acknowledge-no-backup-risk` remains
 accepted for command compatibility, while `--backup-dir` is rejected. Before
 commit, SQLite transaction semantics preserve the original state. After
 commit, recovery is forward-only. The release journal retains hashes and

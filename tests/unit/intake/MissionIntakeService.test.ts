@@ -12,10 +12,46 @@ import {
   AUTONOMOUS_USER_ACCESS_PROOF_SUCCESS_CRITERION,
 } from "../../../server/domain/autonomous-outcome-registry";
 import { completeRuntimeManifests } from "../domain/fixtures";
+import {
+  exactCandidateLinuxTargetScope,
+} from "../../../server/autonomous-runtime/CandidateLinuxTargetScope";
+import type {
+  CandidateLinuxTransportReadiness,
+} from "../../../server/autonomous-runtime/CandidateLinuxTransportBindingRegistry";
 
 const EXACT_IP_AGENT_ID = "specialist:autonomous-safe-recon";
 const EXACT_IP_PROVIDER_ID = "provider:local-deterministic-safe-recon";
 const EXACT_IP_MODEL_ID = "policy:local-safe-recon-v2";
+
+function exactTargetCandidateReadiness(): CandidateLinuxTransportReadiness {
+  const targetScope = exactCandidateLinuxTargetScope(
+    "127.0.0.2",
+    { transport: "tcp", port: 8080 },
+  );
+  return {
+    status: "ready",
+    code: "candidate_linux_transport_ready",
+    reason: "The exact reviewed provider is installed.",
+    manifestSha256: "a".repeat(64),
+    bindingIds: ["binding.complete-autonomous-candidate"],
+    bindingCapabilities: [{
+      bindingId: "binding.complete-autonomous-candidate",
+      candidateClass: "reviewed_real_candidate_v1",
+      realTargetSupport: true,
+      targetScope,
+    }],
+    readinessScope: "reviewed_real_candidate",
+    activationModel: "run_scoped_after_discovery",
+    candidateProcedurePresentAtLaunch: true,
+    procedureProviderPresentAtLaunch: true,
+    runScopedProcedureActivationPresentAtLaunch: false,
+    candidateDispatchAuthorityPresentAtLaunch: false,
+    conditionalPlanningReady: true,
+    targetScopes: [targetScope],
+    missionExecutionReady: false,
+    expiresAt: "2026-07-29T12:05:00.000Z",
+  };
+}
 
 function exactIpRuntimeManifests() {
   const manifests = completeRuntimeManifests();
@@ -452,6 +488,40 @@ describe("MissionIntakeService", () => {
     );
   });
 
+  test("keeps exact-target candidate actions available only for the matching intake target", () => {
+    const scoped = new MissionIntakeService({
+      readRuntimeManifests: exactIpRuntimeManifests,
+      readCandidateLinuxTransportReadiness:
+        exactTargetCandidateReadiness,
+      clock: () => new Date("2026-07-16T12:00:00.000Z"),
+    });
+    const matching = scoped.resolve({
+      journey: "autonomous",
+      authorizationAcknowledged: true,
+      targets: [{ value: "127.0.0.2" }],
+      templateId: "full_authorized_lab_compromise",
+      environmentClassification: "local_disposable_lab",
+    });
+    const unrelated = scoped.resolve({
+      journey: "autonomous",
+      authorizationAcknowledged: true,
+      targets: [{ value: "127.0.0.3" }],
+      templateId: "full_authorized_lab_compromise",
+      environmentClassification: "local_disposable_lab",
+    });
+
+    expect(
+      matching.policyMatrix.classes.exploit_validation.launchBlockingReasons
+        .join(" "),
+    ).not.toContain("target-scoped candidate Linux provider");
+    expect(
+      unrelated.policyMatrix.classes.exploit_validation.launchBlockingReasons
+        .join(" "),
+    ).toContain("target-scoped candidate Linux provider");
+    expect(unrelated.limitations.join(" "))
+      .toContain("will not launch it against an unrelated target");
+  });
+
   test("keeps HTB Web Full Path exact and non-launchable without every attested full-path binding", () => {
     const manifests = exactIpRuntimeManifests();
     const modelAssignmentCalls: unknown[] = [];
@@ -768,6 +838,37 @@ describe("MissionIntakeService", () => {
     expect(resolved.request.explanationDepth).toBe("balanced");
     expect(resolved.request.executionPreference).toBe("manual");
     expect(resolved.inferredFields).not.toContain("memoryScopes");
+  });
+
+  test("keeps Guided evidence defaults when the operator must capture results manually", () => {
+    const unavailable = new MissionIntakeService({
+      clock: () => new Date("2026-07-16T12:00:00.000Z"),
+    });
+    const expectedEvidenceTypeIds = [
+      "asset_discovery_proof",
+      "port_service_scan_result",
+      "service_version_fingerprint",
+      "http_exchange",
+      "endpoint_discovery_result",
+      "os_platform_fingerprint",
+      "dns_certificate_record",
+    ] as const;
+
+    const snapshot = unavailable.snapshot("guided", "safe_recon");
+    expect(snapshot.source.status).toBe("unavailable");
+    expect(snapshot.templates.templates.safe_recon.recommendedEvidenceTypeIds)
+      .toEqual(expectedEvidenceTypeIds);
+    expect(snapshot.templates.templates.safe_recon.unavailableEvidenceTypeIds)
+      .toEqual(expectedEvidenceTypeIds);
+
+    const resolved = unavailable.resolve({
+      journey: "guided",
+      authorizationAcknowledged: true,
+      targets: [{ value: "lab:guided-manual-evidence" }],
+      templateId: "safe_recon",
+    });
+    expect(resolved.evidenceTypeIds).toEqual(expectedEvidenceTypeIds);
+    expect(resolved.inferredFields).toContain("evidenceRequirements");
   });
 
   test("adds engagement-isolated memory only when an explicit engagement is supplied", () => {

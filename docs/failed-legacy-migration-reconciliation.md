@@ -1,4 +1,4 @@
-# Failed legacy migration reconciliation
+# Failed historical import reconciliation
 
 Ti-Scale treats an `importing` child source as a durable database writer. A
 process interruption can leave that child state behind even after its parent
@@ -17,8 +17,8 @@ The command fails closed unless all of the following are true:
 - the selected parent migration is terminal `failed`, has a terminal timestamp,
   and has a recorded error;
 - at least one of its child sources remains `pending` or `importing`;
-- no legacy migration process is visible in the local process table;
-- no other active canonical historical/legacy import lease exists;
+- no historical import process is visible in the local process table;
+- no other active canonical historical import lease exists;
 - a different, later migration is terminal `completed`;
 - that replacement has immutable inventory and reconciliation receipts;
 - retention and Brain-projection contracts match;

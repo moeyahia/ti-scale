@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { invalidModelConfiguration } from "./ModelConfigurationError";
 import {
+  MODEL_ASSIGNMENT_PURPOSES,
   MODEL_PREFERENCE_SCOPE_TYPES,
+  type ModelAssignmentPurpose,
   type ModelPreferenceFilters,
   type ModelPreferenceScopeType,
   type PutModelPreferenceInput,
@@ -11,7 +13,9 @@ const IDENTIFIER_PATTERN = /^[A-Za-z0-9._:@/-]{1,240}$/u;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,200}$/u;
 const IDENTIFIER = z.string().trim().regex(IDENTIFIER_PATTERN);
 const SCOPE_TYPE = z.enum(MODEL_PREFERENCE_SCOPE_TYPES);
+const ASSIGNMENT_PURPOSE = z.enum(MODEL_ASSIGNMENT_PURPOSES);
 const PUT_BODY = z.object({
+  purpose: ASSIGNMENT_PURPOSE.optional(),
   agentId: IDENTIFIER.nullable(),
   primaryConfigurationId: IDENTIFIER,
   fallbackConfigurationId: IDENTIFIER.nullable(),
@@ -49,6 +53,17 @@ export function modelPreferenceScopeType(value: unknown): ModelPreferenceScopeTy
     SCOPE_TYPE,
     value,
     "invalid_model_preference_scope_type",
+  );
+}
+
+export function modelAssignmentPurpose(
+  value: unknown,
+): ModelAssignmentPurpose {
+  if (value === undefined || value === "") return "execution";
+  return parse(
+    ASSIGNMENT_PURPOSE,
+    value,
+    "invalid_model_assignment_purpose",
   );
 }
 
@@ -90,6 +105,7 @@ export function parsePutModelPreference(
   }
 
   return {
+    purpose: body.purpose ?? "execution",
     scopeType,
     scopeId,
     agentId: body.agentId,
@@ -118,7 +134,11 @@ export function parseModelPreferenceFilters(
   query: Readonly<Record<string, unknown>>,
 ): ModelPreferenceFilters {
   const scopeTypeValue = optionalSingleQuery(query.scopeType, "scopeType");
+  const purposeValue = optionalSingleQuery(query.purpose, "purpose");
   return {
+    ...(purposeValue
+      ? { purpose: modelAssignmentPurpose(purposeValue) }
+      : {}),
     ...(scopeTypeValue
       ? { scopeType: modelPreferenceScopeType(scopeTypeValue) }
       : {}),

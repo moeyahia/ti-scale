@@ -173,6 +173,11 @@ async function chooseTitaniumOption(
 
 async function expectApprovedVisual(locator: Locator, testInfo: TestInfo): Promise<void> {
   if (testInfo.project.name !== VISUAL_PROJECT) return;
+  // The Continue control is replaced in place by the launch actuator. A
+  // pointer left over that coordinate can therefore capture the launch
+  // mechanism's hover state, making the same review alternate between two
+  // valid button glyphs. Park it outside the review before freezing motion.
+  await locator.page().mouse.move(0, 0);
   await locator.page().evaluate(async () => { await document.fonts.ready; });
   await expect(locator).toHaveScreenshot(AUTONOMOUS_MINIMAL_VISUAL.snapshot, {
     animations: "disabled",
@@ -183,6 +188,10 @@ async function expectApprovedVisual(locator: Locator, testInfo: TestInfo): Promi
 }
 
 async function normalizeAutonomousReviewVisual(card: Locator): Promise<void> {
+  // Element screenshots scroll this tall review card in viewport-sized tiles.
+  // Keep the pointer off the footer actions so the final tile cannot
+  // accidentally capture the disabled launch button in its hover geometry.
+  await card.page().mouse.move(1, 1);
   // Locator screenshots taller than the viewport are captured in tiles. The
   // sticky shell header can otherwise be painted over a different tile seam
   // depending on the page's prior scroll position, obscuring the fieldset
@@ -1052,7 +1061,12 @@ test.describe(`${TEST_ID} registry-driven journey-specific intake`, () => {
       const resolvedContract = await contractResolve.json() as ResolvedMissionIntake;
 
       const team = group(page, "Specialist team and execution readiness");
-      const specialistRows = team.locator("label.os-check-field");
+      const specialistChecklist = team
+        .locator(":scope > div.os-registry-checklist")
+        .first();
+      const specialistRows = specialistChecklist.locator(
+        ":scope > label.os-check-field",
+      );
       await expect(specialistRows).toHaveCount(backend.productAgents.length);
       expect(backend.productAgents).toHaveLength(12);
       expect(
@@ -1074,7 +1088,7 @@ test.describe(`${TEST_ID} registry-driven journey-specific intake`, () => {
       await expect(team.getByText("Isolated full-contract runtime adapter", { exact: false }))
         .toHaveCount(0);
       await page.getByRole("button", { name: "Use recommended team", exact: true }).click();
-      await expect(team.locator('input[type="checkbox"]:checked'))
+      await expect(specialistChecklist.locator('input[type="checkbox"]:checked'))
         .toHaveCount(backend.productAgents.length);
 
       await clickContinue(page, "Second Brain context", { autonomousPreflight: true });
@@ -1100,8 +1114,8 @@ test.describe(`${TEST_ID} registry-driven journey-specific intake`, () => {
         id: "contract_agent_model_assignments",
         status: "pass",
       }));
-      expect(reviewPreflight.execution.team.effectiveAgentIds).toEqual(
-        backend.productAgents.map(({ id }) => id),
+      expect([...reviewPreflight.execution.team.effectiveAgentIds].sort()).toEqual(
+        backend.productAgents.map(({ id }) => id).sort(),
       );
       expect(reviewPreflight.context.selectedNodeIds).toEqual(
         expect.arrayContaining(backend.memoryNodes.map(({ id }) => id)),
@@ -1142,14 +1156,14 @@ test.describe(`${TEST_ID} registry-driven journey-specific intake`, () => {
           authorizationConfirmed: true,
           allowedTargets: [target],
         },
-        contract: {
-          specialistAgentIds: backend.productAgents.map(({ id }) => id),
-        },
         contractReview: {
           version: reviewPreflight.contract.version,
           hash: reviewPreflight.contract.hash,
         },
       });
+      expect([...createBody.contract.specialistAgentIds].sort()).toEqual(
+        backend.productAgents.map(({ id }) => id).sort(),
+      );
       const created = await createdResponse.json() as {
         mission: { id: string; title: string; journey: string };
         run: { id: string; status: string; journey: string };
@@ -1666,9 +1680,30 @@ test.describe(`${TEST_ID} registry-driven journey-specific intake`, () => {
 
         await selectRadio(
           "guided-intake.outcome.identity-smb-summary",
-          "Select credentialed SMB identity summary",
+          "Select SMB identity summary",
           smbSummary,
           modality,
+        );
+        const summaryAuthentication = titaniumSelect(
+          outcome,
+          /^Authentication mode/u,
+        );
+        expect(
+          (await titaniumOptions(summaryAuthentication)).map(({ value }) => value),
+        ).toEqual(["anonymous", "credential_reference"]);
+        await expect(summaryAuthentication).toContainText(
+          "Anonymous metadata read",
+        );
+        await activateIf(
+          receiptContext,
+          "guided-intake.outcome.identity-authentication-mode",
+          "Private credential reference",
+          modality,
+          () => chooseTitaniumOption(
+            summaryAuthentication,
+            "credential_reference",
+            modality,
+          ),
         );
         await expect(outcome.getByRole("textbox", {
           name: /^Credential bundle reference/u,

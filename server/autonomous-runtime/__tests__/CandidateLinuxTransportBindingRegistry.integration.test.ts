@@ -25,6 +25,9 @@ import {
   startCandidateLinuxTransportBroker,
   type CandidateLinuxTransportBrokerHandle,
 } from "../CandidateLinuxTransportBroker";
+import {
+  allAuthorizedIpCandidateLinuxTargetScope,
+} from "../CandidateLinuxTargetScope";
 
 const SPEC_ID = "post-exploit-spec-1";
 const BINDING_ID = "candidate.linux.fixture.v1";
@@ -52,6 +55,7 @@ const OPERATIONS = [
   "prove_root_flag_hash",
   "cleanup",
 ] as const;
+const TARGET_SCOPE = allAuthorizedIpCandidateLinuxTargetScope();
 const BOUNDARY = Object.freeze({
   typedOperationsOnly: true,
   genericCommand: false,
@@ -214,6 +218,7 @@ async function fixture(options: Readonly<{
       handlerProfilePath: profilePath,
       handlerProfileSha256: profileSha256,
       realTargetSupport,
+      targetScope: TARGET_SCOPE,
       operations: OPERATIONS,
     }],
   };
@@ -244,6 +249,7 @@ async function fixture(options: Readonly<{
       candidateClass,
       handlerProfileSha256: profileSha256,
       realTargetSupport,
+      targetScope: TARGET_SCOPE,
       ...(options.adapterAttestationReady
         ? {
             async attest() {
@@ -261,6 +267,7 @@ async function fixture(options: Readonly<{
                 postExploitSpecId: SPEC_ID,
                 candidateClass: "reviewed_real_candidate_v1" as const,
                 realTargetSupport: true as const,
+                targetScope: TARGET_SCOPE,
                 operations: OPERATIONS,
                 boundary: REAL_ADAPTER_BOUNDARY,
                 observedAt: "2026-07-23T12:00:00.000Z",

@@ -25,6 +25,7 @@ import {
   NO_BACKUP_STANDALONE_RELEASE_OBSERVER,
   noBackupObserverProofDetail,
   noBackupObserverProofSha256FromDetail,
+  noBackupAuthenticationSessionReady,
   noBackupTargetStartMode,
   noBackupStopSnapshotFromServiceProperties,
   noBackupRecoveryDirection,
@@ -175,6 +176,54 @@ afterEach(() => {
 });
 
 describe("metadata-journaled no-backup preview release", () => {
+  test("requires the exact configured unauthenticated session contract", () => {
+    expect(noBackupAuthenticationSessionReady({
+      statusCode: 200,
+      body: {
+        schemaVersion: "2.4",
+        configured: true,
+        authenticated: false,
+      },
+    })).toBe(true);
+    for (const response of [
+      {
+        statusCode: 503,
+        body: {
+          schemaVersion: "2.4",
+          configured: true,
+          authenticated: false,
+        },
+      },
+      {
+        statusCode: 200,
+        body: {
+          schemaVersion: "2.4",
+          configured: false,
+          authenticated: false,
+        },
+      },
+      {
+        statusCode: 200,
+        body: {
+          schemaVersion: "2.4",
+          configured: true,
+          authenticated: true,
+        },
+      },
+      {
+        statusCode: 200,
+        body: {
+          schemaVersion: "2.4",
+          configured: true,
+          authenticated: false,
+          unexpected: "field",
+        },
+      },
+    ] as const) {
+      expect(noBackupAuthenticationSessionReady(response)).toBe(false);
+    }
+  });
+
   test("new forward receipts use a standalone observer without consulting another service", async () => {
     const receipt = {
       schemaVersion: NO_BACKUP_FORWARD_RECEIPT_SCHEMA,
@@ -1386,7 +1435,7 @@ describe("metadata-journaled no-backup preview release", () => {
     expect(existsSync(join(root, "start-authorization.json"))).toBe(false);
   });
 
-  test("migrates an exact schema-47 database to schema 60 without creating backup payloads", async () => {
+  test("migrates an exact schema-47 database to the canonical current schema without creating backup payloads", async () => {
     const root = temporaryDirectory("ti-scale-no-backup-current-schema-");
     const databasePath = join(root, "state", "ti-scale.sqlite");
     mkdirSync(join(root, "state"), { recursive: true });

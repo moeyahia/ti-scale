@@ -17,6 +17,7 @@ import {
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createDatabaseConnection } from "../../server/db/connection";
 import { getDatabaseHealth } from "../../server/db/health";
+import { DATABASE_MIGRATIONS } from "../../server/db/migrations";
 import {
   StoppedServiceRuntimeLeaseReconciliationService,
   withCanonicalMaintenanceLease,
@@ -145,11 +146,45 @@ const SERVICE = "ti-scale.service";
 const LEGACY_SERVICE = "chillspwn.service";
 const TI_SCALE_HEALTH = "http://127.0.0.1:3132/api/v2/health";
 const TI_SCALE_READINESS = "http://127.0.0.1:3132/api/v2/system/readiness";
+const TI_SCALE_SESSION = "http://127.0.0.1:3132/api/v2/auth/session";
 const CHILLSPWN_HEALTH = "http://127.0.0.1:3131/api/health";
 const BUN = "/usr/local/bin/bun";
 export const NO_BACKUP_SOURCE_SCHEMA = 60 as const;
 export const NO_BACKUP_HISTORICAL_SOURCE_SCHEMA = 47 as const;
-export const NO_BACKUP_TARGET_SCHEMA = 60 as const;
+export const NO_BACKUP_HISTORICAL_TARGET_SCHEMA = 60 as const;
+
+function canonicalNoBackupTargetSchema(): number {
+  if (
+    DATABASE_MIGRATIONS.length < NO_BACKUP_SOURCE_SCHEMA ||
+    DATABASE_MIGRATIONS.some(
+      (migration, index) => migration.version !== index + 1,
+    )
+  ) {
+    throw new Error(
+      "Canonical database migration registry is not one contiguous release target",
+    );
+  }
+  const target = DATABASE_MIGRATIONS.at(-1)?.version;
+  if (
+    target === undefined ||
+    !Number.isSafeInteger(target) ||
+    target < NO_BACKUP_SOURCE_SCHEMA
+  ) {
+    throw new Error(
+      "Canonical database migration registry has no valid no-backup target",
+    );
+  }
+  return target;
+}
+
+/**
+ * New no-backup releases always target the exact ceiling of the canonical
+ * migration registry in the selected source tree. The immutable migration
+ * attestation separately proves that the staged copy has the same ceiling and
+ * bytes. Historical schema-60 receipts retain their own fixed recovery
+ * boundary through NO_BACKUP_HISTORICAL_TARGET_SCHEMA.
+ */
+export const NO_BACKUP_TARGET_SCHEMA = canonicalNoBackupTargetSchema();
 const SOURCE_SCHEMA = NO_BACKUP_SOURCE_SCHEMA;
 const TARGET_SCHEMA = NO_BACKUP_TARGET_SCHEMA;
 const RELEASE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -290,7 +325,7 @@ export interface NoBackupLegacyPreviewReceipt extends NoBackupReceiptBase {
   readonly releaseObserver?: never;
   readonly database: {
     readonly sourceSchema: typeof NO_BACKUP_HISTORICAL_SOURCE_SCHEMA;
-    readonly targetSchema: typeof NO_BACKUP_TARGET_SCHEMA;
+    readonly targetSchema: typeof NO_BACKUP_HISTORICAL_TARGET_SCHEMA;
     readonly migrationAttestation: ReleaseMigrationAttestation;
     schemaCommittedAt?: string;
   };
@@ -365,6 +400,32 @@ interface JsonHealth {
   readonly statusCode: number;
   readonly semanticStatus: string;
   readonly body: Record<string, unknown>;
+}
+
+export function noBackupAuthenticationSessionReady(
+  response: Readonly<{
+    readonly statusCode: number;
+    readonly body: unknown;
+  }>,
+): boolean {
+  if (
+    response.statusCode !== 200
+    || !response.body
+    || typeof response.body !== "object"
+    || Array.isArray(response.body)
+  ) {
+    return false;
+  }
+  const body = response.body as Record<string, unknown>;
+  const keys = Object.keys(body).sort((left, right) =>
+    left.localeCompare(right, "en"));
+  return (
+    JSON.stringify(keys)
+      === JSON.stringify(["authenticated", "configured", "schemaVersion"])
+    && body.schemaVersion === "2.4"
+    && body.configured === true
+    && body.authenticated === false
+  );
 }
 
 interface PreparedNoBackupPreview {
@@ -1334,7 +1395,7 @@ export function noBackupRecoveryDirection(
   );
 }
 
-function attestedNoBackupForwardSchemas(
+export function attestedNoBackupForwardSchemas(
   attestation: ReleaseMigrationAttestation,
   sourceSchema: number,
   targetSchema: number,
@@ -2198,6 +2259,13 @@ async function loadPreparedNoBackupPreview(
     receipt.schemaVersion === NO_BACKUP_FORWARD_RECEIPT_SCHEMA
       ? NO_BACKUP_SOURCE_SCHEMA
       : NO_BACKUP_HISTORICAL_SOURCE_SCHEMA;
+  const expectedHistoricalTargetSchema =
+    receipt.schemaVersion === NO_BACKUP_PREVIEW_RECEIPT_SCHEMA
+      ? NO_BACKUP_HISTORICAL_TARGET_SCHEMA
+      : undefined;
+  const receiptTargetSchema = receipt.database?.targetSchema;
+  const receiptMigrationAttestation =
+    receipt.database?.migrationAttestation;
   if (
     !receiptObserverShapeValid ||
     receipt.releaseId !== releaseId ||
@@ -2209,7 +2277,13 @@ async function loadPreparedNoBackupPreview(
       receipt.hostBootId,
     ) ||
     receipt.database?.sourceSchema !== expectedSourceSchema ||
-    receipt.database?.targetSchema !== TARGET_SCHEMA ||
+    !Number.isSafeInteger(receiptTargetSchema) ||
+    (
+      expectedHistoricalTargetSchema !== undefined
+        ? receiptTargetSchema !== expectedHistoricalTargetSchema
+        : Number(receiptTargetSchema) < expectedSourceSchema
+    ) ||
+    receiptMigrationAttestation?.targetSchema !== receiptTargetSchema ||
     !receipt.serverRelease ||
     !receipt.staticRelease ||
     !receipt.previous ||
@@ -2218,6 +2292,15 @@ async function loadPreparedNoBackupPreview(
   ) {
     throw new Error("No-backup forward recovery receipt is malformed or policy-incompatible");
   }
+  assertNoBackupForwardOnlySchemaProgression(
+    expectedSourceSchema,
+    Number(receiptTargetSchema),
+    attestedNoBackupForwardSchemas(
+      receiptMigrationAttestation,
+      expectedSourceSchema,
+      Number(receiptTargetSchema),
+    ),
+  );
   if (
     JSON.stringify(receipt.backupPayloadInventoryBefore.roots) !==
       JSON.stringify([...NO_BACKUP_PAYLOAD_ROOTS].sort((left, right) =>
@@ -2299,7 +2382,7 @@ async function loadPreparedNoBackupPreview(
     }) ||
     releaseTransactionSha256(identity.target) !== releaseTransactionSha256({
       pointers: receipt.target,
-      databaseSchema: TARGET_SCHEMA,
+      databaseSchema: receipt.database.targetSchema,
       migrationAttestation: receipt.database.migrationAttestation,
     })
   ) {
@@ -2493,6 +2576,7 @@ function runNoBackupMigration(prepared: PreparedNoBackupPreview): void {
     prepared,
     "No-backup database migration",
   );
+  const targetSchema = prepared.receipt.database.targetSchema;
   ensureMutation(prepared.journalDirectory, "database_migration", () => {
     if (
       prepared.receipt.database.sourceSchema !==
@@ -2517,7 +2601,7 @@ function runNoBackupMigration(prepared: PreparedNoBackupPreview): void {
         timeoutMs: 15 * 60_000,
       });
     }
-    assertCanonicalDatabase(TARGET_SCHEMA, { verifyIntegrity: true });
+    assertCanonicalDatabase(targetSchema, { verifyIntegrity: true });
     assertReleaseMigrationAttestationsMatch(
       prepared.receipt.database.migrationAttestation,
       attestReleaseMigrationCeiling(server.releaseDirectory),
@@ -2526,7 +2610,7 @@ function runNoBackupMigration(prepared: PreparedNoBackupPreview): void {
     prepared.receipt.database.schemaCommittedAt = new Date().toISOString();
     writeReceipt(prepared.receiptPath, prepared.receipt);
   }, () => ({
-    databaseSchema: TARGET_SCHEMA,
+    databaseSchema: targetSchema,
     backupPolicy: "none",
     migrationAttestationSha256:
       prepared.receipt.database.migrationAttestation.attestationSha256,
@@ -2538,14 +2622,25 @@ async function waitForTargetRuntime(
   previousInvocationId: string,
   timeoutMs = 4 * 60_000,
 ): Promise<ServiceIdentity> {
+  const targetSchema = prepared.receipt.database.targetSchema;
   const deadline = performance.now() + timeoutMs;
   let last = "no observation";
   while (performance.now() < deadline) {
     try {
-      const identity = await captureServiceIdentity(SERVICE, TI_SCALE_HEALTH);
-      const readiness = await jsonHealth(TI_SCALE_READINESS);
+      const [identity, readiness, authentication] = await Promise.all([
+        captureServiceIdentity(SERVICE, TI_SCALE_HEALTH),
+        jsonHealth(TI_SCALE_READINESS),
+        jsonHealth(TI_SCALE_SESSION),
+      ]);
       const database = readiness.body.database as Record<string, unknown> | undefined;
-      last = `${identity.activeState}/${identity.semanticStatus}; readiness=${readiness.semanticStatus}`;
+      last =
+        `${identity.activeState}/${identity.semanticStatus}; `
+        + `readiness=${readiness.semanticStatus}; `
+        + `authentication=${
+          noBackupAuthenticationSessionReady(authentication)
+            ? "configured"
+            : "unavailable"
+        }`;
       if (
         identity.activeState === "active" &&
         identity.mainPid > 0 &&
@@ -2555,15 +2650,16 @@ async function waitForTargetRuntime(
         identity.semanticStatus === "healthy" &&
         readiness.statusCode === 200 &&
         readiness.semanticStatus === "healthy" &&
+        noBackupAuthenticationSessionReady(authentication) &&
         database?.healthy === true &&
-        Number(database.currentMigration) === TARGET_SCHEMA
+        Number(database.currentMigration) === targetSchema
       ) {
         assertPointer(
           new StaticArtifactReleaseStore({ releaseRoot: STATIC_RELEASE_ROOT }),
           prepared.receipt.target,
           "Running target",
         );
-        assertCanonicalDatabase(TARGET_SCHEMA);
+        assertCanonicalDatabase(targetSchema);
         return identity;
       }
     } catch (error) {
@@ -2616,7 +2712,8 @@ async function commitTargetWhileStopped(
     prepared,
     "No-backup target commitment",
   );
-  if (databaseSchema() !== TARGET_SCHEMA) {
+  const targetSchema = prepared.receipt.database.targetSchema;
+  if (databaseSchema() !== targetSchema) {
     throw new Error("Forward completion requires the committed target schema");
   }
   const staticStore = new StaticArtifactReleaseStore({ releaseRoot: STATIC_RELEASE_ROOT });
@@ -2638,9 +2735,9 @@ async function commitTargetWhileStopped(
   }));
   ensureMutation(prepared.journalDirectory, "target_data_verification", () => {
     assertPointer(staticStore, prepared.receipt.target, "Target commitment");
-    assertCanonicalDatabase(TARGET_SCHEMA);
+    assertCanonicalDatabase(targetSchema);
   }, () => ({
-    databaseSchema: TARGET_SCHEMA,
+    databaseSchema: targetSchema,
     pointers: prepared.receipt.target,
     backupPolicy: "none",
   }));
@@ -2656,7 +2753,7 @@ async function commitTargetWhileStopped(
       });
     journal = commitFunctionalReleaseTransactionTarget(prepared.journalDirectory, {
       pointers: prepared.receipt.target,
-      databaseSchema: TARGET_SCHEMA,
+      databaseSchema: targetSchema,
       applicationTreeSha256,
       migrationAttestationSha256:
         prepared.receipt.database.migrationAttestation.attestationSha256,
@@ -2671,6 +2768,7 @@ async function startAndFinalizeTarget(
   observerBefore: NoBackupReleaseObserverProof,
   forceRecovery = false,
 ): Promise<void> {
+  const targetSchema = prepared.receipt.database.targetSchema;
   let journal = readFunctionalReleaseTransactionJournal(prepared.journalDirectory);
   if (!functionalReleaseTargetCommitRecord(journal)) {
     throw new Error("Journal-authorized start requires a committed target");
@@ -2680,7 +2778,7 @@ async function startAndFinalizeTarget(
     prepared.receipt.target,
     "Committed target before start",
   );
-  assertCanonicalDatabase(TARGET_SCHEMA);
+  assertCanonicalDatabase(targetSchema);
   const recoveryStarted = (): boolean =>
     readFunctionalReleaseTransactionJournal(prepared.journalDirectory)
       .records.some((record) => record.event === "recovery_started");
@@ -2811,7 +2909,7 @@ async function startAndFinalizeTarget(
       prepared.receipt.target,
       "Running-state verification",
     );
-    assertCanonicalDatabase(TARGET_SCHEMA);
+    assertCanonicalDatabase(targetSchema);
     return "already_exact";
   };
   if (runningState === "prepared") {

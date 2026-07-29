@@ -4,6 +4,9 @@ import {
   createRuntimeReadinessProviders,
   type RuntimeReadinessSnapshot,
 } from "../RuntimeReadiness";
+import {
+  exactCandidateLinuxTargetScope,
+} from "../../autonomous-runtime/CandidateLinuxTargetScope";
 
 const REQUEST: AutonomousMissionRequest = {
   journey: "autonomous",
@@ -96,6 +99,38 @@ function healthy(): RuntimeReadinessSnapshot {
   };
 }
 
+function exactTargetCandidateReadiness(): NonNullable<
+  RuntimeReadinessSnapshot["candidateLinuxTransport"]
+> {
+  const targetScope = exactCandidateLinuxTargetScope(
+    "127.0.0.2",
+    { transport: "tcp", port: 8080 },
+  );
+  return {
+    status: "ready",
+    code: "candidate_linux_transport_ready",
+    reason: "The exact reviewed provider is installed.",
+    manifestSha256: "a".repeat(64),
+    bindingIds: ["binding.complete-autonomous-candidate"],
+    bindingCapabilities: [{
+      bindingId: "binding.complete-autonomous-candidate",
+      candidateClass: "reviewed_real_candidate_v1",
+      realTargetSupport: true,
+      targetScope,
+    }],
+    readinessScope: "reviewed_real_candidate",
+    activationModel: "run_scoped_after_discovery",
+    candidateProcedurePresentAtLaunch: true,
+    procedureProviderPresentAtLaunch: true,
+    runScopedProcedureActivationPresentAtLaunch: false,
+    candidateDispatchAuthorityPresentAtLaunch: false,
+    conditionalPlanningReady: true,
+    targetScopes: [targetScope],
+    missionExecutionReady: false,
+    expiresAt: "2026-07-29T12:05:00.000Z",
+  };
+}
+
 describe("runtime-backed readiness", () => {
   test("permits an Autonomous contract only when every execution dependency is real", async () => {
     const service = new ReadinessService(createRuntimeReadinessProviders(healthy));
@@ -104,6 +139,119 @@ describe("runtime-backed readiness", () => {
     expect(result.checks.some((item) => item.status === "fail")).toBe(false);
     expect(result.checks.some((item) => item.id === "execution_boundary_autonomous")).toBe(true);
     expect(result.checks.some((item) => item.id === "provider_execution_autonomous")).toBe(true);
+  });
+
+  test("admits exact-target candidate classes without advertising them globally", async () => {
+    const request: AutonomousMissionRequest = {
+      ...REQUEST,
+      authorization: {
+        ...REQUEST.authorization,
+        allowedTargets: ["127.0.0.2"],
+      },
+      contract: {
+        ...REQUEST.contract,
+        allowedActionClasses: ["exploit_validation"],
+      },
+    };
+    const snapshot: RuntimeReadinessSnapshot = {
+      ...healthy(),
+      candidateLinuxTransport: exactTargetCandidateReadiness(),
+      autonomousRuntime: {
+        ...healthy().autonomousRuntime!,
+        readyActionClassIds: ["active_host_discovery"],
+        components: {
+          ...healthy().autonomousRuntime!.components,
+          mcpExecution: false,
+          localProcessExecution: true,
+        },
+      },
+    };
+
+    expect(snapshot.autonomousRuntime?.readyActionClassIds)
+      .not.toContain("exploit_validation");
+    const result = await new ReadinessService(
+      createRuntimeReadinessProviders(() => snapshot),
+    ).evaluateJourney("autonomous", { request });
+    expect(result.checks.find(({ id }) => id === "candidate_linux_target_scope"))
+      .toMatchObject({ status: "pass" });
+    expect(result.checks.find(({ id }) => id === "mcp_execution_autonomous"))
+      .toMatchObject({ status: "pass" });
+  });
+
+  test("does not require the candidate provider for an already-ready local exploit boundary", async () => {
+    const request: AutonomousMissionRequest = {
+      ...REQUEST,
+      authorization: {
+        ...REQUEST.authorization,
+        allowedTargets: ["127.0.0.2"],
+      },
+      contract: {
+        ...REQUEST.contract,
+        allowedActionClasses: ["exploit_validation"],
+      },
+    };
+    const baseline = healthy();
+    const snapshot: RuntimeReadinessSnapshot = {
+      ...baseline,
+      autonomousRuntime: {
+        ...baseline.autonomousRuntime!,
+        readyActionClassIds: [
+          ...baseline.autonomousRuntime!.readyActionClassIds,
+          "exploit_validation",
+        ],
+      },
+    };
+
+    const result = await new ReadinessService(
+      createRuntimeReadinessProviders(() => snapshot),
+    ).evaluateJourney("autonomous", { request });
+
+    expect(result.checks.find(({ id }) => id === "candidate_linux_target_scope"))
+      .toMatchObject({ status: "pass" });
+    expect(result.checks.find(({ id }) => id === "mcp_execution_autonomous"))
+      .toMatchObject({ status: "pass" });
+  });
+
+  test.each([
+    "127.0.0.3",
+    "10.129.39.191",
+  ])("rejects target-scoped candidate readiness for unrelated target %s", async (target) => {
+    const request: AutonomousMissionRequest = {
+      ...REQUEST,
+      authorization: {
+        ...REQUEST.authorization,
+        allowedTargets: [target],
+      },
+      contract: {
+        ...REQUEST.contract,
+        allowedActionClasses: ["exploit_validation"],
+      },
+    };
+    const snapshot: RuntimeReadinessSnapshot = {
+      ...healthy(),
+      candidateLinuxTransport: exactTargetCandidateReadiness(),
+      autonomousRuntime: {
+        ...healthy().autonomousRuntime!,
+        readyActionClassIds: ["active_host_discovery"],
+        components: {
+          ...healthy().autonomousRuntime!.components,
+          mcpExecution: false,
+          localProcessExecution: true,
+        },
+      },
+    };
+    const result = await new ReadinessService(
+      createRuntimeReadinessProviders(() => snapshot),
+    ).evaluateJourney("autonomous", { request });
+
+    expect(result.status).toBe("blocked");
+    expect(result.checks.find(({ id }) => id === "candidate_linux_target_scope"))
+      .toMatchObject({
+        status: "fail",
+        impact: expect.stringContaining("not all covered"),
+      });
+    expect(result.checks.find(({ id }) => id === "mcp_execution_autonomous"))
+      .toMatchObject({ status: "fail" });
   });
 
   test("fails Autonomous closed while preserving manual Guided operation as degraded", async () => {

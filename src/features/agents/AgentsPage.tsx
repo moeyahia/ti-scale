@@ -92,6 +92,15 @@ export default function AgentsPage({ agentId }: { agentId?: string }) {
           agentId: detail.data.id,
           label: detail.data.displayName,
         }} />}
+        {detail.data && <ModelAssignmentEditor
+          purpose="planning"
+          scope={{
+            type: "agent",
+            id: detail.data.id,
+            agentId: detail.data.id,
+            label: detail.data.displayName,
+          }}
+        />}
         {detail.data && <Card aria-label={`${detail.data.displayName} runtime bindings`}>
           <div className="os-card-heading"><div><p className="os-eyebrow">Runtime source of truth</p><h2>Execution bindings</h2></div><StatusPill status={runtimeBindingSummaries(detail.data).length > 0 ? "ready" : "unavailable"} /></div>
           <p>{productRosterDescription(detail.data) ?? "This specialist role is projected from current runtime manifests and capability attestations."}</p>

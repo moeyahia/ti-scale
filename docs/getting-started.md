@@ -63,7 +63,7 @@ snapshot:
 bun run db:migrate --db ./data/ti-scale.sqlite
 ```
 
-The legacy `--no-backup --acknowledge-no-backup-risk` spelling remains accepted
+The compatibility `--no-backup --acknowledge-no-backup-risk` spelling remains accepted
 for command compatibility, but is not required. `--backup-dir` is rejected.
 The JSON result records
 `"backupPolicy": "operator-acknowledged-no-backup"` and recovery after commit
@@ -108,7 +108,11 @@ curl http://127.0.0.1:3132/api/v2/system/readiness
 
 Database, authentication, event, memory, provider, specialist, and tool readiness are separate checks. A healthy database check does not imply that mission execution is available. The local Guided planner can represent operator-run manual steps without contacting a provider, target, tool, or MCP server.
 
-The default server does not attach an Autonomous provider/specialist/tool executor or a generic MCP executor. Autonomous launch and agent-run Guided steps must remain unavailable until those adapters pass readiness. This is expected fail-closed behavior, not a reason to bypass the readiness gate.
+Ti-Scale reports the exact provider, specialist, MCP, and local-tool bindings
+installed for this service. Autonomous launch and agent-run Guided steps remain
+unavailable when their required bindings cannot pass readiness. This is
+expected fail-closed behavior, not a reason to bypass the readiness gate or
+generalize readiness from a different action path.
 
 ## 9. Optional: configure an Obsidian vault
 

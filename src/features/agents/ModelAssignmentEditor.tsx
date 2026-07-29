@@ -14,6 +14,7 @@ import { useQuerySnapshotExpired } from "../../data/cache/querySnapshotFreshness
 import { Button, ButtonLink, Card, ErrorPanel, LoadingPanel, StatusPill } from "../../design-system/components/Primitives";
 import { TitaniumSelect } from "../../design-system/components/TitaniumSelect";
 import type {
+  ModelAssignmentPurpose,
   ModelCatalogItem,
   ModelPreferenceScope,
   ModelResolutionResult,
@@ -22,7 +23,6 @@ import { formatTime, KeyValueGrid } from "../runs/OperationalSurface";
 import {
   catalogItemSelectableForAgent,
   configurationReceiptLabel,
-  fallbackSelectionIsValid,
   reconcileSavedCatalogReceipt,
 } from "./modelAssignmentCatalogRefresh";
 import "./model-assignment.css";
@@ -43,6 +43,7 @@ type ModelAssignmentScope =
 
 export interface ModelAssignmentEditorProps {
   readonly scope: ModelAssignmentScope;
+  readonly purpose?: ModelAssignmentPurpose;
 }
 
 function unique(values: readonly string[]): string[] {
@@ -94,25 +95,37 @@ function selectableForScope(
   item: ModelCatalogItem,
   scope: ModelAssignmentScope,
   workspaceAgentIds: readonly string[],
+  purpose: ModelAssignmentPurpose,
 ): boolean {
-  return catalogItemSelectableForAgent(
+  const scopeSelectable = catalogItemSelectableForAgent(
     item,
     scope.agentId,
     workspaceAgentIds,
   );
+  if (!scopeSelectable) return false;
+  if (purpose === "execution") return true;
+  return item.enforcementMode === "advisor_only"
+    && item.executionBoundary === "provider_tool_calling"
+    && item.authState === "authenticated"
+    && item.healthState === "healthy"
+    && item.capabilities.structuredOutput;
 }
 
 function assignmentReadiness(
   item: ModelCatalogItem | undefined,
   scope: ModelAssignmentScope,
   workspaceAgentIds: readonly string[],
+  purpose: ModelAssignmentPurpose,
 ): { readonly label: string; readonly status: string } {
   if (!item) return { label: "Not configured", status: "unconfigured" };
   if (
-    !selectableForScope(item, scope, workspaceAgentIds)
+    !selectableForScope(item, scope, workspaceAgentIds, purpose)
     || item.enforcementMode === "unavailable"
   ) {
     return { label: "Unavailable", status: "unavailable" };
+  }
+  if (purpose === "planning") {
+    return { label: "Advisor only", status: "advisor_only" };
   }
   if (item.enforcementMode === "enforced_executor") {
     return { label: "Enforced executor", status: item.enforcementMode };
@@ -127,9 +140,10 @@ function firstSelectable(
   items: readonly ModelCatalogItem[],
   scope: ModelAssignmentScope,
   workspaceAgentIds: readonly string[],
+  purpose: ModelAssignmentPurpose,
 ): ModelCatalogItem | undefined {
   return items.find((item) =>
-    selectableForScope(item, scope, workspaceAgentIds));
+    selectableForScope(item, scope, workspaceAgentIds, purpose));
 }
 
 function findConfiguration(
@@ -153,7 +167,10 @@ function currentSourceDescription(
   return `Inherited from ${readable(resolution.source.scopeType)}`;
 }
 
-export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
+export function ModelAssignmentEditor({
+  scope,
+  purpose = "execution",
+}: ModelAssignmentEditorProps) {
   const location = useNavigation();
   const cache = useQueryCache();
   const catalog = useQuery("model-catalog", fetchModelCatalog, { staleTime: 5_000 });
@@ -181,10 +198,12 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
               "No canonical specialist roster is available. Configure specialists before assigning a workspace default.",
             )
           : undefined);
-  const preferenceKey = `model-preference:${scope.type}:${scope.id}:${scope.agentId ?? "all"}`;
+  const preferenceKey =
+    `model-preference:${purpose}:${scope.type}:${scope.id}:${scope.agentId ?? "all"}`;
   const preferences = useQuery(
     preferenceKey,
     (signal) => fetchModelPreferences({
+      purpose,
       scopeType: scope.type,
       scopeId: scope.id,
       agentId: scope.agentId,
@@ -192,9 +211,9 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
     { staleTime: 5_000 },
   );
   const resolution = useQuery(
-    `model-resolution:${scope.agentId ?? "global"}`,
+    `model-resolution:${purpose}:${scope.agentId ?? "global"}`,
     (signal) => scope.agentId
-      ? fetchModelResolution({ agentId: scope.agentId }, signal)
+      ? fetchModelResolution({ agentId: scope.agentId, purpose }, signal)
       : Promise.resolve(null),
     { staleTime: 5_000 },
   );
@@ -222,6 +241,7 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
     : [];
   const savedConfigurationsKey = [
     "model-configurations",
+    purpose,
     scope.type,
     scope.id,
     ...savedConfigurationIds,
@@ -270,6 +290,7 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
     ?? baselineFallbackId;
   const sourceVersion = exactPreference?.version ?? 0;
   const hydrationKey = [
+    purpose,
     scope.type,
     scope.id,
     sourceVersion,
@@ -320,8 +341,12 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
     selectedPrimary,
     scope,
     workspaceAgentIds,
+    purpose,
   );
-  const providers = useMemo(() => unique(items.map((item) => item.providerId)).sort(), [items]);
+  const providers = useMemo(
+    () => unique(items.map((item) => item.providerId)).sort(),
+    [items],
+  );
   const selectedProvider = selectedPrimary?.providerId ?? "";
   const providerItems = items.filter((item) => item.providerId === selectedProvider);
   const models = unique(providerItems.map((item) => item.modelId));
@@ -344,12 +369,23 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
     || fallbackReceipt.state === "unresolved";
   const canSave = Boolean(
     selectedPrimary
-    && selectableForScope(selectedPrimary, scope, workspaceAgentIds)
-    && fallbackSelectionIsValid(
-      items,
-      fallbackId,
-      scope.agentId,
+    && selectableForScope(
+      selectedPrimary,
+      scope,
       workspaceAgentIds,
+      purpose,
+    )
+    && (
+      !fallbackId
+      || Boolean(
+        findConfiguration(items, fallbackId)
+        && selectableForScope(
+          findConfiguration(items, fallbackId)!,
+          scope,
+          workspaceAgentIds,
+          purpose,
+        ),
+      )
     )
     && changed
     && reason.trim().length >= 3
@@ -366,9 +402,19 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
   );
 
   const editorId = scope.type === "agent"
-    ? "agent-model-configuration"
-    : "workspace-model-configuration";
-  const controlPrefix = scope.type === "agent" ? "agents" : "system";
+    ? purpose === "planning"
+      ? "agent-advisory-model-configuration"
+      : "agent-model-configuration"
+    : purpose === "planning"
+      ? "workspace-advisory-model-configuration"
+      : "workspace-model-configuration";
+  const controlPrefix = scope.type === "agent"
+    ? purpose === "planning"
+      ? "agents-advisory"
+      : "agents"
+    : purpose === "planning"
+      ? "system-advisory"
+      : "system";
 
   useEffect(() => {
     if (
@@ -412,6 +458,7 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
       items.filter((item) => item.providerId === providerId),
       scope,
       workspaceAgentIds,
+      purpose,
     );
     setPrimaryId(next?.configurationId ?? "");
     if (fallbackId === next?.configurationId) setFallbackId("");
@@ -424,11 +471,11 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
       item.providerId === selectedProvider && item.modelId === modelId
     ));
     const matchingEffort = candidates.find((item) => (
-      selectableForScope(item, scope, workspaceAgentIds)
+      selectableForScope(item, scope, workspaceAgentIds, purpose)
       && item.reasoningEffort === selectedPrimary?.reasoningEffort
     ));
     const next = matchingEffort
-      ?? firstSelectable(candidates, scope, workspaceAgentIds);
+      ?? firstSelectable(candidates, scope, workspaceAgentIds, purpose);
     setPrimaryId(next?.configurationId ?? "");
     if (fallbackId === next?.configurationId) setFallbackId("");
   };
@@ -444,6 +491,7 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
         scope.type as ModelPreferenceScope,
         scope.id,
         {
+          purpose,
           agentId: scope.agentId,
           primaryConfigurationId: selectedPrimary.configurationId,
           fallbackConfigurationId: fallbackId || null,
@@ -453,10 +501,14 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
       );
       setHydratedFrom("");
       cache.invalidate(preferenceKey);
-      if (scope.agentId) cache.invalidate(`model-resolution:${scope.agentId}`);
+      if (scope.agentId) {
+        cache.invalidate(`model-resolution:${purpose}:${scope.agentId}`);
+      }
       else cache.invalidatePrefix("model-resolution:");
       setSavedMessage(
-        `Model assignment version ${result.preference.version} saved. New runs will pin this exact configuration.`,
+        purpose === "planning"
+          ? `Advisory assignment version ${result.preference.version} saved. A future run pins it only while this exact advisor route remains attested.`
+          : `Model assignment version ${result.preference.version} saved. New runs will pin this exact configuration.`,
       );
     } catch (error) {
       setSaveError(error instanceof Error
@@ -472,20 +524,33 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
     ?? resolution.error
     ?? workspaceRosterBlockingError
     ?? (needsSavedConfigurations ? savedConfigurations.error : undefined);
+  const advisory = purpose === "planning";
+  const hasSelectableConfiguration = items.some((item) =>
+    selectableForScope(item, scope, workspaceAgentIds, purpose));
 
   return (
     <Card
       id={editorId}
       className="model-assignment"
-      aria-label={`${scope.label} model configuration`}
+      aria-label={`${scope.label} ${advisory ? "advisory " : ""}model configuration`}
       tabIndex={-1}
     >
       <div className="os-card-heading">
         <div>
-          <p className="os-eyebrow">LLM assignment</p>
-          <h2>{scope.type === "global" ? "Default model configuration" : "Provider and model"}</h2>
+          <p className="os-eyebrow">
+            {advisory ? "Reasoning advisor" : "Execution LLM assignment"}
+          </p>
+          <h2>
+            {advisory
+              ? "Advisory provider and model"
+              : scope.type === "global"
+                ? "Default model configuration"
+                : "Execution provider and model"}
+          </h2>
           <p>
-            {scope.type === "global"
+            {advisory
+              ? "Choose an optional, attested advisor-only model for this specialist’s planning, explanation, and critique. It receives no tool or execution authority."
+              : scope.type === "global"
               ? "This is the fail-closed fallback for agents without a more specific assignment."
               : "Choose the exact provider, model, reasoning effort, and fallback used by this specialist for execution assignments."}
           </p>
@@ -495,18 +560,15 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
         </StatusPill>
       </div>
       <p className="model-assignment__authority-note" role="note">
-        Model choice controls reasoning and provider routing. It does not create
-        a missing specialist tool binding or grant execution authority.
-        Observe-only and advisor-only paths can support guidance, while an
-        Autonomous executor still requires a current locally enforced runtime
-        binding. Autonomous planning uses a separate route reviewed in each
-        mission contract.
+        {advisory
+          ? "This is a reasoning-only route. Ti-Scale pins it separately only for future runs while the exact provider receipt remains current and attested. If no advisor is configured, the specialist’s enforced execution path remains usable."
+          : "Model choice controls execution-provider routing. It does not create a missing specialist tool binding or grant execution authority. Autonomous execution still requires a current locally enforced runtime binding; reasoning advice is configured separately below."}
       </p>
 
-      {loading && <LoadingPanel label="Loading live model catalog and assignment" />}
+      {loading && <LoadingPanel label={`Loading live ${advisory ? "advisory " : ""}model catalog and assignment`} />}
       {loadError && (
         <ErrorPanel
-          title="Model configuration is unavailable"
+          title={`${advisory ? "Advisory model" : "Model"} configuration is unavailable`}
           error={loadError}
           retryControlId={`${controlPrefix}-model-load-retry`}
           onRetry={() => {
@@ -552,7 +614,11 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
               </small>
             )}
             {!exactPreference && !inheritedResolution && scope.type === "agent" && (
-              <small>Set this specialist directly or configure the workspace default below.</small>
+              <small>
+                {advisory
+                  ? "No optional reasoning advisor is configured for this specialist."
+                  : "Set this specialist directly or configure the workspace default below."}
+              </small>
             )}
             {!exactPreference && !inheritedResolution && scope.type === "agent" && (
               <ButtonLink
@@ -609,24 +675,45 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
               aria-label={`${scope.label} model assignment semantics`}
             >
               <KeyValueGrid items={[
-                { label: "Assignment purpose", value: "Specialist execution" },
+                {
+                  label: "Assignment purpose",
+                  value: advisory
+                    ? "Specialist reasoning and advice"
+                    : "Specialist execution",
+                },
                 { label: "Preference order", value: "Workspace → agent → mission → run → step" },
                 { label: "Saved change applies to", value: "Future model resolutions only" },
                 { label: "Active-run assignment", value: "Immutable pinned receipt" },
-                { label: "Autonomous planning route", value: "Reviewed in the mission contract" },
+                {
+                  label: advisory
+                    ? "Execution authority"
+                    : "Autonomous planning route",
+                  value: advisory
+                    ? "None · separately enforced"
+                    : "Reviewed in the mission contract",
+                },
               ]} />
               <p className="os-muted">
-                Purpose contract: {readable(assignmentSemantics.purpose)}. A
-                planning advisor is selected separately and cannot gain
-                execution authority from this preference.
+                Purpose contract: {readable(assignmentSemantics.purpose)}.{" "}
+                {advisory
+                  ? "This advisor can influence reasoning only; it cannot gain tool, scope, or execution authority from this preference."
+                  : "A reasoning advisor is selected separately and cannot gain execution authority from this preference."}
               </p>
             </section>
           )}
 
-          {items.length === 0 ? (
+          {items.length === 0 || (advisory && !hasSelectableConfiguration) ? (
             <div className="os-empty">
-              <strong>No live model configurations were reported</strong>
-              <p>Connect and attest a provider before assigning a model. Ti-Scale will not invent a catalog entry.</p>
+              <strong>
+                {advisory
+                  ? "No attested specialist advisor is available"
+                  : "No live model configurations were reported"}
+              </strong>
+              <p>
+                {advisory
+                  ? "Local and enforced execution remain usable. Connect and attest an advisor-only provider route for this specialist to add optional model reasoning; Ti-Scale will not invent provider availability."
+                  : "Connect and attest a provider before assigning a model. Ti-Scale will not invent a catalog entry."}
+              </p>
             </div>
           ) : (
             <form className="model-assignment__form" onSubmit={save}>
@@ -635,15 +722,24 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                   <span>Provider</span>
                   <TitaniumSelect
                     data-control-id={`${controlPrefix}-model-provider`}
-                    aria-label={`${scope.label} provider`}
+                    aria-label={`${scope.label}${advisory ? " advisory" : ""} provider`}
                     value={selectedProvider}
                     onChange={(event) => selectProvider(event.target.value)}
                   >
-                    <option value="" disabled>Choose an authenticated provider</option>
+                    <option value="" disabled>
+                      {advisory
+                        ? "Choose an attested advisory provider"
+                        : "Choose an authenticated provider"}
+                    </option>
                     {providers.map((provider) => {
                       const available = items.some((item) => (
                         item.providerId === provider
-                        && selectableForScope(item, scope, workspaceAgentIds)
+                        && selectableForScope(
+                          item,
+                          scope,
+                          workspaceAgentIds,
+                          purpose,
+                        )
                       ));
                       return <option key={provider} value={provider} disabled={!available}>{provider}{available ? "" : " — unavailable"}</option>;
                     })}
@@ -654,7 +750,7 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                   <span>Primary model</span>
                   <TitaniumSelect
                     data-control-id={`${controlPrefix}-model-primary`}
-                    aria-label={`${scope.label} primary model`}
+                    aria-label={`${scope.label}${advisory ? " advisory" : ""} primary model`}
                     value={selectedModel}
                     disabled={!selectedProvider}
                     onChange={(event) => selectModel(event.target.value)}
@@ -664,7 +760,12 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                       const modelItems = providerItems.filter((item) => item.modelId === modelId);
                       const representative = modelItems[0]!;
                       const available = modelItems.some((item) =>
-                        selectableForScope(item, scope, workspaceAgentIds));
+                        selectableForScope(
+                          item,
+                          scope,
+                          workspaceAgentIds,
+                          purpose,
+                        ));
                       return <option key={modelId} value={modelId} disabled={!available}>{modelOptionLabel(representative)}{available ? "" : " — unavailable"}</option>;
                     })}
                   </TitaniumSelect>
@@ -674,7 +775,7 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                   <span>Reasoning effort</span>
                   <TitaniumSelect
                     data-control-id={`${controlPrefix}-model-reasoning`}
-                    aria-label={`${scope.label} reasoning effort`}
+                    aria-label={`${scope.label}${advisory ? " advisory" : ""} reasoning effort`}
                     value={primaryId}
                     disabled={!selectedModel}
                     onChange={(event) => {
@@ -693,10 +794,16 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                           item,
                           scope,
                           workspaceAgentIds,
+                          purpose,
                         )}
                       >
                         {item.reasoningEffort ? readable(item.reasoningEffort) : "Provider default"}
-                        {selectableForScope(item, scope, workspaceAgentIds)
+                        {selectableForScope(
+                          item,
+                          scope,
+                          workspaceAgentIds,
+                          purpose,
+                        )
                           ? ""
                           : scope.agentId
                             ? " — unavailable for this agent"
@@ -710,7 +817,7 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                   <span>Fallback configuration</span>
                   <TitaniumSelect
                     data-control-id={`${controlPrefix}-model-fallback`}
-                    aria-label={`${scope.label} fallback model`}
+                    aria-label={`${scope.label}${advisory ? " advisory" : ""} fallback model`}
                     value={fallbackId}
                     onChange={(event) => {
                       setSavedMessage("");
@@ -724,12 +831,22 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                         key={item.configurationId}
                         value={item.configurationId}
                         disabled={
-                          !selectableForScope(item, scope, workspaceAgentIds)
+                          !selectableForScope(
+                            item,
+                            scope,
+                            workspaceAgentIds,
+                            purpose,
+                          )
                           || item.configurationId === primaryId
                         }
                       >
                         {exactConfigurationLabel(item)}
-                        {selectableForScope(item, scope, workspaceAgentIds)
+                        {selectableForScope(
+                          item,
+                          scope,
+                          workspaceAgentIds,
+                          purpose,
+                        )
                           ? ""
                           : ` — ${item.unavailableReasons.join("; ") || (scope.agentId ? "not declared for this agent" : "unavailable")}`}
                       </option>
@@ -775,6 +892,7 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                     selectedPrimary,
                     scope,
                     workspaceAgentIds,
+                    purpose,
                   ) && (
                     <p className="os-state-remediation">
                       {selectedPrimary.unavailableReasons.join(" ")
@@ -788,10 +906,18 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                 </div>
               )}
 
-              <section className="model-assignment__catalog" aria-label={`${scope.label} live model readiness`}>
+              <section
+                className="model-assignment__catalog"
+                aria-label={`${scope.label} live ${advisory ? "advisory " : ""}model readiness`}
+              >
                 <div>
-                  <h3>Live model readiness</h3>
-                  <p>Every row comes from the current runtime provider and agent manifests. Disabled paths remain visible so enforcement or connection gaps are explainable.</p>
+                  <h3>Live {advisory ? "advisory " : ""}model readiness</h3>
+                  <p>
+                    Every row comes from the current runtime provider and agent
+                    manifests. {advisory
+                      ? "Only authenticated, healthy, structured-output advisor routes are selectable here."
+                      : "Disabled paths remain visible so enforcement or connection gaps are explainable."}
+                  </p>
                 </div>
                 <div className="os-table-wrap"><table className="os-data-table">
                   <thead><tr><th>Provider and model</th><th>Reasoning</th><th>Execution boundary</th><th>Enforcement</th><th>Availability for this scope</th></tr></thead>
@@ -800,6 +926,7 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                       item,
                       scope,
                       workspaceAgentIds,
+                      purpose,
                     );
                     const missingWorkspaceAgents = scope.type === "global"
                       ? workspaceAgentIds.filter((id) =>
@@ -824,7 +951,9 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
               </section>
 
               <label className="model-assignment__reason">
-                <span>Reason for this assignment</span>
+                <span>
+                  Reason for this {advisory ? "advisory " : ""}assignment
+                </span>
                 <textarea
                   data-control-id={`${controlPrefix}-model-reason`}
                   value={reason}
@@ -834,8 +963,12 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
                     setReason(event.target.value);
                   }}
                   placeholder={scope.type === "global"
-                    ? "Why this model is the workspace default"
-                    : `Why this model fits ${scope.label}`}
+                    ? advisory
+                      ? "Why this model is the workspace reasoning advisor"
+                      : "Why this model is the workspace default"
+                    : advisory
+                      ? `Why this advisor improves ${scope.label}'s reasoning`
+                      : `Why this model fits ${scope.label}`}
                   disabled={!changed || saving}
                   required
                 />
@@ -843,7 +976,7 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
 
               {saveError && (
                 <ErrorPanel
-                  title="Model assignment was not saved"
+                  title={`${advisory ? "Advisory model" : "Model"} assignment was not saved`}
                   error={saveError}
                   retryControlId={`${controlPrefix}-model-conflict-retry`}
                   onRetry={() => {
@@ -856,14 +989,24 @@ export function ModelAssignmentEditor({ scope }: ModelAssignmentEditorProps) {
 
               <div className="model-assignment__actions">
                 <p>
-                  Running missions keep their pinned model receipt. This change applies to future resolutions and cannot silently alter an active run.
+                  {advisory
+                    ? "Running missions keep their immutable receipts. This optional advisor applies only to future runs and cannot alter execution authority."
+                    : "Running missions keep their pinned model receipt. This change applies to future resolutions and cannot silently alter an active run."}
                 </p>
                 <Button
                   type="submit"
                   data-control-id={`${controlPrefix}-model-save`}
                   disabled={!canSave}
                 >
-                  {saving ? "Saving assignment" : scope.type === "global" ? "Save workspace default" : "Save agent assignment"}
+                  {saving
+                    ? advisory
+                      ? "Saving advisory assignment"
+                      : "Saving assignment"
+                    : advisory
+                      ? "Save advisory assignment"
+                      : scope.type === "global"
+                        ? "Save workspace default"
+                        : "Save agent assignment"}
                 </Button>
               </div>
             </form>

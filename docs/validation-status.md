@@ -2,7 +2,8 @@
 
 This page separates evidence from the reviewed source tree from explicitly
 labelled observations of the active installation. It is intentionally
-conservative: neither class of evidence is a complete release approval.
+conservative: neither class of evidence alone proves capability that is absent
+from the installed runtime manifests and live readiness receipts.
 
 ## Reviewed source and active-installation truth
 
@@ -10,8 +11,8 @@ conservative: neither class of evidence is a complete release approval.
 | --- | --- |
 | Product version | `0.1.0` |
 | Journeys | Exactly two: Autonomous and Guided |
-| Source database | Ordered migrations through schema version 60 |
-| Active database | Authenticated health reports migration 60, WAL mode, foreign keys, verified integrity, and zero pending outbox records. Matching the source migration does not by itself prove the release matrix |
+| Source database | Ordered migrations through schema version 63 |
+| Active database | The last authenticated active-installation observation reports migration 60, WAL mode, foreign keys, verified integrity, and zero pending outbox records. Activating the schema-63 source requires the reviewed forward migration and a fresh health receipt |
 | Guided runtime | A local manual planner and eleven reviewed exact-decision local-tool bindings are represented in current source. These are tool bindings, not eleven ready product agents. Every binding remains configuration-, readiness-, and exact-decision-gated, and provider-backed execution is not implied |
 | Autonomous runtime | Three bounded local safe-recon action classes are implemented behind an exact runtime manifest; an unconfigured installation remains fail-closed |
 | OpenRouter | Optional, planning-only Guided readiness with a private credential file and fresh durable attestation; it does not grant mission execution |
@@ -22,7 +23,7 @@ conservative: neither class of evidence is a complete release approval.
 | Obsidian | Connection, round-trip health, projection, import, and conflict handling are implemented; export is a forward-only Markdown projection and never creates a restorable application or database archive; no Vault is bundled or active by default |
 | Agent Fleet and model assignment | Source exposes all 12 canonical product-agent roles. The last recorded active-installation inventory binds five roles: ReconScout and WebBreaker have complete mounted coverage, while SessionRunner, ReportSmith, and VulnIntel have partial capability coverage. CredSmith, ADAttackMapper, CloudSentinel, ReverseSage, FuzzSmith, OSINTSeeker, and SecretHunter are offline. The recorded live catalog exposes one local deterministic enforced model compatible with the five bound roles; it offers no alternative provider, reasoning-effort, or fallback selection, and the seven offline roles have no compatible selectable model |
 
-## Current release blockers
+## Current validation gaps
 
 - The interaction manifest contains 798 control groups, including 576 fixture-required groups, and nine explicit known-gap records. Its source-bound validator passes 52/52 tests with 5,178 assertions, but this validates the inventory contract rather than activating every option in every material browser state.
 - The earlier Chromium 1440 rendered-control crawl predates the current 798-group source and is not current aggregate activation evidence. The last whole-manifest derivation before the current model-setting and Research expansions required 3,546 Chromium 1440 activations and 46,174 across all 14 configured release projects; that aggregate count is now superseded for current-source activation accounting. The model-setting slice independently proves its 910/910 source-bound requirements and the bounded Research functional slice proves 182/182 retry-free cases across all 13 configured non-Brain-renderer projects, but no enforced current-source aggregate receipt set proves the complete manifest.
@@ -39,7 +40,7 @@ conservative: neither class of evidence is a complete release approval.
 - The configured 390-case automated axe matrix, current Chromium route/href
   crawl, and bounded production-byte Web Vitals run are green, but they are not
   a complete WCAG or performance release approval. The retry-free aggregate
-  option-activation matrix, concurrent-load evidence, 72-hour soak, and preview
+  option-activation matrix, concurrent-load evidence, 72-hour soak, and operator
   acceptance period are not complete.
 - Existing installation evidence proves only three Autonomous safe-recon classes and seven Guided local bindings. Current source adds exact-step Windows/identity and local-only SearchSploit paths, but their focused source and single-browser receipts do not constitute a complete installed-tool or cross-browser matrix.
 - The sealed 2026-07-21 historical inventory receipt and its active Vault
@@ -49,23 +50,26 @@ conservative: neither class of evidence is a complete release approval.
 - Historical success/failure promotion remains closed because the imported corpus does not contain canonical attempt/evidence bindings. Future imports still require their own source receipts, reconciliation, authorization, and forward-only recovery policy; source code alone is not import evidence.
 - A prior schema-37 candidate passed its pre-activation quality gates but exceeded the old 30-second readiness deadline during a cold multi-gigabyte database integrity check. The active installation now admits authenticated health at migration 60, but cold-database admission remains an installation-dependent check for every forward update.
 - An earlier installation exposed a release-start permission defect: its unprivileged wrapper could not traverse the root-owned transaction directory and entered a restart loop even though the committed installation journal was valid. Source contains descriptor-bound, no-follow, crash-durable release-state writes and the exact traverse-only service ACL; its 71-test focused regression remains green. That focused repair is not a substitute for a complete forward-update rehearsal.
-- Reviewed source and authenticated active health both report migration 60.
-  The complete browser matrix, visual approval, soak period, and human release
-  sign-off have not been completed.
+- The reviewed source migration ceiling is 63. The last authenticated
+  active-installation observation remains at migration 60 until the next
+  reviewed forward activation. The complete browser matrix, visual approval,
+  soak period, and human release sign-off have not been completed.
 
-The source therefore remains **not release-eligible**. See [Release gates](release-gates.md) for the complete approval contract.
+These are product-wide validation gaps. They do not redefine the active
+standalone service or its deployment mode. See
+[Release gates](release-gates.md) for the complete approval contract.
 
 ## Latest focused local validation evidence
 
-The following evidence was collected through 2026-07-28 from the reviewed
+The following evidence was collected through 2026-07-29 from the reviewed
 source tree and active installation. These are focused engineering gates, not a
 substitute for the complete release matrix, soak period, visual approval, or
 human release decision.
 
 | Gate | Result |
 | --- | --- |
-| Most recent recorded complete source unit and integration suite | Before the current Windows/identity and SearchSploit expansion, 2,844/2,844 passed across 464 files with 30,016 assertions in 865.07 seconds; zero failures and zero skips. This is historical full-suite evidence, not a current full-suite receipt |
-| Historical schema-56 and mutation-authority cases | The earlier combined focused rerun passed 15/15 tests with 1,080 assertions after aligning migration-56 expectations and registering the authenticated Research stage-run mutation in the authority inventory. Current source and active health are now at migration 60 |
+| Current complete source suite | 3,095 tests passed, 0 failed, and 0 skipped against the current reviewed source |
+| Historical schema-56 and mutation-authority cases | The earlier combined focused rerun passed 15/15 tests with 1,080 assertions after aligning migration-56 expectations and registering the authenticated Research stage-run mutation in the authority inventory. Current source is at migration 63; the last authenticated active-installation observation remains at migration 60 |
 | TypeScript | Application/server typecheck and E2E typecheck passed |
 | Standalone source boundary | 1,271 production files across frontend, backend, scripts, and shared contracts scanned; foreign application imports, repository escapes, linked package dependencies, Vite boundary drift, and browser-namespace drift rejected |
 | Test-policy integrity | 561 test files scanned: 488 unit/module files and 73 browser files. Zero skipped, focused, todo, expected-failure, or retry-masked tests were found |
@@ -105,7 +109,7 @@ human release decision.
 | Live Second Brain and Vault | 5,512 active confirmed/verified canonical nodes, 5,996 active edges, 387 Context Packs, and 2,305/2,305 eligible notes hash-verified in the connected attack-knowledge Vault with zero pending sync states or conflicts; 650 synchronized notes remain evidence-unlinked islands, 232 post-seal source changes await a new delta import, and 12,414 parser-only script records remain correctly excluded as stale history |
 | Vault island-link repair dry run | All 650 island notes were reviewed without mutation; zero links were execution-eligible. Forty-eight staged relationships were rejected because 23 referenced suppressed/unreviewed counterparts and 25 lacked the exact completed-migration custody chain; the focused repair suite passed 11/11 with 139 assertions |
 | Authenticated live Chromium | 1/1 passed against port 3132; Command Center, Vault, graph edges, and mission/run deep links verified without browser mutation |
-| Current active-installation health | Ti-Scale on port 3132 returns HTTP 200. Authenticated health reports database migration 60, WAL, foreign keys, verified integrity, zero outbox backlog, and a healthy event stream |
+| Last authenticated active-installation health | Ti-Scale on port 3132 returned HTTP 200. The pre-activation observation reports database migration 60, WAL, foreign keys, verified integrity, zero outbox backlog, and a healthy event stream; source schema 63 requires a fresh forward-activation receipt |
 | No-backup and dormant-container boundary | All six forbidden Ti-Scale backup roots are absent. Docker, containerd, kubelet, k3s, and MicroK8s remain inactive |
 
 ## Current retry-free browser gate ledger
@@ -126,11 +130,11 @@ must be rerun without retries.
 | Agent Fleet model settings | **Green:** 52/52 passed across the 13 general release projects—Chromium at 360, 1024, 1280, 1440, 1920, 2560, and 200% zoom; enterprise Chromium; Firefox; WebKit; Android Chromium; iPhone WebKit; and tablet Chromium—in 26.3 minutes with three workers and zero retries, skips, unexpected failures, or flaky results. The source-bound activation ledger reconciled 910/910 requirements with `missing=0`, `duplicate=0`, `unexpected=0`, `invalid=0`, and `reporterErrors=0` |
 | Research Lab | **Bounded functional slice green:** 182/182 passed across all 13 configured non-Brain-renderer projects with zero retries, skips, or unexpected failures. The three-engine desktop subset passed 42/42 with three workers after shared-state isolation. Operator provisioning of a real private-holdout descriptor and canonical browser activation of the validation and private hidden-holdout stages remain pending, as do whole-manifest activation and visual approval |
 
-These focused browser slices are green, but they do not make the complete
-source release-eligible. The 910/910 result closes only the Agent Fleet
-model-setting slice. The complete current-source activation-receipt matrix,
-nine known-gap closures, visual approvals, full-product cross-browser release
-run, soak period, and human sign-off remain outstanding.
+These focused browser slices are green, but they do not complete product-wide
+validation. The 910/910 result closes only the Agent Fleet model-setting slice.
+The complete current-source activation-receipt matrix, nine known-gap
+closures, visual approvals, full-product cross-browser release run, soak
+period, and human sign-off remain outstanding.
 
 The Chromium gate includes the durable Brain/Vault degradation sequence followed by Autonomous intake. It proves that an offline Obsidian projection remains visibly degraded without incorrectly disabling the healthy canonical SQLite Brain. The current measured build remains within the initial and lazy-route gzip budgets.
 
@@ -171,9 +175,10 @@ Local browser evidence is recorded at:
 - `test-results/results/agent-model-truthful-crossbrowser-20260726T1810Z.json`
 - `test-results/results/agent-model-truthful-crossbrowser-20260726T1810Z.interaction-activation-receipts.json`
 
-Reviewed source and authenticated active health both report migration 60.
-Focused source or single-browser receipts for later capability slices must not
-be represented as complete release, soak, or cross-browser evidence.
+The reviewed source migration ceiling is 63; the last authenticated active
+installation observation reports migration 60. Focused source or
+single-browser receipts for later capability slices must not be represented as
+complete release, soak, or cross-browser evidence.
 
 ## Installation-dependent checks
 

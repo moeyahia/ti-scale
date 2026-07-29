@@ -688,6 +688,10 @@ export class MissionRepository {
         tool_policy_json, configuration_json, last_heartbeat_at
       FROM agents
       WHERE json_extract(configuration_json, '$.userFacing') = 1
+        AND COALESCE(
+          json_extract(configuration_json, '$.orchestrationAgent'),
+          0
+        ) != 1
       ORDER BY display_name, id
     `).all() as Array<{
       id: string;

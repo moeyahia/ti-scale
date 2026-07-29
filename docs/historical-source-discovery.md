@@ -119,8 +119,8 @@ history-root    -> --history-root
 ```
 
 `--history-root` is accepted only with verified-reference retention and the
-attack-knowledge-only projection. It cannot be used to populate the legacy
-target-centric mission projection.
+attack-knowledge-only projection. It cannot be used to populate the full
+historical target-centric mission projection.
 
 Repeated execution remains hash-addressed and candidate-deduplicated. If a
 source is still changing, the settled-source boundary defers it to a later run

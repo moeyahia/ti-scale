@@ -23,6 +23,7 @@ describe("safe-stop and budget registries", () => {
   test("every template recommendation resolves to an optional registered stop", () => {
     const registry = buildMissionTemplateRegistry(
       buildRuntimeCapabilityProjection(completeRuntimeManifests()),
+      "autonomous",
     );
     const optional = new Set(OPTIONAL_MISSION_SAFE_STOPS.map(({ id }) => id));
     for (const templateId of MISSION_TEMPLATE_IDS) {

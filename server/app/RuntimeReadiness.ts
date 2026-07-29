@@ -5,6 +5,13 @@ import type {
   ReadinessContext,
 } from "../missions";
 import type { AutonomousRuntimeCompositionReadiness } from "./AutonomousRuntimeComposition";
+import {
+  candidateLinuxTargetScopeLabel,
+  candidateLinuxTargetScopesCover,
+} from "../autonomous-runtime/CandidateLinuxTargetScope";
+import type {
+  CandidateLinuxTransportReadiness,
+} from "../autonomous-runtime/CandidateLinuxTransportBindingRegistry";
 
 export type ComponentHealth = "healthy" | "degraded" | "unhealthy" | "unknown";
 
@@ -78,6 +85,12 @@ export interface RuntimeReadinessSnapshot {
   readonly mcp: McpReadiness;
   readonly publicNvd?: PublicNvdReadiness;
   /**
+   * Installed candidate-provider capability. `missionExecutionReady` is global
+   * only; exact-target providers remain conditional until this request's
+   * authorized targets match their typed scope.
+   */
+  readonly candidateLinuxTransport?: CandidateLinuxTransportReadiness;
+  /**
    * Exact object-and-manifest composition proof for the mounted Autonomous
    * runtime. Legacy booleans and environment declarations cannot substitute
    * for this report; absence therefore remains fail-closed.
@@ -142,6 +155,27 @@ function requiresExecutionTools(context: ReadinessContext): boolean {
   return request.contract.allowedActionClasses.some(
     (actionClass) => !advisoryOnly.has(actionClass.trim().toLocaleLowerCase("en-US")),
   );
+}
+
+export const CANDIDATE_LINUX_ACTION_CLASS_IDS = Object.freeze([
+  "exploit_validation",
+  "command_session_execution",
+  "data_access_impact_validation",
+  "privilege_escalation",
+  "cleanup_restoration",
+] as const);
+const CANDIDATE_LINUX_ACTION_CLASSES = new Set<string>(
+  CANDIDATE_LINUX_ACTION_CLASS_IDS,
+);
+
+function requiresCandidateLinuxTransport(
+  request: AutonomousMissionRequest | undefined,
+  locallyReadyActionClassIds: readonly string[] = [],
+): boolean {
+  const locallyReady = new Set(locallyReadyActionClassIds);
+  return request?.contract.allowedActionClasses.some((actionClass) =>
+    CANDIDATE_LINUX_ACTION_CLASSES.has(actionClass)
+    && !locallyReady.has(actionClass)) === true;
 }
 
 /**
@@ -324,6 +358,55 @@ export function createRuntimeReadinessProviders(
       },
     },
     {
+      id: "candidate_linux_target_scope",
+      label: "Candidate procedure target support",
+      journeys: ["autonomous"],
+      evaluate(context) {
+        const request = autonomousRequest(context);
+        const runtime = snapshot();
+        if (!requiresCandidateLinuxTransport(
+          request,
+          runtime.autonomousRuntime?.readyActionClassIds,
+        )) {
+          return check(
+            "candidate_linux_target_scope",
+            "Candidate procedure target support",
+            "pass",
+            ["autonomous"],
+            "This contract does not request the candidate Linux session, impact, privilege, or cleanup continuation.",
+          );
+        }
+        const readiness = runtime.candidateLinuxTransport;
+        const targets = request?.authorization.allowedTargets ?? [];
+        const exactMatch = readiness?.status === "ready"
+          && readiness.conditionalPlanningReady === true
+          && candidateLinuxTargetScopesCover(
+            readiness.targetScopes,
+            targets,
+          );
+        if (exactMatch) {
+          return check(
+            "candidate_linux_target_scope",
+            "Candidate procedure target support",
+            "pass",
+            ["autonomous"],
+            `Every authorized target is covered by the current reviewed provider scope: ${readiness.targetScopes.map(candidateLinuxTargetScopeLabel).join(", ")}.`,
+          );
+        }
+        const supported = readiness?.targetScopes.length
+          ? readiness.targetScopes.map(candidateLinuxTargetScopeLabel).join(", ")
+          : "none";
+        return check(
+          "candidate_linux_target_scope",
+          "Candidate procedure target support",
+          "fail",
+          ["autonomous"],
+          `The contract requests candidate Linux continuation, but its authorized targets are not all covered by the current reviewed provider. Current support: ${supported}.`,
+          "Use the exact reviewed target, install and attest a provider whose typed scope covers this target, or remove the unsupported candidate continuation action classes.",
+        );
+      },
+    },
+    {
       id: "provider_usage_accounting",
       label: "Provider budget accounting",
       journeys: ["autonomous"],
@@ -472,17 +555,45 @@ export function createRuntimeReadinessProviders(
         const request = autonomousRequest(context);
         const localRuntime = runtime.autonomousRuntime;
         const localReadyActionClassIds = localRuntime?.readyActionClassIds ?? [];
+        const candidateTargetReady = request !== undefined
+          && runtime.candidateLinuxTransport?.status === "ready"
+          && runtime.candidateLinuxTransport.conditionalPlanningReady === true
+          && candidateLinuxTargetScopesCover(
+            runtime.candidateLinuxTransport.targetScopes,
+            request.authorization.allowedTargets,
+          );
+        const effectiveLocalReadyActionClassIds = candidateTargetReady
+          ? [...new Set([
+              ...localReadyActionClassIds,
+              ...CANDIDATE_LINUX_ACTION_CLASS_IDS,
+            ])]
+          : localReadyActionClassIds;
+        const unsupportedTargetScopedCandidateRequest =
+          requiresCandidateLinuxTransport(
+            request,
+            localReadyActionClassIds,
+          )
+          && runtime.candidateLinuxTransport?.status === "ready"
+          && runtime.candidateLinuxTransport.conditionalPlanningReady === true
+          && candidateTargetReady !== true
+          && request!.contract.allowedActionClasses.some(
+            (actionClassId) =>
+              CANDIDATE_LINUX_ACTION_CLASSES.has(actionClassId)
+              && !localReadyActionClassIds.includes(actionClassId),
+          );
         const localProcessUsable = localRuntime?.status === "ready"
           && localRuntime.components.localProcessExecution === true
           && localRuntime.components.mcpExecution === false
-          && localReadyActionClassIds.length > 0
+          && effectiveLocalReadyActionClassIds.length > 0
           && (request === undefined || request.contract.allowedActionClasses.every(
-            (actionClassId) => localReadyActionClassIds.includes(actionClassId),
+            (actionClassId) =>
+              effectiveLocalReadyActionClassIds.includes(actionClassId),
           ));
         const usable = value.enabled
           && value.executionMode === "enabled"
           && value.startPermitted
-          && value.runnableServers > 0;
+          && value.runnableServers > 0
+          && !unsupportedTargetScopedCandidateRequest;
         if (usable) {
           const degraded = value.missingDependencies > 0 || value.missingSecrets > 0;
           return [
@@ -511,7 +622,7 @@ export function createRuntimeReadinessProviders(
               "Autonomous reviewed execution",
               "pass",
               ["autonomous"],
-              `${localReadyActionClassIds.length} requested action-class binding${localReadyActionClassIds.length === 1 ? " is" : "s are"} executable through the reviewed direct local-process boundary. MCP is neither required nor contacted for this route.`,
+              `${effectiveLocalReadyActionClassIds.length} requested action-class binding${effectiveLocalReadyActionClassIds.length === 1 ? " is" : "s are"} executable through the reviewed direct local-process boundary. MCP is neither required nor contacted for this route.`,
             ),
             check(
               "mcp_execution_guided",

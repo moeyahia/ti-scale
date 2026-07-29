@@ -1,13 +1,17 @@
-# Functional Guided runtime validation
+# Historical Functional Guided Runtime Validation
 
 Validated: 2026-07-19 UTC
 Deployment: `functional-brain-observations-20260719T200042Z`
 Endpoint: `http://127.0.0.1:3132`
 
+This is a point-in-time validation receipt. It preserves the bounded capability
+observed on 2026-07-19 and is not current runtime-readiness truth.
+
 ## Validated operating boundary
 
-Ti-Scale currently provides a production-backed Guided execution slice. An
-operator can create a Guided mission, review one represented action with its
+The audited Ti-Scale installation provided a production-backed Guided
+execution slice. An operator could create a Guided mission, review one
+represented action with its
 normalized parameters, authorize only that exact action, execute it through a
 reviewed local specialist boundary, inspect the resulting Engagement Log and
 Observation, and return to the durable run after a process restart.
@@ -155,10 +159,10 @@ failure. The durable, secret-free summary receipt is:
 test-results/results/live-functional-guided-release-20260719.json
 ```
 
-## Journey readiness
+## Historical journey readiness
 
-The public health endpoint intentionally reports `degraded`, not failed. This
-is a combined system state:
+At the time of this receipt, the public health endpoint reported `degraded`,
+not failed. This was the combined system state:
 
 - Guided execution: ready;
 - all four reviewed exact-step local tools: ready;
@@ -167,10 +171,8 @@ is a combined system state:
 - one Obsidian Vault connection: connected, reachable, and round-trip verified;
 - Autonomous execution: unavailable and fail-closed.
 
-Autonomous execution remains unavailable until Ti-Scale has an enforcing
-provider route, executable specialist fleet, reviewed MCP execution boundary,
-bounded planner, evidence-aware outcome evaluator, and active no-hands action
-boundary. Provider-backed semantic interpretation, generic MCP execution, and
-automatic evidence verification are not implied by this Guided validation.
-Their readiness must be proven independently before the UI can present them as
-available.
+Autonomous execution was unavailable in this audited build. That historical
+result does not describe the current service. Provider-backed semantic
+interpretation, generic MCP execution, and automatic evidence verification
+were not implied by this Guided validation; each capability still requires its
+own current readiness proof before the UI can present it as available.

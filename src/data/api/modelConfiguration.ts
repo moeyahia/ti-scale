@@ -4,14 +4,17 @@ import {
   parseModelPreferenceMutation,
   parseModelPreferences,
   parseModelResolution,
+  parseRunModelAssignments,
 } from "../../domain/schemas/modelConfiguration";
 import type {
   ModelCatalog,
   ModelConfigurationPage,
   ModelPreferenceMutation,
   ModelPreferencePage,
+  ModelAssignmentPurpose,
   ModelPreferenceScope,
   ModelResolutionResult,
+  RunModelAssignmentPage,
   UpdateModelPreferenceInput,
 } from "../../domain/types/modelConfiguration";
 import { apiRequest } from "./client";
@@ -57,6 +60,7 @@ export function fetchModelConfigurations(
 
 export function fetchModelPreferences(
   query: {
+    readonly purpose?: ModelAssignmentPurpose;
     readonly scopeType?: ModelPreferenceScope;
     readonly scopeId?: string;
     readonly agentId?: string | null;
@@ -73,6 +77,7 @@ export function fetchModelPreferences(
 export function fetchModelResolution(
   query: {
     readonly agentId: string;
+    readonly purpose?: ModelAssignmentPurpose;
     readonly missionId?: string;
     readonly runId?: string;
     readonly stepId?: string;
@@ -84,6 +89,16 @@ export function fetchModelResolution(
     signal,
     parse: parseModelResolution,
   });
+}
+
+export function fetchRunModelAssignments(
+  runId: string,
+  signal: AbortSignal,
+): Promise<RunModelAssignmentPage> {
+  return apiRequest(
+    `/api/v2/runs/${encodeURIComponent(runId)}/model-assignments`,
+    { method: "GET", signal, parse: parseRunModelAssignments },
+  );
 }
 
 export function updateModelPreference(

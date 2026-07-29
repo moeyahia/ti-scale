@@ -81,6 +81,10 @@ export interface BuildActionClassRegistryInput {
   readonly defaultAllowedActionClassIds?: readonly ActionClassId[];
   readonly authorizedTargetIds?: readonly string[];
   readonly boundedDestructiveTargetIds?: readonly string[];
+  /** Request-scoped readiness reasons supplied by typed runtime boundaries. */
+  readonly additionalLaunchBlockingReasons?: Readonly<
+    Partial<Record<ActionClassId, readonly string[]>>
+  >;
 }
 
 const d = (
@@ -544,6 +548,9 @@ export function buildActionClassRegistry(
             );
           }
         }
+        launchBlockingReasons.push(
+          ...(input.additionalLaunchBlockingReasons?.[definition.id] ?? []),
+        );
       }
 
       return [

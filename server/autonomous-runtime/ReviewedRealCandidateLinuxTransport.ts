@@ -28,11 +28,19 @@ import {
   type CandidateLinuxTransportOperation,
   type CandidateLinuxTransportRequest,
 } from "./CandidateLinuxTransportBindingRegistry";
+import {
+  candidateLinuxTargetScopeMatches,
+  candidateLinuxTargetScopesEqual,
+  parseCandidateLinuxTargetScope,
+  type CandidateLinuxTargetScope,
+} from "./CandidateLinuxTargetScope";
 
 export const REVIEWED_REAL_CANDIDATE_LINUX_PROFILE_SCHEMA_VERSION =
   "ti-scale.reviewed-real-candidate-linux-profile.v1" as const;
 export const REVIEWED_REAL_CANDIDATE_LINUX_ADAPTER_PROTOCOL_VERSION =
   "ti-scale.reviewed-real-candidate-linux-adapter.v1" as const;
+export const REVIEWED_REAL_CANDIDATE_LINUX_PROCEDURE_PROTOCOL_VERSION =
+  "ti-scale.reviewed-real-candidate-linux-procedure.v1" as const;
 export const REVIEWED_REAL_CANDIDATE_LINUX_ADAPTER_ATTESTATION_SCHEMA_VERSION =
   "ti-scale.reviewed-real-candidate-linux-adapter-attestation.v1" as const;
 
@@ -59,6 +67,7 @@ export interface ReviewedRealCandidateLinuxProfile {
   readonly profileId: string;
   readonly candidateClass: "reviewed_real_candidate_v1";
   readonly realTargetSupport: true;
+  readonly targetScope: CandidateLinuxTargetScope;
   readonly bindingId: string;
   readonly postExploitSpec: Readonly<{
     readonly id: string;
@@ -77,6 +86,18 @@ export interface ReviewedRealCandidateLinuxProfile {
     readonly socketGid: number;
     readonly protocolVersion:
       typeof REVIEWED_REAL_CANDIDATE_LINUX_ADAPTER_PROTOCOL_VERSION;
+  }>;
+  /**
+   * Candidate-specific closed procedure provider. This is intentionally
+   * distinct from the exploit ScriptArtifact: its separately reviewed bytes
+   * translate only the eight typed operations below into the candidate's
+   * already reviewed session mechanism.
+   */
+  readonly procedure: Readonly<{
+    readonly executablePath: string;
+    readonly executableSha256: string;
+    readonly protocolVersion:
+      typeof REVIEWED_REAL_CANDIDATE_LINUX_PROCEDURE_PROTOCOL_VERSION;
   }>;
   readonly boundary: Readonly<{
     readonly typedOperationsOnly: true;
@@ -105,6 +126,7 @@ export interface ReviewedRealCandidateLinuxAdapterAttestation {
   readonly postExploitSpecId: string;
   readonly candidateClass: "reviewed_real_candidate_v1";
   readonly realTargetSupport: true;
+  readonly targetScope: CandidateLinuxTargetScope;
   readonly operations: readonly CandidateLinuxTransportOperation[];
   readonly boundary: ReviewedRealCandidateLinuxProfile["boundary"];
   readonly observedAt: string;
@@ -119,6 +141,16 @@ export interface ReviewedRealCandidateLinuxAdapterImplementation {
   readonly adapterExecutableSha256: string;
   readonly candidateClass: "reviewed_real_candidate_v1";
   readonly realTargetSupport: true;
+  readonly targetScope: CandidateLinuxTargetScope;
+  /**
+   * Proves that the reviewed implementation boundary is installed and still
+   * bound to the profile. An implementation may be either a fixed
+   * procedure-specific provider or a conditional run-scoped bridge. A
+   * conditional bridge can attest before discovery, but that attestation
+   * never grants candidate dispatch: the exact current-run procedure still
+   * requires its own immutable activation and provider attestation.
+   */
+  attest(signal: AbortSignal): Promise<void>;
   handle(
     request: CandidateLinuxTransportRequest,
     signal: AbortSignal,
@@ -257,9 +289,11 @@ export function parseReviewedRealCandidateLinuxProfile(
     "candidateClass",
     "operations",
     "postExploitSpec",
+    "procedure",
     "profileId",
     "realTargetSupport",
     "schemaVersion",
+    "targetScope",
   ], "reviewed real candidate profile");
   if (
     root.schemaVersion !== REVIEWED_REAL_CANDIDATE_LINUX_PROFILE_SCHEMA_VERSION
@@ -310,11 +344,26 @@ export function parseReviewedRealCandidateLinuxProfile(
   ) {
     throw new TypeError("The reviewed real-candidate adapter protocol is invalid");
   }
+  const procedure = plain(root.procedure, "procedure");
+  exactKeys(procedure, [
+    "executablePath",
+    "executableSha256",
+    "protocolVersion",
+  ], "procedure");
+  if (
+    procedure.protocolVersion
+      !== REVIEWED_REAL_CANDIDATE_LINUX_PROCEDURE_PROTOCOL_VERSION
+  ) {
+    throw new TypeError(
+      "The reviewed real-candidate procedure protocol is invalid",
+    );
+  }
   return Object.freeze({
     schemaVersion: REVIEWED_REAL_CANDIDATE_LINUX_PROFILE_SCHEMA_VERSION,
     profileId: stableId(root.profileId, "profileId"),
     candidateClass: "reviewed_real_candidate_v1",
     realTargetSupport: true,
+    targetScope: parseCandidateLinuxTargetScope(root.targetScope),
     bindingId: stableId(root.bindingId, "bindingId"),
     postExploitSpec: Object.freeze({
       id: stableId(spec.id, "postExploitSpec.id"),
@@ -348,6 +397,18 @@ export function parseReviewedRealCandidateLinuxProfile(
       socketGid: nonNegativeInteger(adapter.socketGid, "adapter.socketGid"),
       protocolVersion:
         REVIEWED_REAL_CANDIDATE_LINUX_ADAPTER_PROTOCOL_VERSION,
+    }),
+    procedure: Object.freeze({
+      executablePath: absolutePath(
+        procedure.executablePath,
+        "procedure.executablePath",
+      ),
+      executableSha256: sha256(
+        procedure.executableSha256,
+        "procedure.executableSha256",
+      ),
+      protocolVersion:
+        REVIEWED_REAL_CANDIDATE_LINUX_PROCEDURE_PROTOCOL_VERSION,
     }),
     boundary: exactBoundary(root.boundary),
     operations: exactOperations(root.operations),
@@ -502,6 +563,10 @@ function assertProfileBinding(
       !== binding.postExploitSpecSha256
     || profile.candidateClass !== binding.candidateClass
     || profile.realTargetSupport !== binding.realTargetSupport
+    || !candidateLinuxTargetScopesEqual(
+      profile.targetScope,
+      binding.targetScope,
+    )
     || binding.operations.some(
       (operation, index) => operation !== profile.operations[index],
     )
@@ -532,6 +597,7 @@ function adapterAttestation(
     "realTargetSupport",
     "receiptSha256",
     "schemaVersion",
+    "targetScope",
   ], "reviewed real-candidate adapter attestation");
   const profile = loadedProfile.value;
   const observedAt = String(raw.observedAt);
@@ -549,6 +615,7 @@ function adapterAttestation(
     postExploitSpecId: raw.postExploitSpecId,
     candidateClass: raw.candidateClass,
     realTargetSupport: raw.realTargetSupport,
+    targetScope: raw.targetScope,
     operations: raw.operations,
     boundary: raw.boundary,
     observedAt,
@@ -565,6 +632,10 @@ function adapterAttestation(
     || raw.postExploitSpecId !== profile.postExploitSpec.id
     || raw.candidateClass !== "reviewed_real_candidate_v1"
     || raw.realTargetSupport !== true
+    || !candidateLinuxTargetScopesEqual(
+      parseCandidateLinuxTargetScope(raw.targetScope),
+      profile.targetScope,
+    )
     || JSON.stringify(boundary) !== JSON.stringify(profile.boundary)
     || !Number.isFinite(observed)
     || !Number.isFinite(expires)
@@ -596,6 +667,7 @@ function adapterAttestation(
     postExploitSpecId: profile.postExploitSpec.id,
     candidateClass: "reviewed_real_candidate_v1",
     realTargetSupport: true,
+    targetScope: profile.targetScope,
     operations,
     boundary,
     receiptSha256: raw.receiptSha256,
@@ -618,6 +690,7 @@ implements CandidateLinuxTransportBindingHandler {
   readonly candidateClass = "reviewed_real_candidate_v1" as const;
   readonly handlerProfileSha256: string;
   readonly realTargetSupport = true as const;
+  readonly targetScope: CandidateLinuxTargetScope;
   private currentAttestation?: ReviewedRealCandidateLinuxAdapterAttestation;
 
   constructor(private readonly options: Readonly<{
@@ -634,6 +707,7 @@ implements CandidateLinuxTransportBindingHandler {
     this.postExploitSpecId = options.loadedProfile.value.postExploitSpec.id;
     this.handlerProfileSha256 =
       options.loadedProfile.receipt.sourceSha256;
+    this.targetScope = options.loadedProfile.value.targetScope;
   }
 
   acceptsPostExploitSpecId(postExploitSpecId: string): boolean {
@@ -680,6 +754,10 @@ implements CandidateLinuxTransportBindingHandler {
       request.transportBindingId !== profile.bindingId
       || !this.acceptsPostExploitSpecId(request.postExploitSpecId)
       || isIP(request.exactTarget) === 0
+      || !candidateLinuxTargetScopeMatches(
+        profile.targetScope,
+        request.exactTarget,
+      )
       || !profile.operations.includes(request.operation)
     ) {
       throw new Error(
@@ -784,6 +862,10 @@ function exactAdapterRequest(
     || !ID.test(request.sessionArtifactId)
     || typeof request.exactTarget !== "string"
     || isIP(request.exactTarget) === 0
+    || !candidateLinuxTargetScopeMatches(
+      profile.targetScope,
+      request.exactTarget,
+    )
   ) {
     throw new Error(
       "The adapter request does not match the profile and canonical IP boundary",
@@ -827,6 +909,10 @@ export async function startReviewedRealCandidateLinuxAdapter(
       !== profile.adapter.executableSha256
     || implementation.candidateClass !== "reviewed_real_candidate_v1"
     || implementation.realTargetSupport !== true
+    || !candidateLinuxTargetScopesEqual(
+      implementation.targetScope,
+      profile.targetScope,
+    )
     || !Number.isSafeInteger(ttl)
     || ttl < 1_000
     || ttl > 5 * 60_000
@@ -895,6 +981,7 @@ export async function startReviewedRealCandidateLinuxAdapter(
                 "The reviewed real-candidate attestation identity is invalid",
               );
             }
+            await implementation.attest(controller.signal);
             const observedAt = (input.now ?? (() => new Date()))();
             const unsigned = {
               schemaVersion:
@@ -907,6 +994,7 @@ export async function startReviewedRealCandidateLinuxAdapter(
               postExploitSpecId: profile.postExploitSpec.id,
               candidateClass: "reviewed_real_candidate_v1" as const,
               realTargetSupport: true as const,
+              targetScope: profile.targetScope,
               operations: profile.operations,
               boundary: profile.boundary,
               observedAt: observedAt.toISOString(),

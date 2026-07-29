@@ -91,6 +91,15 @@ import {
 import {
   autonomousActivationBindingSubjectUniquenessMigration,
 } from "./060_autonomous_activation_binding_subject_uniqueness";
+import {
+  specialistAdvisoryModelPreferencesMigration,
+} from "./061_specialist_advisory_model_preferences";
+import {
+  runScopedCandidateLinuxProcedureActivationsMigration,
+} from "./062_run_scoped_candidate_linux_procedure_activations";
+import {
+  reviewedCandidateLinuxProcedureAdmissionsMigration,
+} from "./063_reviewed_candidate_linux_procedure_admissions";
 
 export const DATABASE_MIGRATIONS: readonly Migration[] = Object.freeze([
   coreMigration,
@@ -153,4 +162,7 @@ export const DATABASE_MIGRATIONS: readonly Migration[] = Object.freeze([
   autonomousActivationReceiptsMigration,
   providerAdvisoryDisclosureModeMigration,
   autonomousActivationBindingSubjectUniquenessMigration,
+  specialistAdvisoryModelPreferencesMigration,
+  runScopedCandidateLinuxProcedureActivationsMigration,
+  reviewedCandidateLinuxProcedureAdmissionsMigration,
 ]);

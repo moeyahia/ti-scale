@@ -13,6 +13,7 @@ const TEST_CONFIGURATION = "e2e.agent-model-settings.configuration";
 const TEST_FAIL_CLOSED = "e2e.agent-model-settings.fail-closed";
 const TEST_GLOBAL_DEFAULT = "e2e.agent-model-settings.global-default";
 const TEST_CANONICAL_ROSTER = "e2e.agent-model-settings.canonical-roster";
+const TEST_ADVISORY = "e2e.agent-model-settings.advisory";
 const NOW = "2026-07-23T13:00:00.000Z";
 const AGENT_ID = "ReconScout";
 const AGENT_NAME = "ReconScout";
@@ -98,6 +99,36 @@ const MODEL_INTERACTIONS = {
     controlId: "agents-model-load-retry",
     materialState: "Fixture required: the specialist model catalog, preference, or inherited resolution read failed or the catalog exceeded its 15-minute trust window",
     option: "Retry the authoritative model reads without reviving failed or expired catalog choices",
+  },
+  "agents.advisory.provider": {
+    controlId: "agents-advisory-model-provider",
+    materialState: "Fixture required: an authenticated, healthy, structured-output advisor-only route is attested for the selected specialist",
+    option: "Every attested advisor-only provider compatible with this specialist",
+  },
+  "agents.advisory.primary": {
+    controlId: "agents-advisory-model-primary",
+    materialState: "Fixture required: an attested specialist advisory provider is selected",
+    option: "Every exact advisor-only model for the selected provider",
+  },
+  "agents.advisory.reasoning": {
+    controlId: "agents-advisory-model-reasoning",
+    materialState: "Fixture required: an exact advisor-only specialist model is selected",
+    option: "Every attested reasoning effort for the advisor model",
+  },
+  "agents.advisory.fallback": {
+    controlId: "agents-advisory-model-fallback",
+    materialState: "Fixture required: the separate specialist advisory editor is loaded",
+    option: "No automatic fallback or another exact attested advisor-only route",
+  },
+  "agents.advisory.reason": {
+    controlId: "agents-advisory-model-reason",
+    materialState: "Fixture required: the optional advisory selection changed",
+    option: "Enter why this advisor improves specialist reasoning",
+  },
+  "agents.advisory.save": {
+    controlId: "agents-advisory-model-save",
+    materialState: "Fixture required: an attested advisor-only route and rationale are selected",
+    option: "Save one separate future-run advisory preference without changing execution authority",
   },
   "system.model.provider": {
     controlId: "system-model-provider",
@@ -327,6 +358,7 @@ function configuration(configurationId: string) {
 }
 
 function modelPreference(input: {
+  readonly purpose?: "execution" | "planning";
   readonly scopeType: "global" | "agent";
   readonly scopeId: string;
   readonly agentId: string | null;
@@ -336,7 +368,8 @@ function modelPreference(input: {
   readonly version: number;
 }) {
   return {
-    id: `model-preference-${input.scopeType}-${input.scopeId}`,
+    id: `model-preference-${input.purpose ?? "execution"}-${input.scopeType}-${input.scopeId}`,
+    purpose: input.purpose ?? "execution",
     ...input,
     createdBy: "e2e-local-operator",
     createdAt: NOW,
@@ -484,7 +517,10 @@ async function installModelRoutes(page: Page, input: {
     resolution: 0,
   };
   let catalogAvailable = input.catalogInitiallyAvailable ?? true;
-  let storedPreference: ReturnType<typeof modelPreference> | undefined;
+  const storedPreferences = new Map<
+    "execution" | "planning",
+    ReturnType<typeof modelPreference>
+  >();
   await page.route("**/api/v2/model-**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -537,6 +573,10 @@ async function installModelRoutes(page: Page, input: {
     }
     if (url.pathname === "/api/v2/model-preferences" && request.method() === "GET") {
       reads.preferences += 1;
+      const purpose = url.searchParams.get("purpose") === "planning"
+        ? "planning"
+        : "execution";
+      const storedPreference = storedPreferences.get(purpose);
       const requestedScope = url.searchParams.get("scopeType");
       const requestedAgent = url.searchParams.get("agentId");
       const matches = storedPreference
@@ -551,10 +591,13 @@ async function installModelRoutes(page: Page, input: {
     if (url.pathname === "/api/v2/model-resolution" && request.method() === "GET") {
       reads.resolution += 1;
       const requestedAgentId = url.searchParams.get("agentId") ?? AGENT_ID;
-      if (input.resolution === "missing") {
+      const purpose = url.searchParams.get("purpose") === "planning"
+        ? "planning"
+        : "execution";
+      if (input.resolution === "missing" || purpose === "planning") {
         await json(route, {
           schemaVersion: "2.4",
-          assignmentSemantics: ASSIGNMENT_SEMANTICS,
+          assignmentSemantics: { ...ASSIGNMENT_SEMANTICS, purpose },
           resolution: null,
           availability: {
             status: "unconfigured",
@@ -576,6 +619,7 @@ async function installModelRoutes(page: Page, input: {
         },
         resolution: {
           agentId: requestedAgentId,
+          purpose,
           context: { missionId: null, runId: null, stepId: null },
           source: {
             scopeType: "global",
@@ -603,8 +647,11 @@ async function installModelRoutes(page: Page, input: {
         }), 409);
         return;
       }
-      const nextVersion = (storedPreference?.version ?? 0) + 1;
-      storedPreference = modelPreference({
+      const purpose = body.purpose === "planning" ? "planning" : "execution";
+      const nextVersion =
+        (storedPreferences.get(purpose)?.version ?? 0) + 1;
+      const storedPreference = modelPreference({
+        purpose,
         scopeType: input.scope,
         scopeId: input.scope === "global" ? "global" : AGENT_ID,
         agentId: input.scope === "global" ? null : AGENT_ID,
@@ -615,6 +662,7 @@ async function installModelRoutes(page: Page, input: {
         resolutionReason: String(body.reason),
         version: nextVersion,
       });
+      storedPreferences.set(purpose, storedPreference);
       await json(route, { schemaVersion: "2.4", preference: storedPreference });
       return;
     }
@@ -1003,6 +1051,7 @@ test(`${TEST_CONFIGURATION} exposes inherited truth and saves one exact per-agen
 
   expect(model.writes).toHaveLength(1);
   expect(model.writes[0]?.body).toEqual({
+    purpose: "execution",
     agentId: AGENT_ID,
     primaryConfigurationId: "configuration-openai-high",
     fallbackConfigurationId: "configuration-openrouter-medium",
@@ -1012,6 +1061,133 @@ test(`${TEST_CONFIGURATION} exposes inherited truth and saves one exact per-agen
   expect(model.writes[0]?.headers["idempotency-key"]).toMatch(
     /^(?:[0-9a-f-]{20,}|model-preference-)/u,
   );
+  await browserAudit.waitForPageApiSettlement(page);
+});
+
+test(`${TEST_ADVISORY} saves a distinct attested reasoning advisor without changing execution`, async ({
+  page,
+  browserAudit,
+  interactionActivation,
+}) => {
+  test.setTimeout(120_000);
+  await installAgentRoutes(page);
+  const model = await installModelRoutes(page, {
+    scope: "agent",
+    resolution: "missing",
+    mutation: "success",
+  });
+
+  await page.goto(
+    `/agents/${AGENT_ID}#agent-advisory-model-configuration`,
+    { waitUntil: "domcontentloaded" },
+  );
+  const editor = page.getByLabel(
+    `${AGENT_NAME} advisory model configuration`,
+    { exact: true },
+  );
+  await expect(editor).toBeVisible();
+  await expectFragmentFocusedInViewport(editor);
+  await expect(editor).toContainText("Reasoning advisor");
+  await expect(editor).toContainText("It receives no tool or execution authority.");
+  await expect(editor).toContainText(
+    "If no advisor is configured, the specialist’s enforced execution path remains usable.",
+  );
+
+  const provider = editor.getByRole("combobox", {
+    name: `${AGENT_NAME} advisory provider`,
+    exact: true,
+  });
+  const primary = editor.getByRole("combobox", {
+    name: `${AGENT_NAME} advisory primary model`,
+    exact: true,
+  });
+  const reasoning = editor.getByRole("combobox", {
+    name: `${AGENT_NAME} advisory reasoning effort`,
+    exact: true,
+  });
+  const fallback = editor.getByRole("combobox", {
+    name: `${AGENT_NAME} advisory fallback model`,
+    exact: true,
+  });
+  await expect(provider).toHaveAttribute(
+    "data-control-id",
+    "agents-advisory-model-provider",
+  );
+  await interactionActivation.activate(
+    activation("agents.advisory.provider", "pointer", TEST_ADVISORY),
+    () => selectTitaniumOption(provider, "openrouter", "pointer"),
+  );
+  await interactionActivation.activate(
+    activation("agents.advisory.primary", "pointer", TEST_ADVISORY),
+    () => selectTitaniumOption(
+      primary,
+      "anthropic/claude-4.5-sonnet",
+      "pointer",
+    ),
+  );
+  await interactionActivation.activate(
+    activation("agents.advisory.reasoning", "pointer", TEST_ADVISORY),
+    () => selectTitaniumOption(
+      reasoning,
+      "configuration-openrouter-medium",
+      "pointer",
+    ),
+  );
+  await interactionActivation.activate(
+    activation(
+      "agents.advisory.fallback",
+      "pointer",
+      TEST_ADVISORY,
+      "No automatic fallback",
+    ),
+    () => selectTitaniumOption(fallback, "", "pointer"),
+  );
+
+  const reason = editor.getByRole("textbox", {
+    name: "Reason for this advisory assignment",
+    exact: true,
+  });
+  await interactionActivation.activate(
+    activation("agents.advisory.reason", "keyboard", TEST_ADVISORY),
+    () => enterAssignmentReason(
+      reason,
+      "Use this attested route for reconnaissance analysis only.",
+      "keyboard",
+    ),
+  );
+  const save = editor.getByRole("button", {
+    name: "Save advisory assignment",
+    exact: true,
+  });
+  await expect(save).toBeEnabled();
+  await interactionActivation.activate(
+    activation("agents.advisory.save", "keyboard", TEST_ADVISORY),
+    async () => {
+      await save.focus();
+      await page.keyboard.press("Enter");
+    },
+  );
+  await expect(editor).toContainText(
+    "Advisory assignment version 1 saved.",
+  );
+  await expect(editor).toContainText(
+    "Saved rationale: Use this attested route for reconnaissance analysis only.",
+  );
+
+  expect(model.writes).toHaveLength(1);
+  expect(model.writes[0]?.body).toEqual({
+    purpose: "planning",
+    agentId: AGENT_ID,
+    primaryConfigurationId: "configuration-openrouter-medium",
+    fallbackConfigurationId: null,
+    expectedVersion: 0,
+    reason: "Use this attested route for reconnaissance analysis only.",
+  });
+  const executionEditor = page.getByLabel(
+    `${AGENT_NAME} model configuration`,
+    { exact: true },
+  );
+  await expect(executionEditor).toContainText("No model preference configured");
   await browserAudit.waitForPageApiSettlement(page);
 });
 
@@ -1083,7 +1259,7 @@ test(`${TEST_CANONICAL_ROSTER} traverses every canonical specialist's LLM settin
       );
       await expect(editor).toBeVisible();
       await expect(editor).toContainText(
-        "Model choice controls reasoning and provider routing.",
+        "Model choice controls execution-provider routing.",
       );
       await expect(editor).toContainText(
         "It does not create a missing specialist tool binding or grant execution authority.",
@@ -1091,7 +1267,7 @@ test(`${TEST_CANONICAL_ROSTER} traverses every canonical specialist's LLM settin
       await expectFragmentFocusedInViewport(editor);
       const binding = page.getByLabel(`${specialist.id} runtime bindings`, { exact: true });
       await expect(editor).toContainText("Inherited from Global");
-      await expect(editor.getByRole("heading", { name: "Provider and model", exact: true }))
+      await expect(editor.getByRole("heading", { name: "Execution provider and model", exact: true }))
         .toBeVisible();
       const provider = editor.getByRole("combobox", {
         name: `${specialist.id} provider`,
@@ -1258,6 +1434,7 @@ test(`${TEST_FAIL_CLOSED} invents no default, disables unavailable options, and 
     "agents-model-conflict-retry",
   );
   expect(model.writes[0]?.body).toEqual({
+    purpose: "execution",
     agentId: AGENT_ID,
     primaryConfigurationId: "configuration-openai-high",
     fallbackConfigurationId: "configuration-openrouter-medium",
@@ -1471,6 +1648,7 @@ test(`${TEST_GLOBAL_DEFAULT} uses the same application-owned selectors for the w
 
   expect(model.writes).toHaveLength(2);
   expect(model.writes[0]?.body).toEqual({
+    purpose: "execution",
     agentId: null,
     primaryConfigurationId: "configuration-openai-high",
     fallbackConfigurationId: "configuration-openrouter-medium",
@@ -1478,6 +1656,7 @@ test(`${TEST_GLOBAL_DEFAULT} uses the same application-owned selectors for the w
     reason: "Use this attested model as the fail-closed workspace default.",
   });
   expect(model.writes[1]?.body).toEqual({
+    purpose: "execution",
     agentId: null,
     primaryConfigurationId: "configuration-openai-medium",
     fallbackConfigurationId: "configuration-openrouter-medium",

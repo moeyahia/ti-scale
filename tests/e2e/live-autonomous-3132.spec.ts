@@ -1,4 +1,3 @@
-import type { APIResponse } from "@playwright/test";
 import {
   DISPOSABLE_AUTONOMOUS_ASSESSMENT_HOST,
   startDisposableAutonomousAssessmentTarget,
@@ -18,7 +17,9 @@ import type { BrowserAuditController } from "./support/browserAudit";
 import {
   expect,
   test,
+  type APIResponse,
   type Page,
+  type Response,
 } from "./support/playwright";
 
 const RUN_TIMEOUT_MS = 15 * 60_000;
@@ -172,7 +173,7 @@ async function launchFromRecommendedDefaults(
 ): Promise<{
   readonly created: CreatedMission;
   readonly preflight: AutonomousMissionPreflight;
-  readonly createResponse: APIResponse | import("@playwright/test").Response;
+  readonly createResponse: APIResponse | Response;
 }> {
   await page.goto(AUTONOMOUS_INTAKE_ROUTE, { waitUntil: "domcontentloaded" });
   await expect(

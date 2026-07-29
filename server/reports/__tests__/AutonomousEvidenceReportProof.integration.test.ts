@@ -671,6 +671,23 @@ describe("Autonomous production evidence-to-report proof", () => {
           readonly evidenceType: string;
         }>;
       };
+      readonly topology: {
+        readonly identitiesOutsideAuthorizedScopeOmitted: boolean;
+        readonly nodes: ReadonlyArray<{
+          readonly id: string;
+          readonly nodeType: string;
+          readonly label: string;
+          readonly labelDisclosure:
+            | "included_authorized_scope"
+            | "withheld_non_authorized_scope";
+          readonly scopeStatus: string;
+        }>;
+        readonly edges: ReadonlyArray<{
+          readonly sourceNodeId: string;
+          readonly targetNodeId: string;
+          readonly edgeType: string;
+        }>;
+      };
     };
 
     expect(markdown).toContain(`Evidence ID \`${evidenceId}\``);
@@ -685,6 +702,32 @@ describe("Autonomous production evidence-to-report proof", () => {
         evidenceType: "dns_certificate_record",
       }],
     });
+    const domainNode = json.topology.nodes.find((node) =>
+      node.nodeType === "domain"
+    );
+    const assetNode = json.topology.nodes.find((node) =>
+      node.nodeType === "asset"
+    );
+    expect(domainNode).toMatchObject({
+      label: TARGET,
+      labelDisclosure: "included_authorized_scope",
+      scopeStatus: "allowed",
+    });
+    expect(assetNode).toMatchObject({
+      label: "Asset identity withheld",
+      labelDisclosure: "withheld_non_authorized_scope",
+      scopeStatus: "unknown",
+    });
+    expect(json.topology).toMatchObject({
+      identitiesOutsideAuthorizedScopeOmitted: true,
+      edges: [{
+        sourceNodeId: domainNode?.id,
+        targetNodeId: assetNode?.id,
+        edgeType: "resolves_to",
+      }],
+    });
+    expect(markdown).toContain("Asset identity withheld");
+    expect(markdown).toContain(`node \`${assetNode?.id}\``);
     expect(markdown).not.toContain("192.0.2.10");
     expect(jsonText).not.toContain("192.0.2.10");
   });

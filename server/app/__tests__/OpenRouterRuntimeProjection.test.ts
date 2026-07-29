@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { OpenRouterReadinessRuntimeSnapshot } from "../../providers/openrouter";
-import { COMMANDER_AGENT_ID } from "../../agents";
+import {
+  COMMANDER_AGENT_ID,
+  PRODUCT_AGENT_REGISTRY,
+} from "../../agents";
 import {
   OPENROUTER_RUNTIME_PROVIDER_ID,
   projectOpenRouterRuntime,
@@ -104,9 +107,10 @@ describe("OpenRouter runtime projection", () => {
       modelConfigurationHash: "a".repeat(64),
     })]);
     expect(projection.agents).toEqual([]);
-    expect(projection.capabilityManifests?.agents.map(({ id }) => id)).toEqual(
-      [COMMANDER_AGENT_ID],
-    );
+    expect(projection.capabilityManifests?.agents.map(({ id }) => id)).toEqual([
+      COMMANDER_AGENT_ID,
+      ...PRODUCT_AGENT_REGISTRY.map(({ id }) => id),
+    ]);
     expect(projection.capabilityManifests?.agents.every((agent) =>
       agent.available === false
       && agent.capabilityIds.length === 0
@@ -142,6 +146,56 @@ describe("OpenRouter runtime projection", () => {
       reportsExactCostUsage: true,
     });
     expect(projection.capabilityManifests?.providers[0]?.healthy).toBe(true);
+  });
+
+  test("declares attested advisor compatibility for every canonical specialist without changing execution authority", () => {
+    const existing = baseline();
+    const projection = projectOpenRouterRuntime({
+      ...existing,
+      capabilityManifests: {
+        riskClasses: [],
+        evidenceKinds: [],
+        capabilities: [],
+        tools: [],
+        mcpServers: [],
+        providers: [],
+        agents: [{
+          id: "ReconScout",
+          label: "ReconScout",
+          available: true,
+          capabilityIds: ["recon"],
+          actionClassIds: ["active_host_discovery"],
+          toolIds: ["reviewed-nmap"],
+          modelRefs: [],
+        }],
+      },
+    }, snapshot(true));
+
+    const agents = projection.capabilityManifests!.agents;
+    expect(agents.filter(({ id }) => id === "ReconScout")).toHaveLength(1);
+    expect(agents.find(({ id }) => id === "ReconScout")).toMatchObject({
+      available: true,
+      capabilityIds: ["recon"],
+      actionClassIds: ["active_host_discovery"],
+      toolIds: ["reviewed-nmap"],
+      modelRefs: [{
+        providerId: "openrouter",
+        modelId: "openai/gpt-5.2",
+      }],
+    });
+    for (const specialist of PRODUCT_AGENT_REGISTRY) {
+      expect(agents.find(({ id }) => id === specialist.id)?.modelRefs)
+        .toContainEqual({
+          providerId: "openrouter",
+          modelId: "openai/gpt-5.2",
+        });
+    }
+    expect(projection.capabilityManifests!.providers[0]!.models[0])
+      .toMatchObject({
+        enforcement: "advisor_only",
+        toolCalling: false,
+        compatibleActionClassIds: [],
+      });
   });
 
   test("rejects readiness and manifest stable-ID collisions", () => {

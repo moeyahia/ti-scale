@@ -27,6 +27,13 @@ import {
 import {
   candidateLinuxPostExploitSpecificationHash,
 } from "./CandidateLinuxPostExploitSpecRegistry";
+import {
+  candidateLinuxTargetScopeMatches,
+  candidateLinuxTargetScopesCover,
+  candidateLinuxTargetScopesEqual,
+  parseCandidateLinuxTargetScope,
+  type CandidateLinuxTargetScope,
+} from "./CandidateLinuxTargetScope";
 
 export const CANDIDATE_LINUX_TRANSPORT_BINDING_MANIFEST_SCHEMA_VERSION =
   "ti-scale.candidate-linux-transport-binding-manifest.v1" as const;
@@ -89,6 +96,7 @@ export interface CandidateLinuxTransportBindingManifest {
     readonly handlerProfilePath: string;
     readonly handlerProfileSha256: string;
     readonly realTargetSupport: boolean;
+    readonly targetScope: CandidateLinuxTargetScope;
     readonly operations: readonly CandidateLinuxTransportOperation[];
   }>[];
 }
@@ -106,6 +114,7 @@ export interface CandidateLinuxTransportAttestation {
       | "disposable_local_fixture_v1"
       | "reviewed_real_candidate_v1";
     readonly realTargetSupport: boolean;
+    readonly targetScope: CandidateLinuxTargetScope;
   }>[];
   readonly boundary: CandidateLinuxTransportBindingManifest["boundary"];
   readonly grantsMissionExecution: false;
@@ -126,7 +135,29 @@ export interface CandidateLinuxTransportReadiness {
   readonly readinessScope:
     | "production_path_proof_only"
     | "reviewed_real_candidate";
-  /** True only when the current attestation can be projected into a mission. */
+  readonly activationModel:
+    | "preinstalled_exact"
+    | "run_scoped_after_discovery";
+  /**
+   * Compatibility field. It reports installed provider bytes, not current-run
+   * dispatch authority.
+   */
+  readonly candidateProcedurePresentAtLaunch: boolean;
+  readonly procedureProviderPresentAtLaunch: boolean;
+  readonly runScopedProcedureActivationPresentAtLaunch: boolean;
+  readonly candidateDispatchAuthorityPresentAtLaunch: boolean;
+  /**
+   * True when the reviewed bridge/provider bytes can be mounted for planning.
+   * This does not assert that an arbitrary mission target is supported.
+   */
+  readonly conditionalPlanningReady: boolean;
+  readonly targetScopes: readonly CandidateLinuxTargetScope[];
+  /**
+   * True only when the current attestation can be projected into mission
+   * launch/planning. For a reviewed real-candidate binding this is conditional
+   * bridge readiness, not authority to dispatch a candidate procedure. Actual
+   * dispatch still requires an exact current-run activation and attestation.
+   */
   readonly missionExecutionReady: boolean;
   readonly expiresAt: string | null;
 }
@@ -246,6 +277,7 @@ export function parseCandidateLinuxTransportBindingManifest(
       "postExploitSpecId",
       "postExploitSpecSha256",
       "realTargetSupport",
+      "targetScope",
     ], `bindings[${index}]`);
     if (
       binding.candidateClass !== "disposable_local_fixture_v1"
@@ -295,6 +327,7 @@ export function parseCandidateLinuxTransportBindingManifest(
         `bindings[${index}].handlerProfileSha256`,
       ),
       realTargetSupport: binding.realTargetSupport,
+      targetScope: parseCandidateLinuxTargetScope(binding.targetScope),
       operations: OPERATIONS,
     });
   });
@@ -1060,13 +1093,25 @@ CandidateLinuxTransportCanonicalAuthorizer {
           binding.candidateClass === "reviewed_real_candidate_v1"
           && binding.realTargetSupport === true,
       );
+    const targetScopes = Object.freeze(
+      manifest.value.bindings.map((binding) => binding.targetScope),
+    );
+    const globalMissionReady = Boolean(
+      valid
+      && reviewedRealTargetBindings
+      && targetScopes.every(
+        (scope) => scope.generalMissionReadinessEligible === true,
+      ),
+    );
     return Object.freeze({
       status: valid ? "ready" : "blocked",
       code: valid
         ? "candidate_linux_transport_ready"
         : "candidate_linux_transport_unavailable",
       reason: valid
-        ? "The exact candidate Linux transport bindings are hash-pinned and currently attested."
+        ? reviewedRealTargetBindings
+          ? "The distinct hash-pinned procedure provider and conditional bridge are installed and attested for mission launch. Each real-target dispatch remains blocked until evidence-backed discovery creates a target-free provider admission and an exact current-run activation."
+          : "The exact disposable candidate Linux transport bindings are hash-pinned and currently attested."
         : !databaseBindingsCurrent
           ? "One or more transport bindings do not resolve to an active, hash-matched candidate post-exploit specification."
           : "The candidate Linux transport bindings have not completed a current broker attestation.",
@@ -1079,12 +1124,23 @@ CandidateLinuxTransportCanonicalAuthorizer {
           bindingId: binding.bindingId,
           candidateClass: binding.candidateClass,
           realTargetSupport: binding.realTargetSupport,
+          targetScope: binding.targetScope,
         })),
       ),
       readinessScope: reviewedRealTargetBindings
         ? "reviewed_real_candidate"
         : "production_path_proof_only",
-      missionExecutionReady: Boolean(valid && reviewedRealTargetBindings),
+      activationModel: reviewedRealTargetBindings
+        ? "run_scoped_after_discovery"
+        : "preinstalled_exact",
+      candidateProcedurePresentAtLaunch: true,
+      procedureProviderPresentAtLaunch: true,
+      runScopedProcedureActivationPresentAtLaunch: false,
+      candidateDispatchAuthorityPresentAtLaunch:
+        !reviewedRealTargetBindings,
+      conditionalPlanningReady: Boolean(valid && reviewedRealTargetBindings),
+      targetScopes,
+      missionExecutionReady: globalMissionReady,
       expiresAt: valid ? this.attestation!.expiresAt : null,
     });
   }
@@ -1094,10 +1150,33 @@ CandidateLinuxTransportCanonicalAuthorizer {
    * installed and can be exercised. It does not, by itself, authorize mission
    * execution. Disposable bindings deliberately remain visible as
    * production-path proofs while only an all-real-target, reviewed binding
-   * set may be projected into mission planning or executable tool surfaces.
+   * set may be projected into mission launch and planning. For a reviewed
+   * real-candidate binding this remains a conditional capability: the
+   * distinct provider exists at launch, but no candidate-specific dispatch
+   * authority exists until its target-free admission and separate run-scoped
+   * activation are both durable.
    */
   missionExecutionReady(): boolean {
     return this.readiness().missionExecutionReady;
+  }
+
+  /**
+   * Allows the reviewed conditional bridge to be mounted without promoting an
+   * exact-target provider into global mission readiness.
+   */
+  conditionalPlanningReady(): boolean {
+    return this.readiness().conditionalPlanningReady;
+  }
+
+  missionExecutionReadyForTargets(
+    authorizedTargets: readonly string[],
+  ): boolean {
+    const readiness = this.readiness();
+    return readiness.conditionalPlanningReady
+      && candidateLinuxTargetScopesCover(
+        readiness.targetScopes,
+        authorizedTargets,
+      );
   }
 
   authorize(
@@ -1112,9 +1191,13 @@ CandidateLinuxTransportCanonicalAuthorizer {
         request.transportBindingId,
         request.postExploitSpecId,
       )
-      || !binding.operations.includes(operation)) {
+      || !binding.operations.includes(operation)
+      || !candidateLinuxTargetScopeMatches(
+        binding.targetScope,
+        request.exactTarget,
+      )) {
       throw new Error(
-        "Candidate Linux transport binding does not match the reviewed spec",
+        "Candidate Linux transport binding does not match the reviewed spec and exact target scope",
       );
     }
     const spec = this.options.database.prepare(`
@@ -1188,6 +1271,7 @@ CandidateLinuxTransportCanonicalAuthorizer {
         bindingId: binding.bindingId,
         candidateClass: binding.candidateClass,
         realTargetSupport: binding.realTargetSupport,
+        targetScope: binding.targetScope,
       }));
     const now = (this.options.now ?? (() => new Date()))().getTime();
     const observedTime = Date.parse(observedAt);
@@ -1211,12 +1295,20 @@ CandidateLinuxTransportCanonicalAuthorizer {
             "bindingId",
             "candidateClass",
             "realTargetSupport",
+            "targetScope",
           ], "binding capability");
           const expected = bindingCapabilities[index];
+          const targetScope = parseCandidateLinuxTargetScope(
+            capability.targetScope,
+          );
           return !expected
             || capability.bindingId !== expected.bindingId
             || capability.candidateClass !== expected.candidateClass
-            || capability.realTargetSupport !== expected.realTargetSupport;
+            || capability.realTargetSupport !== expected.realTargetSupport
+            || !candidateLinuxTargetScopesEqual(
+              targetScope,
+              expected.targetScope,
+            );
         } catch {
           return true;
         }

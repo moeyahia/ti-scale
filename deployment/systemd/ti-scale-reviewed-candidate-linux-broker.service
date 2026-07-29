@@ -2,11 +2,14 @@
 Description=Ti-Scale reviewed real-candidate Linux typed transport broker
 After=local-fs.target ti-scale-reviewed-candidate-linux-adapter.service
 Requires=ti-scale-reviewed-candidate-linux-adapter.service
+PartOf=ti-scale.service
 Before=ti-scale.service
-ConditionPathExists=/etc/ti-scale/reviewed-real-candidate-linux-broker.env
+AssertPathExists=/etc/ti-scale/reviewed-real-candidate-linux-broker.env
+AssertPathExists=/usr/local/libexec/ti-scale/reviewed-real-candidate-linux-broker
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
 User=ti-scale
 Group=ti-scale
 EnvironmentFile=/etc/ti-scale/reviewed-real-candidate-linux-broker.env

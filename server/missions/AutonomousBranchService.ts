@@ -601,6 +601,16 @@ export class AutonomousBranchService {
             });
           if (planningPin) pinnedModelAssignmentIds.push(planningPin.id);
         }
+        pinnedModelAssignmentIds.push(
+          ...this.modelConfigurations
+            .pinSelectedSpecialistAdvisoryAssignments({
+              specialistAgentIds:
+                currentRequest.contract.specialistAgentIds,
+              missionId,
+              runId,
+            })
+            .map(({ id }) => id),
+        );
       } catch (error) {
         if (!(error instanceof ModelConfigurationError)) throw error;
         throw new MissionApiError(

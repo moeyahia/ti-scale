@@ -70,6 +70,13 @@ import {
 import {
   parseGuidedLocalExploitIntelligenceSelection,
 } from "../local-exploit-intelligence/GuidedLocalExploitIntelligence";
+import {
+  candidateLinuxTargetScopeLabel,
+  candidateLinuxTargetScopesCover,
+} from "../autonomous-runtime/CandidateLinuxTargetScope";
+import type {
+  CandidateLinuxTransportReadiness,
+} from "../autonomous-runtime/CandidateLinuxTransportBindingRegistry";
 
 const MAX_TARGETS = 250;
 const MAX_TEXT = 20_000;
@@ -398,6 +405,8 @@ function fallbackAutonomousModelAssignments(input: {
 
 export interface MissionIntakeServiceOptions {
   readonly readRuntimeManifests?: () => RuntimeSourceManifests;
+  readonly readCandidateLinuxTransportReadiness?:
+    () => CandidateLinuxTransportReadiness | undefined;
   readonly clock?: () => Date;
   readonly modelConfigurations?: Pick<
     ModelConfigurationService,
@@ -411,10 +420,14 @@ export interface MissionIntakeServiceOptions {
 export class MissionIntakeService {
   private readonly readRuntimeManifests: () => RuntimeSourceManifests;
   private readonly clock: () => Date;
+  private readonly readCandidateLinuxTransportReadiness:
+    () => CandidateLinuxTransportReadiness | undefined;
   private readonly modelConfigurations?: MissionIntakeServiceOptions["modelConfigurations"];
 
   constructor(options: MissionIntakeServiceOptions = {}) {
     this.readRuntimeManifests = options.readRuntimeManifests ?? emptyRuntimeSourceManifests;
+    this.readCandidateLinuxTransportReadiness =
+      options.readCandidateLinuxTransportReadiness ?? (() => undefined);
     this.clock = options.clock ?? (() => new Date());
     this.modelConfigurations = options.modelConfigurations;
   }
@@ -440,7 +453,7 @@ export class MissionIntakeService {
       }),
       evidenceTypes: buildEvidenceTypeRegistry(projection),
       deliverables: buildDeliverableRegistry(projection),
-      templates: buildMissionTemplateRegistry(projection),
+      templates: buildMissionTemplateRegistry(projection, journey),
       safeStops: {
         mandatory: MANDATORY_PLATFORM_SAFE_STOPS,
         optional: OPTIONAL_MISSION_SAFE_STOPS,
@@ -568,7 +581,42 @@ export class MissionIntakeService {
     const applied = applyMissionTemplate(template, input.journey, normalizedTargets);
     assertTemplatePreservedTargetScope(normalizedTargets, applied);
     const projection = buildRuntimeCapabilityProjection(manifests);
-    const registeredTemplate = buildMissionTemplateRegistry(projection).templates[template.id];
+    const candidateLinuxReadiness =
+      this.readCandidateLinuxTransportReadiness();
+    const candidateLinuxTargetReady =
+      candidateLinuxReadiness?.status === "ready"
+      && candidateLinuxReadiness.conditionalPlanningReady === true
+      && candidateLinuxTargetScopesCover(
+        candidateLinuxReadiness.targetScopes,
+        allowedTargets.map(({ value }) => value),
+      );
+    const candidateLinuxTargetScopeMismatch =
+      candidateLinuxReadiness?.status === "ready"
+      && candidateLinuxReadiness.conditionalPlanningReady === true
+      && !candidateLinuxTargetReady;
+    const candidateLinuxMismatchReason =
+      "This action is backed by a target-scoped candidate Linux provider, "
+      + `but the authorized target does not match its reviewed scope (${
+        candidateLinuxReadiness?.targetScopes.length
+          ? candidateLinuxReadiness.targetScopes
+            .map(candidateLinuxTargetScopeLabel).join(", ")
+          : "no current scope"
+      }).`;
+    const candidateLinuxLaunchBlockingReasons:
+      Partial<Record<ActionClassId, readonly string[]>> | undefined =
+      candidateLinuxTargetScopeMismatch
+        ? Object.freeze({
+            exploit_validation: [candidateLinuxMismatchReason],
+            command_session_execution: [candidateLinuxMismatchReason],
+            data_access_impact_validation: [candidateLinuxMismatchReason],
+            privilege_escalation: [candidateLinuxMismatchReason],
+            cleanup_restoration: [candidateLinuxMismatchReason],
+          })
+        : undefined;
+    const registeredTemplate = buildMissionTemplateRegistry(
+      projection,
+      input.journey,
+    ).templates[template.id];
     const allowedTargetKinds = new Set<"domain" | "ip">(
       allowedTargets.flatMap(({ type, value }) =>
         type === "domain" ? ["domain" as const] : isIP(value) > 0 ? ["ip" as const] : []),
@@ -618,6 +666,13 @@ export class MissionIntakeService {
       ...(input.journey === "autonomous" ? { defaultAllowedActionClassIds } : {}),
       authorizedTargetIds: allowedTargets.map(({ id }) => id),
       boundedDestructiveTargetIds,
+      ...(input.journey === "autonomous"
+        && candidateLinuxLaunchBlockingReasons
+        ? {
+            additionalLaunchBlockingReasons:
+              candidateLinuxLaunchBlockingReasons,
+          }
+        : {}),
     });
     const preAuthorized = ACTION_CLASS_IDS.filter(
       (id) => policyMatrix.classes[id].policyState === "pre_authorized",
@@ -807,6 +862,13 @@ export class MissionIntakeService {
       ...(missingMaterialObjectiveActionClassIds.length > 0 ? [
         `The authorized objective explicitly requests ${materialObjectiveRequirements.map(({ label }) => label).join(", ")}, so Ti-Scale added the matching evidence-backed success criteria. Launch remains blocked because the signed action policy does not pre-authorize: ${missingMaterialObjectiveActionClassIds.join(", ")}. Select a reviewed capable contract or narrow the objective; Ti-Scale will not silently reduce this mission to reconnaissance.`,
       ] : []),
+      ...(input.journey === "autonomous"
+        && preAuthorized.some((actionClassId) =>
+          candidateLinuxLaunchBlockingReasons?.[actionClassId] !== undefined)
+        ? [
+            `${candidateLinuxMismatchReason} The draft is retained, but Autonomous preflight will not launch it against an unrelated target.`,
+          ]
+        : []),
     ];
 
     if (input.journey === "guided") {

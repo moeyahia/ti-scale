@@ -1,10 +1,16 @@
 # Release gates
 
-## Current release status
+## Product-wide validation status
 
-Ti-Scale is not release-eligible yet. The interaction manifest records known coverage gaps, the default server has no attached production execution adapter, full browser and soak evidence is incomplete, and no human release approval has been recorded.
+This checklist tracks complete product-wide validation. It does not determine
+whether Ti-Scale is the active standalone service. Current capability is
+established separately by installed runtime manifests and live readiness
+receipts. Known interaction, browser, visual, soak, and human-review gaps remain
+listed here until they are closed.
 
-The local release attestation is a digest and provenance receipt. It is intentionally not a production approval and currently reports an ineligible result.
+The local release attestation is a scoped digest and provenance receipt. It is
+not a substitute for the remaining product-wide validation or explicit human
+approval.
 
 ## Gate 1: source and build integrity
 
@@ -80,7 +86,7 @@ The manifest's `knownGaps` list must be empty.
 - No sustained memory leak in long sessions
 - Cancellation leaves no orphaned active work
 - Minimum 72-hour automated soak passes
-- Preview acceptance period completes without an unresolved release-scope defect
+- Operator acceptance period completes without an unresolved release-scope defect
 
 ## Gate 8: deployment approval
 
@@ -107,5 +113,5 @@ Record hashes for command output, browser reports, visual approvals,
 accessibility results, performance results, soak receipts, Vault
 reconciliation, and the signed release decision only through an explicitly
 approved evidence-retention mechanism. The current no-retained-copy policy
-prohibits a release archive or duplicate and therefore keeps the cutover gate
-closed.
+limits what can be claimed as durably retained release evidence; it does not
+redefine the active service or its deployment mode.

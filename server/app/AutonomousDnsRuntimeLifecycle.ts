@@ -37,6 +37,9 @@ import {
   AutonomousLocalSafeReconExecutionFactory,
   LocalAutonomousContractPlanner,
   LocalVerifiedEvidenceOutcomeEvaluator,
+  RunScopedReviewedCandidateLinuxProcedureActivationBridge,
+  RunScopedReviewedCandidateLinuxProcedureAdmission,
+  RunScopedReviewedCandidateLinuxProcedurePublisher,
   autonomousEndpointDiscoveryEnabled,
   type AutonomousExploitOutcomeObserverCompositionPort,
   type AutonomousExploitOutcomeVerifierPort,
@@ -80,6 +83,7 @@ import {
 } from "./AutonomousRuntimeComposition";
 import type { AutonomousDnsProductionConfiguration } from "./AutonomousDnsProductionConfiguration";
 import type { RuntimeProjectionInput } from "./RuntimeProjectionService";
+import { CANDIDATE_LINUX_ACTION_CLASS_IDS } from "./RuntimeReadiness";
 import {
   inspectAutonomousWindowsIdentityComposition,
   type AutonomousWindowsIdentityRuntimeBinding,
@@ -570,7 +574,7 @@ export class AutonomousDnsRuntimeLifecycle {
     }
     if (this.stopped || signal.aborted) return this.snapshot();
     const candidateLinuxTransportReady =
-      this.candidateLinuxTransport?.missionExecutionReady() === true;
+      this.candidateLinuxTransport?.conditionalPlanningReady() === true;
     const policy = createConfiguredAutonomousPlanningPolicy(
       runtimeConfig.value,
       manifest,
@@ -792,16 +796,16 @@ export class AutonomousDnsRuntimeLifecycle {
         ? { providerContext: this.options.providerPlanningContext }
         : {}),
     });
-    const runtimeComposition = inspectAutonomousRuntimeComposition({
+    const mountedRuntimeComposition = inspectAutonomousRuntimeComposition({
       projection: activation.projection,
       adapters: runtimeAdapters,
       now: activationObservedAt,
     });
-    if (runtimeComposition.status === "blocked") {
+    if (mountedRuntimeComposition.status === "blocked") {
       return await this.setBlocked(
         now,
         baseline,
-        runtimeComposition.blockers.map((blocker) => ({
+        mountedRuntimeComposition.blockers.map((blocker) => ({
           code: blocker.code,
           reason: blocker.impact,
           remediation: blocker.remediation,
@@ -809,11 +813,33 @@ export class AutonomousDnsRuntimeLifecycle {
         localActivation.status,
       );
     }
+    const globalCandidateMissionReady =
+      this.candidateLinuxTransport?.missionExecutionReady() === true;
+    const runtimeComposition: AutonomousRuntimeCompositionReadiness =
+      candidateLinuxTransportReady && !globalCandidateMissionReady
+        ? Object.freeze({
+            ...mountedRuntimeComposition,
+            readyActionClassIds: Object.freeze(
+              mountedRuntimeComposition.readyActionClassIds.filter(
+                (actionClassId) =>
+                  !CANDIDATE_LINUX_ACTION_CLASS_IDS.includes(
+                    actionClassId as typeof CANDIDATE_LINUX_ACTION_CLASS_IDS[number],
+                  ),
+              ),
+            ),
+          })
+        : mountedRuntimeComposition;
     const runtimeProjection: RuntimeProjectionInput = freeze({
       ...activation.projection,
       readiness: {
         ...activation.projection.readiness,
         autonomousRuntime: runtimeComposition,
+        ...(this.candidateLinuxTransport
+          ? {
+              candidateLinuxTransport:
+                this.candidateLinuxTransport.readiness(),
+            }
+          : {}),
       },
     });
 
@@ -839,6 +865,44 @@ export class AutonomousDnsRuntimeLifecycle {
           "exploit_validation",
         )
         ? (() => {
+            const reviewedProfile =
+              this.options.productionConfiguration.status === "loaded"
+                ? this.options.productionConfiguration
+                    .candidateLinuxReviewedProfile
+                : undefined;
+            const procedureTrustRoot =
+              this.options.productionConfiguration.status === "loaded"
+                ? this.options.productionConfiguration
+                    .candidateLinuxProcedureTrustRoot
+                : undefined;
+            const candidateProcedure =
+              candidateLinuxTransportReady
+              && reviewedProfile
+              && procedureTrustRoot
+                ? (() => {
+                    const bridge =
+                      new RunScopedReviewedCandidateLinuxProcedureActivationBridge({
+                        database: this.options.database,
+                        loadedProfile: reviewedProfile,
+                        procedureTrustRoot,
+                        now: this.now,
+                      });
+                    return Object.freeze({
+                      admission:
+                        new RunScopedReviewedCandidateLinuxProcedureAdmission({
+                          database: this.options.database,
+                          loadedProfile: reviewedProfile,
+                          now: this.now,
+                        }),
+                      activation:
+                        new RunScopedReviewedCandidateLinuxProcedurePublisher({
+                          database: this.options.database,
+                          loadedProfile: reviewedProfile,
+                          bridge,
+                        }),
+                    });
+                  })()
+                : undefined;
             return new AutonomousPostReconExploitExpansionService({
               database: this.options.database,
               materializer: exploitCandidateMaterializer,
@@ -863,16 +927,25 @@ export class AutonomousDnsRuntimeLifecycle {
               },
               ...(candidateLinuxTransportReady
                 ? {
-                    postExploitSpecRegistrar:
-                      new CurrentRunCandidateLinuxPostExploitSpecRegistrar(
-                        this.options.database,
-                        this.now,
-                      ),
                     postExploit:
                       new CandidateLinuxPostExploitPlanExtension({
                         database: this.options.database,
                         agentId: exploitConfig.agentId,
                       }),
+                    ...(candidateProcedure
+                      ? {
+                          candidateProcedureAdmission:
+                            candidateProcedure.admission,
+                          candidateProcedureActivation:
+                            candidateProcedure.activation,
+                        }
+                      : {
+                          postExploitSpecRegistrar:
+                            new CurrentRunCandidateLinuxPostExploitSpecRegistrar(
+                              this.options.database,
+                              this.now,
+                            ),
+                        }),
                   }
                 : {}),
             });

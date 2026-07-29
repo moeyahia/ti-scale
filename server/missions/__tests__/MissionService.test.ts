@@ -1418,6 +1418,19 @@ describe("Ti-Scale mission vertical slice", () => {
     try {
       migrateDatabase(database);
       const missionService = service(database);
+      const now = new Date().toISOString();
+      database.prepare(`
+        INSERT INTO agents (
+          id, role, display_name, status, provider_policy_json, tool_policy_json,
+          configuration_json, version, last_heartbeat_at, created_at, updated_at
+        ) VALUES (
+          'Commander', 'mission orchestration', 'Commander', 'available',
+          '{"defaultProvider":"xai-grok-oauth"}',
+          '{"allowedTools":[],"deniedTools":[],"approvalRequiredTools":[]}',
+          '{"userFacing":true,"productAgent":true,"orchestrationAgent":true,"executionAuthority":"none"}',
+          '2.4', ?, ?, ?
+        )
+      `).run(now, now, now);
       const preview = await missionService.preflightAutonomous(autonomousRequest());
       expect(preview.readiness.status).toBe("ready");
       expect(preview.execution.providers).toEqual([

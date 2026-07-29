@@ -30,6 +30,7 @@ import type {
   CandidateLinuxTransportBindingManifest,
   CandidateLinuxTransportRequest,
 } from "./CandidateLinuxTransportBindingRegistry";
+import type { CandidateLinuxTargetScope } from "./CandidateLinuxTargetScope";
 
 export const DISPOSABLE_LOCAL_CANDIDATE_LINUX_PROFILE_SCHEMA_VERSION =
   "ti-scale.disposable-local-candidate-linux-profile.v1" as const;
@@ -387,6 +388,7 @@ implements CandidateLinuxTransportBindingHandler {
   readonly candidateClass = "disposable_local_fixture_v1" as const;
   readonly handlerProfileSha256: string;
   readonly realTargetSupport = false as const;
+  readonly targetScope: CandidateLinuxTargetScope;
   private readonly sessions = new Map<string, SessionState>();
 
   constructor(private readonly options: Readonly<{
@@ -415,6 +417,7 @@ implements CandidateLinuxTransportBindingHandler {
     this.bindingId = profile.bindingId;
     this.postExploitSpecId = profile.postExploitSpecId;
     this.handlerProfileSha256 = options.loadedProfile.receipt.sourceSha256;
+    this.targetScope = options.binding.targetScope;
     this.restoreState();
     this.verifyProofSources();
   }

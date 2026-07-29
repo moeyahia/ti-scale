@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import type { SqliteDatabase } from "../db";
 import type { Observation } from "../intelligence-v24";
 import { ReconDigitalTwinService } from "../run-intelligence/ReconDigitalTwinService";
+import { runScopedTopologyIdentity } from "../run-intelligence/RunScopedTopologyIdentity";
 import type { TopologyNode } from "../run-intelligence/types";
 
 const NMAP_TOOL_ID = "kali:nmap-tcp-connect-service-scan" as const;
@@ -71,17 +71,6 @@ function openPort(value: unknown): ParsedOpenPort | undefined {
     service,
     version,
   };
-}
-
-function stableRunIdentity(runId: string, kind: "asset" | "service", value: string): string {
-  const digest = createHash("sha256")
-    .update(runId, "utf8")
-    .update("\0", "utf8")
-    .update(kind, "utf8")
-    .update("\0", "utf8")
-    .update(value.normalize("NFKC").toLocaleLowerCase("en-US"), "utf8")
-    .digest("hex");
-  return `${kind}:run-scoped:${digest}`;
 }
 
 /**
@@ -173,7 +162,7 @@ export class ReviewedNmapTopologyMaterializer {
       sourceTool: observation.sourceTool,
       observationIds: [observation.id],
     } as const;
-    const assetIdentity = stableRunIdentity(observation.runId, "asset", host);
+    const assetIdentity = runScopedTopologyIdentity(observation.runId, "asset", host);
     const asset = this.#topology.repository.findNodeByIdentity({
       missionId: observation.missionId,
       runId: observation.runId,
@@ -206,7 +195,7 @@ export class ReviewedNmapTopologyMaterializer {
     const edgeIds: string[] = [];
     for (const port of openPorts) {
       const endpoint = `${host}:${port.port}/${port.transport}`;
-      const serviceIdentity = stableRunIdentity(observation.runId, "service", endpoint);
+      const serviceIdentity = runScopedTopologyIdentity(observation.runId, "service", endpoint);
       const service = this.#topology.repository.findNodeByIdentity({
         missionId: observation.missionId,
         runId: observation.runId,

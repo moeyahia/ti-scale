@@ -72,7 +72,12 @@ The vault bridge projects eligible memory nodes to Markdown with YAML frontmatte
 
 ## Execution adapter boundary
 
-Planning, provider calls, specialist assignment, and tool execution are ports, not implicit capabilities of the HTTP process. The default server mounts a deterministic manual-only Guided planner whose execution port is deliberately unable to contact a target, provider, tool, or MCP server. It has no Autonomous or generic tool execution adapter. Its readiness projection reports those distinctions, and unavailable execution-dependent endpoints fail closed with a structured `503`.
+Planning, provider calls, specialist assignment, and tool execution are ports,
+not implicit capabilities of the HTTP process. Ti-Scale composes only the
+deployment-reviewed adapters named by its exact runtime configuration. Its
+readiness projection distinguishes each bounded binding from generic
+execution authority, and an absent, stale, or incompatible execution path
+fails closed with a structured `503`.
 
 An execution integration is acceptable only when it can provide fresh, typed readiness for:
 

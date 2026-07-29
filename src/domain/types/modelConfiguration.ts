@@ -27,6 +27,8 @@ export type ModelPreferenceScope =
   | "run"
   | "step";
 
+export type ModelAssignmentPurpose = "execution" | "planning";
+
 export interface ModelCatalogItem {
   readonly configurationId: string;
   readonly providerId: string;
@@ -93,6 +95,7 @@ export interface ModelConfigurationPage {
 
 export interface ModelPreference {
   readonly id: string;
+  readonly purpose: ModelAssignmentPurpose;
   readonly scopeType: ModelPreferenceScope;
   readonly scopeId: string;
   readonly agentId: string | null;
@@ -118,6 +121,7 @@ export interface ModelPreferenceMutation {
 
 export interface ModelResolution {
   readonly agentId: string;
+  readonly purpose: ModelAssignmentPurpose;
   readonly context: {
     readonly missionId: string | null;
     readonly runId: string | null;
@@ -135,7 +139,7 @@ export interface ModelResolution {
 }
 
 export interface ModelAssignmentSemantics {
-  readonly purpose: "execution";
+  readonly purpose: ModelAssignmentPurpose;
   readonly preferenceResolutionOrder:
     "global_then_agent_then_mission_then_run_then_step";
   readonly saveEffect: "future_resolutions_only";
@@ -155,7 +159,37 @@ export interface ModelResolutionResult {
   };
 }
 
+export interface PinnedModelAssignment {
+  readonly id: string;
+  readonly agentId: string;
+  readonly missionId: string | null;
+  readonly runId: string | null;
+  readonly stepId: string | null;
+  readonly purpose: ModelAssignmentPurpose;
+  readonly primaryConfigurationId: string;
+  readonly fallbackConfigurationId: string | null;
+  readonly inheritanceLevel: ModelPreferenceScope;
+  readonly pinned: true;
+  readonly resolutionReason: string;
+  readonly resolvedAt: string;
+  readonly createdAt: string;
+}
+
+export interface PinnedModelAssignmentReadback {
+  readonly assignment: PinnedModelAssignment;
+  readonly primaryConfiguration: ModelConfiguration;
+  readonly fallbackConfiguration: ModelConfiguration | null;
+}
+
+export interface RunModelAssignmentPage {
+  readonly schemaVersion: "2.4";
+  readonly activeRunPinning: "immutable";
+  readonly items: readonly PinnedModelAssignmentReadback[];
+}
+
 export interface UpdateModelPreferenceInput {
+  /** Older execution-only clients omit this; the API defaults it to execution. */
+  readonly purpose?: ModelAssignmentPurpose;
   readonly agentId: string | null;
   readonly primaryConfigurationId: string;
   readonly fallbackConfigurationId: string | null;

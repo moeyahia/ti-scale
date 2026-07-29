@@ -1,5 +1,9 @@
 import type { RuntimeProviderManifest } from "../domain";
-import { COMMANDER_AGENT_DEFINITION, COMMANDER_AGENT_ID } from "../agents";
+import {
+  COMMANDER_AGENT_DEFINITION,
+  COMMANDER_AGENT_ID,
+  PRODUCT_AGENT_REGISTRY,
+} from "../agents";
 import type { OpenRouterReadinessRuntimeSnapshot } from "../providers/openrouter";
 import type { ProviderReadiness } from "./RuntimeReadiness";
 import type { RuntimeProjectionInput } from "./RuntimeProjectionService";
@@ -76,7 +80,7 @@ function providerManifest(
   };
 }
 
-function planningAgentManifests(
+function advisoryAgentManifests(
   baseline: RuntimeProjectionInput,
   state: OpenRouterReadinessRuntimeSnapshot,
 ) {
@@ -86,37 +90,52 @@ function planningAgentManifests(
     providerId: OPENROUTER_RUNTIME_PROVIDER_ID,
     modelId: state.requestedModel,
   } as const;
-  const index = agents.findIndex(({ id }) => id === COMMANDER_AGENT_ID);
-  if (index >= 0) {
-    const current = agents[index]!;
-    if (
-      current.available
-      || current.capabilityIds.length > 0
-      || (current.actionClassIds?.length ?? 0) > 0
-      || current.toolIds.length > 0
-      || (current.deliverableIds?.length ?? 0) > 0
-    ) {
-      throw new Error(
-        "OpenRouter Commander manifest collides with executable specialist authority",
+  const advisoryIdentities = [
+    COMMANDER_AGENT_DEFINITION,
+    ...PRODUCT_AGENT_REGISTRY,
+  ] as const;
+  for (const definition of advisoryIdentities) {
+    const index = agents.findIndex(({ id }) => id === definition.id);
+    if (index >= 0) {
+      const current = agents[index]!;
+      if (
+        definition.id === COMMANDER_AGENT_ID
+        && (
+          current.available
+          || current.capabilityIds.length > 0
+          || (current.actionClassIds?.length ?? 0) > 0
+          || current.toolIds.length > 0
+          || (current.deliverableIds?.length ?? 0) > 0
+        )
+      ) {
+        throw new Error(
+          "OpenRouter Commander manifest collides with executable specialist authority",
+        );
+      }
+      const alreadyBound = current.modelRefs.some(
+        (reference) =>
+          reference.providerId === modelRef.providerId
+          && reference.modelId === modelRef.modelId,
       );
+      agents[index] = {
+        ...current,
+        ...(definition.id === COMMANDER_AGENT_ID
+          ? { actionClassIds: [] }
+          : {}),
+        modelRefs: alreadyBound
+          ? current.modelRefs
+          : [...current.modelRefs, modelRef],
+      };
+      continue;
     }
-    const alreadyBound = current.modelRefs.some(
-      (reference) =>
-        reference.providerId === modelRef.providerId
-        && reference.modelId === modelRef.modelId,
-    );
-    agents[index] = {
-      ...current,
-      actionClassIds: [],
-      modelRefs: alreadyBound ? current.modelRefs : [...current.modelRefs, modelRef],
-    };
-  } else {
-    // Commander may use the provider for planning and explanation only. It
-    // remains unavailable as an execution adapter and receives no tool,
-    // action-class, or deliverable authority.
+
+    // These rows declare model compatibility only. They deliberately remain
+    // unavailable and carry no capabilities, tools, actions, or deliverables;
+    // the provider model itself is advisor_only. Existing specialist runtime
+    // manifests retain their independently enforced execution authority.
     agents.push({
-      id: COMMANDER_AGENT_ID,
-      label: COMMANDER_AGENT_DEFINITION.displayName,
+      id: definition.id,
+      label: definition.displayName,
       available: false,
       capabilityIds: [],
       actionClassIds: [],
@@ -156,7 +175,7 @@ export function projectOpenRouterRuntime(
           capabilities: baseline.capabilityManifests?.capabilities ?? [],
           tools: baseline.capabilityManifests?.tools ?? [],
           mcpServers: baseline.capabilityManifests?.mcpServers ?? [],
-          agents: planningAgentManifests(baseline, state),
+          agents: advisoryAgentManifests(baseline, state),
           providers: [
             ...(baseline.capabilityManifests?.providers ?? []),
             manifest,

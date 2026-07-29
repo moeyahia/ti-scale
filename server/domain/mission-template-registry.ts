@@ -442,15 +442,24 @@ const templates: readonly MissionTemplate[] = [
 
 export function buildMissionTemplateRegistry(
   projection: RuntimeCapabilityProjection,
+  journey: Journey,
 ): MissionTemplateRegistry {
   const registered = Object.fromEntries(
     templates.map((template): [MissionTemplateId, RegisteredMissionTemplate] => [
       template.id,
       {
         ...template,
-        recommendedEvidenceTypeIds: template.recommendedEvidenceTypeIds.filter(
-          (id) => projection.evidenceTypes[id].availability === "supported",
-        ),
+        // Autonomous defaults may promise only evidence that the connected
+        // runtime can produce now. Guided defaults describe the proof the
+        // represented assessment should capture even when the operator will
+        // run a step manually or upload the result, so runtime unavailability
+        // remains visible metadata rather than silently erasing the contract.
+        recommendedEvidenceTypeIds:
+          journey === "autonomous"
+            ? template.recommendedEvidenceTypeIds.filter(
+                (id) => projection.evidenceTypes[id].availability === "supported",
+              )
+            : template.recommendedEvidenceTypeIds,
         unsupportedActionClassIds: template.recommendedActionClassIds.filter(
           (id) => projection.actionClasses[id].availability === "unsupported",
         ),

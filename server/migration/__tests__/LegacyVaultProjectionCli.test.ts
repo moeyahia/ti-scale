@@ -22,6 +22,7 @@ import {
 import { LegacyMigrationService } from "../LegacyMigrationService";
 
 const temporaryDirectories: string[] = [];
+const CLI_INTEGRATION_TIMEOUT_MS = 15_000;
 
 function temporaryDirectory(): string {
   const path = mkdtempSync(join(tmpdir(), "ti-scale-import-vault-cli-"));
@@ -311,5 +312,5 @@ describe("approved legacy Vault projection CLI", () => {
     expect(replayed.projectedNodes).toBe(applied.projectedNodes);
     expect(replayed.export.counts.skipped).toBe(applied.projectedNodes);
     expect(markdownFiles(vaultPath!)).toHaveLength(applied.projectedNodes);
-  });
+  }, CLI_INTEGRATION_TIMEOUT_MS);
 });

@@ -58,14 +58,14 @@ describe("Ti-Scale database foundation", () => {
       const second = migrateDatabase(database);
       const health = getDatabaseHealth(database);
 
-      expect(first.applied.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
+      expect(first.applied.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]);
       expect(second.applied).toEqual([]);
-      expect(listAppliedMigrations(database)).toHaveLength(60);
+      expect(listAppliedMigrations(database)).toHaveLength(63);
       expect(health.healthy).toBe(true);
       expect(health.journalMode).toBe("wal");
       expect(health.foreignKeys).toBe(true);
       expect(health.busyTimeoutMs).toBe(5_000);
-      expect(health.currentMigration).toBe(60);
+      expect(health.currentMigration).toBe(63);
       expect(existsSync(databasePath)).toBe(true);
       expect(database.prepare(`
         SELECT "unique" AS is_unique
@@ -194,8 +194,11 @@ describe("Ti-Scale database foundation", () => {
           { version: 58, name: "autonomous_activation_receipts" },
           { version: 59, name: "provider_advisory_disclosure_mode" },
           { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
+          { version: 61, name: "specialist_advisory_model_preferences" },
+          { version: 62, name: "run_scoped_candidate_linux_procedure_activations" },
+          { version: 63, name: "reviewed_candidate_linux_procedure_admissions" },
         ],
-        currentVersion: 60,
+        currentVersion: 63,
       });
       expect(database.prepare(`
         SELECT plan_hash, content_hash, content_hash_version
@@ -311,8 +314,11 @@ describe("Ti-Scale database foundation", () => {
           { version: 58, name: "autonomous_activation_receipts" },
           { version: 59, name: "provider_advisory_disclosure_mode" },
           { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
+          { version: 61, name: "specialist_advisory_model_preferences" },
+          { version: 62, name: "run_scoped_candidate_linux_procedure_activations" },
+          { version: 63, name: "reviewed_candidate_linux_procedure_admissions" },
         ],
-        currentVersion: 60,
+        currentVersion: 63,
       });
       expect(database.prepare(`
         SELECT id, control_plane FROM missions ORDER BY id
@@ -455,12 +461,15 @@ describe("Ti-Scale database foundation", () => {
           { version: 58, name: "autonomous_activation_receipts" },
           { version: 59, name: "provider_advisory_disclosure_mode" },
           { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
+          { version: 61, name: "specialist_advisory_model_preferences" },
+          { version: 62, name: "run_scoped_candidate_linux_procedure_activations" },
+          { version: 63, name: "reviewed_candidate_linux_procedure_admissions" },
         ],
-        currentVersion: 60,
+        currentVersion: 63,
       });
       expect(getDatabaseHealth(database)).toMatchObject({
         healthy: true,
-        currentMigration: 60,
+        currentMigration: 63,
       });
     } finally {
       database.close();
@@ -591,8 +600,11 @@ describe("Ti-Scale database foundation", () => {
           { version: 58, name: "autonomous_activation_receipts" },
           { version: 59, name: "provider_advisory_disclosure_mode" },
           { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
+          { version: 61, name: "specialist_advisory_model_preferences" },
+          { version: 62, name: "run_scoped_candidate_linux_procedure_activations" },
+          { version: 63, name: "reviewed_candidate_linux_procedure_admissions" },
         ],
-        currentVersion: 60,
+        currentVersion: 63,
       });
       expect(upgraded.prepare(`
         SELECT id, scope, engagement_id, mission_id
@@ -654,7 +666,7 @@ describe("Ti-Scale database foundation", () => {
       }]);
       expect(getDatabaseHealth(upgraded)).toMatchObject({
         healthy: true,
-        currentMigration: 60,
+        currentMigration: 63,
       });
     } finally {
       upgraded.close();
@@ -740,8 +752,11 @@ describe("Ti-Scale database foundation", () => {
           { version: 58, name: "autonomous_activation_receipts" },
           { version: 59, name: "provider_advisory_disclosure_mode" },
           { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
+          { version: 61, name: "specialist_advisory_model_preferences" },
+          { version: 62, name: "run_scoped_candidate_linux_procedure_activations" },
+          { version: 63, name: "reviewed_candidate_linux_procedure_admissions" },
         ],
-        currentVersion: 60,
+        currentVersion: 63,
       });
       expect(database.prepare(`
         SELECT kind, source_id, payload_json, status, attempt_count,
@@ -900,8 +915,11 @@ describe("Ti-Scale database foundation", () => {
           { version: 58, name: "autonomous_activation_receipts" },
           { version: 59, name: "provider_advisory_disclosure_mode" },
           { version: 60, name: "autonomous_activation_binding_subject_uniqueness" },
+          { version: 61, name: "specialist_advisory_model_preferences" },
+          { version: 62, name: "run_scoped_candidate_linux_procedure_activations" },
+          { version: 63, name: "reviewed_candidate_linux_procedure_admissions" },
         ],
-        currentVersion: 60,
+        currentVersion: 63,
       });
       expect(database.prepare(`
         SELECT DISTINCT status, decision_actor, decision_reason
@@ -1281,7 +1299,7 @@ describe("Ti-Scale database foundation", () => {
       `).run(now);
 
       const result = migrateDatabase(database);
-      expect(result.applied.map((migration) => migration.version)).toEqual([6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
+      expect(result.applied.map((migration) => migration.version)).toEqual([6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]);
       expect(database.prepare(`
         SELECT comparison_status, reason, prior_run_id, metrics_json
         FROM run_evaluation_comparisons WHERE evaluation_id = 'evaluation-legacy'
@@ -1335,7 +1353,7 @@ describe("Ti-Scale database foundation", () => {
       `).run("b".repeat(64), now);
 
       const result = migrateDatabase(database);
-      expect(result.applied.map((migration) => migration.version)).toEqual([7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
+      expect(result.applied.map((migration) => migration.version)).toEqual([7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]);
       expect(database.prepare(
         "SELECT journey, record_hash FROM audit_records WHERE id = 'audit-legacy'",
       ).get()).toEqual({ journey: "guided", record_hash: "legacy-record-hash" });

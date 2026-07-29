@@ -99,7 +99,7 @@ function validateTokenBuffer(bytes: Buffer): string {
   return bounded.toString("utf8");
 }
 
-async function withRootOperatorToken<T>(
+export async function withRootOperatorToken<T>(
   tokenPathValue: string,
   tokenTrustRootValue: string,
   operation: (token: string) => Promise<T>,

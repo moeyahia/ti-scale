@@ -102,7 +102,7 @@ can truncate prior JSON, HTML, traces, or screenshots. All Playwright and
 per-environment Web Vitals records stay inside that immutable run directory.
 The records explicitly remain ineligible for
 release attestation until the exact source and build are immutable and the
-separate interaction, visual, accessibility, soak, preview-acceptance, and
+separate interaction, visual, accessibility, soak, operator-acceptance, and
 human-signoff gates pass.
 
 Evidence publication uses one same-directory temporary inode, flushes it, and

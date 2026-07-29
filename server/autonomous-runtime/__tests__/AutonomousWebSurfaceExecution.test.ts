@@ -22,11 +22,13 @@ import {
 } from "../../local-tools";
 import { digestCanonicalJson } from "../../mcp";
 import { MemoryRepository, type MemoryNode } from "../../memory";
+import { PageCaptureService, type PageCaptureRecord } from "../../page-captures";
 import {
   ActionRepository,
   REVIEWED_LOCAL_TOOL_ACTION_SCHEMA_VERSION,
   type DurableAction,
 } from "../../orchestration";
+import { ReconDigitalTwinService } from "../../run-intelligence";
 import { EngagementWorkspaceResolver } from "../../system-capabilities";
 import { composeReviewedWebAssessmentLocalManifest } from "../../web-assessment-tools";
 import {
@@ -41,6 +43,7 @@ import {
   AUTONOMOUS_WHATWEB_ACTION_CLASS,
   AUTONOMOUS_WHATWEB_FINGERPRINT_ACTION_TYPE,
   AUTONOMOUS_WHATWEB_TOOL_ID,
+  AutonomousReconTopologyProjector,
   AutonomousWebEvidenceVerifier,
   AutonomousWebSurfaceResultAwarePort,
   AutonomousWebSurfaceExecution,
@@ -52,6 +55,7 @@ import {
   createAutonomousFullTcpBaselineManifest,
   type AutonomousWebSurfacePlanningConfiguration,
 } from "..";
+import { OperationalTruthService } from "../../intelligence-v24";
 
 const NOW = new Date("2026-07-22T18:00:00.000Z");
 const TARGET = "192.0.2.44";
@@ -153,7 +157,7 @@ class ImmediateWebAdapter implements ReviewedLocalProcessInvocationAdapter {
               length: 32,
               words: 2,
               lines: 1,
-              redirectlocation: "",
+              redirectlocation: "/login?next=/health",
             }),
           ].join("\n")
         : `${String(invocation.parameters.url)} [200 OK] HTTPServer[Apache/2.4.58] Title[Lab] HTML5`;
@@ -513,7 +517,152 @@ function fixture(fingerprints: readonly Record<string, unknown>[]) {
     }),
     contentReceipt.canonicalJson, now,
   );
+  database.prepare(`
+    INSERT INTO evidence_chain_events (
+      id, evidence_id, event_type, actor, details_json, occurred_at
+    ) VALUES ('custody-full-tcp-version-acquired', 'evidence-full-tcp-version',
+      'acquired', 'specialist:test', '{}', ?),
+      ('custody-full-tcp-version-verified', 'evidence-full-tcp-version',
+      'verified', 'autonomous-full-tcp-evidence-verifier', '{}', ?)
+  `).run(now, now);
   return { database, httpAction, whatwebAction, endpointAction };
+}
+
+function seedEndpointPageCapture(
+  database: SqliteDatabase,
+  input: Readonly<{
+    endpointEvidenceId: string;
+    endpointObservationId: string;
+  }>,
+): Readonly<{
+  capture: PageCaptureRecord;
+  artifactId: string;
+  artifactHash: string;
+  captureEvidenceId: string;
+  addCustody: () => void;
+}> {
+  const endpointUrl = "http://192.0.2.44:8080/admin";
+  const artifactId = "artifact-endpoint-admin-capture";
+  const artifactHash = createHash("sha256")
+    .update("immutable admin screenshot bytes")
+    .digest("hex");
+  const captureContentHash = createHash("sha256")
+    .update("normalized admin page content")
+    .digest("hex");
+  const captureEvidenceId = "evidence-endpoint-admin-capture";
+  database.prepare(`
+    INSERT INTO artifacts (
+      id, mission_id, run_id, step_id, action_id, artifact_type, storage_uri,
+      content_hash, byte_size, media_type, sensitivity, metadata_json,
+      created_at, journey
+    ) VALUES (?, ?, ?, 'step-endpoint', NULL, 'screenshot', ?, ?, 4096,
+      'image/png', 'private', ?, ?, 'autonomous')
+  `).run(
+    artifactId,
+    MISSION_ID,
+    RUN_ID,
+    "artifacts-v2/page-captures/admin.png",
+    artifactHash,
+    JSON.stringify({
+      source: "playwright.page.screenshot",
+      redactionState: "pending",
+    }),
+    NOW.toISOString(),
+  );
+  database.prepare(`
+    INSERT INTO evidence (
+      id, mission_id, run_id, step_id, action_id, source, acquired_at, target,
+      evidence_type, content_hash, provenance_json, confidence, sensitivity,
+      verification_state, summary, extracted_text, artifact_id, created_by,
+      created_at
+    ) VALUES (?, ?, ?, 'step-endpoint', NULL, ?, ?, ?, 'web_page_capture', ?,
+      ?, 0.99, 'private',
+      'verified', 'Verified immutable screenshot artifact', NULL, ?, ?, ?)
+  `).run(
+    captureEvidenceId,
+    MISSION_ID,
+    RUN_ID,
+    `specialist:${AGENT_ID}`,
+    NOW.toISOString(),
+    endpointUrl,
+    artifactHash,
+    JSON.stringify({
+      schemaVersion: "ti-scale.page-capture-artifact-evidence.v1",
+      method: "verified_page_capture_artifact",
+      artifactId,
+      observationId: input.endpointObservationId,
+      captureTool: "playwright.page.screenshot",
+      captureContentHash,
+      redactionState: "pending",
+    }),
+    artifactId,
+    AGENT_ID,
+    NOW.toISOString(),
+  );
+  const capture = new PageCaptureService(database, () => NOW).create({
+    missionId: MISSION_ID,
+    runId: RUN_ID,
+    planId: PLAN_ID,
+    stepId: "step-endpoint",
+    serviceNodeId: (database.prepare(`
+      SELECT id FROM topology_nodes
+      WHERE mission_id = ? AND run_id = ? AND node_type = 'endpoint'
+        AND json_extract(properties_json, '$.data.url') = ?
+    `).get(MISSION_ID, RUN_ID, endpointUrl) as { readonly id: string }).id,
+    url: endpointUrl,
+    responseStatus: 200,
+    viewport: {
+      width: 1_440,
+      height: 900,
+      deviceScaleFactor: 1,
+      isMobile: false,
+      fullPage: false,
+    },
+    screenshot: { artifactId, sha256: artifactHash },
+    contentHash: captureContentHash,
+    capturedByAgentId: AGENT_ID,
+    captureTool: "playwright.page.screenshot",
+    sensitivity: "private",
+    redactionState: "pending",
+    capturedAt: NOW.toISOString(),
+    evidenceIds: [input.endpointEvidenceId, captureEvidenceId],
+    observationIds: [input.endpointObservationId],
+  }, { type: "agent", id: AGENT_ID });
+  return {
+    capture,
+    artifactId,
+    artifactHash,
+    captureEvidenceId,
+    addCustody: () => {
+      const custody = {
+        schemaVersion: "ti-scale.page-capture-artifact-evidence.v1",
+        pageCaptureId: capture.id,
+        artifactId,
+        observationId: input.endpointObservationId,
+        captureTool: capture.captureTool,
+        contentHash: artifactHash,
+      };
+      database.prepare(`
+        INSERT INTO evidence_chain_events (
+          id, evidence_id, event_type, actor, details_json, occurred_at
+        ) VALUES (?, ?, 'acquired', ?, ?, ?),
+          (?, ?, 'verified', 'page-capture-artifact-verifier', ?, ?)
+      `).run(
+        "custody-endpoint-admin-capture-acquired",
+        captureEvidenceId,
+        AGENT_ID,
+        JSON.stringify(custody),
+        NOW.toISOString(),
+        "custody-endpoint-admin-capture-verified",
+        captureEvidenceId,
+        JSON.stringify({
+          ...custody,
+          method: "verified_page_capture_artifact",
+        }),
+        NOW.toISOString(),
+      );
+    },
+  };
 }
 
 function seedCompositeToolCall(database: SqliteDatabase, action: DurableAction): void {
@@ -875,6 +1024,37 @@ describe("Autonomous evidence-derived web execution", () => {
     `).get(item.httpAction.id) as { technical_payload_json: string };
     expect(raw.technical_payload_json).not.toContain("must-not-survive");
     expect(raw.technical_payload_json).toContain("[REDACTED]");
+    const httpGraph = new ReconDigitalTwinService(item.database)
+      .getGraph(MISSION_ID, RUN_ID);
+    expect(httpGraph.nodes.map(({ nodeType }) => nodeType).sort()).toEqual([
+      "asset",
+      "service",
+      "web_origin",
+    ]);
+    expect(httpGraph.edges.map(({ edgeType }) => edgeType).sort()).toEqual([
+      "exposes",
+      "serves_web_origin",
+    ]);
+    expect(item.database.prepare(`
+      SELECT category, value, evidence_id FROM asset_layer_observations
+      ORDER BY category
+    `).all()).toEqual([
+      {
+        category: "http.content_type",
+        value: "http://192.0.2.44:8080/ → text/html",
+        evidence_id: http.evidenceIds[0],
+      },
+      {
+        category: "http.server_header",
+        value: "http://192.0.2.44:8080/ → Apache/2.4.58",
+        evidence_id: http.evidenceIds[0],
+      },
+      {
+        category: "http.status",
+        value: "http://192.0.2.44:8080/ → 200 OK",
+        evidence_id: http.evidenceIds[0],
+      },
+    ]);
 
     item.database.prepare(`
       UPDATE actions SET status = 'succeeded', ended_at = ?, updated_at = ? WHERE id = ?
@@ -890,6 +1070,53 @@ describe("Autonomous evidence-derived web execution", () => {
     `).get(whatweb.evidenceIds[0]) as { evidence_type: string; extracted_text: string };
     expect(technology.evidence_type).toBe("service_version_fingerprint");
     expect(technology.extracted_text).toContain("Apache/2.4.58");
+    const completedGraph = new ReconDigitalTwinService(item.database)
+      .getGraph(MISSION_ID, RUN_ID);
+    expect(completedGraph.nodes.filter(({ nodeType }) =>
+      nodeType === "technology_signal")).toHaveLength(2);
+    expect(completedGraph.edges.filter(({ edgeType }) =>
+      edgeType === "has_fingerprint_signal")).toHaveLength(2);
+    expect(completedGraph.nodes.filter(({ nodeType }) =>
+      nodeType === "technology_signal").every(({ evidence: links, properties }) =>
+      links.some(({ evidenceId }) => evidenceId === whatweb.evidenceIds[0])
+      && properties.claimBoundary
+        === "verified_fingerprint_signal_not_confirmed_software")).toBeTrue();
+    expect(item.database.prepare(`
+      SELECT COUNT(*) AS count FROM asset_layer_observations
+      WHERE osi_layer = 7 AND evidence_id = ?
+    `).get(whatweb.evidenceIds[0])).toEqual({ count: 3 });
+    if (!http.observationId || !whatweb.observationId) {
+      throw new Error("Expected verified web observations");
+    }
+    const truth = new OperationalTruthService(item.database, { clock: () => NOW });
+    const projector = new AutonomousReconTopologyProjector(item.database);
+    const beforeReplay = {
+      nodes: completedGraph.nodes.length,
+      edges: completedGraph.edges.length,
+      osi: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM asset_layer_observations
+      `).get() as { readonly count: number }).count,
+    };
+    projector.project(
+      truth.repository.getObservation(http.observationId),
+      http.evidenceIds,
+    );
+    projector.project(
+      truth.repository.getObservation(whatweb.observationId),
+      whatweb.evidenceIds,
+    );
+    expect({
+      nodes: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM topology_nodes
+      `).get() as { readonly count: number }).count,
+      edges: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM topology_edges
+      `).get() as { readonly count: number }).count,
+      osi: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM asset_layer_observations
+      `).get() as { readonly count: number }).count,
+    }).toEqual(beforeReplay);
+    expect(JSON.stringify(completedGraph)).not.toContain("must-not-survive");
     expect(adapter.dispatches.map(({ toolId }) => toolId)).toEqual([
       AUTONOMOUS_HTTP_METADATA_TOOL_ID,
       AUTONOMOUS_WHATWEB_TOOL_ID,
@@ -964,9 +1191,10 @@ describe("Autonomous evidence-derived web execution", () => {
       availabilityPolicy: "required",
     });
     const evidence = item.database.prepare(`
-      SELECT evidence_type, extracted_text, provenance_json
+      SELECT id, evidence_type, extracted_text, provenance_json
       FROM evidence WHERE action_id = ? AND verification_state = 'verified'
     `).get(item.endpointAction.id) as {
+      id: string;
       evidence_type: string;
       extracted_text: string;
       provenance_json: string;
@@ -998,6 +1226,108 @@ describe("Autonomous evidence-derived web execution", () => {
       constituentToolIds: [AUTONOMOUS_ENDPOINT_DISCOVERY_TOOL_ID],
       rawProcessOutputPromoted: false,
     });
+    const endpointGraph = new ReconDigitalTwinService(item.database)
+      .getGraph(MISSION_ID, RUN_ID);
+    const endpointNodes = endpointGraph.nodes
+      .filter(({ nodeType }) => nodeType === "endpoint")
+      .sort((left, right) => left.primaryLabel.localeCompare(right.primaryLabel));
+    expect(endpointNodes).toHaveLength(2);
+    expect(endpointNodes.map(({
+      primaryLabel,
+      scopeStatus,
+      sensitivity,
+      properties,
+      evidence: links,
+    }) => ({
+      primaryLabel,
+      scopeStatus,
+      sensitivity,
+      statusCode: properties.statusCode,
+      redactionState: properties.redactionState,
+      rawProcessOutputPromoted: properties.rawProcessOutputPromoted,
+      contactAuthorityGrantedByProjection:
+        properties.contactAuthorityGrantedByProjection,
+      evidenceIds: links.map(({ evidenceId }) => evidenceId),
+    }))).toEqual([
+      {
+        primaryLabel: "http://192.0.2.44:8080/admin",
+        scopeStatus: "allowed",
+        sensitivity: "private",
+        statusCode: 200,
+        redactionState: "not_required",
+        rawProcessOutputPromoted: false,
+        contactAuthorityGrantedByProjection: false,
+        evidenceIds: [evidence.id],
+      },
+      {
+        primaryLabel: "http://192.0.2.44:8080/health",
+        scopeStatus: "allowed",
+        sensitivity: "private",
+        statusCode: 403,
+        redactionState: "redacted",
+        rawProcessOutputPromoted: false,
+        contactAuthorityGrantedByProjection: false,
+        evidenceIds: [evidence.id],
+      },
+    ]);
+    expect(endpointGraph.edges.filter(({ edgeType }) =>
+      edgeType === "exposes_endpoint")).toHaveLength(2);
+    expect(item.database.prepare(`
+      SELECT category, value, evidence_id
+      FROM asset_layer_observations
+      WHERE category = 'ffuf.endpoint_status'
+      ORDER BY value
+    `).all()).toEqual([
+      {
+        category: "ffuf.endpoint_status",
+        value: "http://192.0.2.44:8080/admin → HTTP 200",
+        evidence_id: evidence.id,
+      },
+      {
+        category: "ffuf.endpoint_status",
+        value: "http://192.0.2.44:8080/health → HTTP 403",
+        evidence_id: evidence.id,
+      },
+    ]);
+    expect(item.database.prepare(`
+      SELECT category, value, evidence_id
+      FROM asset_layer_observations
+      WHERE category = 'ffuf.fixed_dictionary_check'
+    `).get()).toEqual({
+      category: "ffuf.fixed_dictionary_check",
+      value: "http://192.0.2.44:8080/ → 14 paths checked; 2 matches",
+      evidence_id: evidence.id,
+    });
+    expect(endpointGraph.nodes.filter(({ nodeType }) =>
+      nodeType === "page_capture_artifact")).toHaveLength(0);
+    expect(JSON.stringify(endpointNodes)).not.toContain("/login?next=/health");
+    const endpointObservation = item.database.prepare(`
+      SELECT id FROM observations WHERE source_tool = ?
+    `).get(AUTONOMOUS_ENDPOINT_DISCOVERY_ACTION_TYPE) as { readonly id: string };
+    const endpointProjector = new AutonomousReconTopologyProjector(item.database);
+    const endpointCounts = {
+      nodes: endpointGraph.nodes.length,
+      edges: endpointGraph.edges.length,
+      osi: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM asset_layer_observations
+      `).get() as { readonly count: number }).count,
+    };
+    endpointProjector.project(
+      new OperationalTruthService(item.database, { clock: () => NOW })
+        .repository.getObservation(endpointObservation.id),
+      [evidence.id],
+    );
+    expect({
+      nodes: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM topology_nodes
+      `).get() as { readonly count: number }).count,
+      edges: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM topology_edges
+      `).get() as { readonly count: number }).count,
+      osi: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM asset_layer_observations
+      `).get() as { readonly count: number }).count,
+    }).toEqual(endpointCounts);
     const raw = item.database.prepare(`
       SELECT technical_payload_json FROM engagement_log_records
       WHERE action_id = ? AND record_type = 'bounded_child_process_output'
@@ -1013,6 +1343,125 @@ describe("Autonomous evidence-derived web execution", () => {
       delivery_state: "accepted",
     });
     port.close();
+  });
+
+  test("projects only exactly bound and custodied page-capture artifacts, with redaction and idempotent replay", async () => {
+    const item = fixture([{
+      port: 8080, transport: "tcp", state: "open", service: "http-alt", version: null,
+    }]);
+    const tools = manifest();
+    const adapter = new ImmediateWebAdapter(tools);
+    const endpointAction = await prepareEndpointAction(item, tools, adapter);
+    const endpoint = await executeAndVerify(
+      item.database,
+      endpointAction,
+      tools,
+      adapter,
+    );
+    if (!endpoint.observationId || endpoint.evidenceIds.length !== 1) {
+      throw new Error("Expected one verified endpoint observation and evidence record");
+    }
+    const capture = seedEndpointPageCapture(item.database, {
+      endpointEvidenceId: endpoint.evidenceIds[0]!,
+      endpointObservationId: endpoint.observationId,
+    });
+    const projector = new AutonomousReconTopologyProjector(item.database);
+    const observation = new OperationalTruthService(
+      item.database,
+      { clock: () => NOW },
+    ).repository.getObservation(endpoint.observationId);
+    const captureNodeCount = () => (item.database.prepare(`
+      SELECT COUNT(*) AS count FROM topology_nodes
+      WHERE node_type = 'page_capture_artifact'
+    `).get() as { readonly count: number }).count;
+
+    // A canonical page_capture row is not enough without a separate,
+    // artifact-bound acquired+verified custody chain.
+    projector.project(observation, endpoint.evidenceIds);
+    expect(captureNodeCount()).toBe(0);
+
+    capture.addCustody();
+    item.database.prepare(`
+      UPDATE artifacts SET content_hash = ? WHERE id = ?
+    `).run("f".repeat(64), capture.artifactId);
+    projector.project(observation, endpoint.evidenceIds);
+    expect(captureNodeCount()).toBe(0);
+
+    item.database.prepare(`
+      UPDATE artifacts SET content_hash = ? WHERE id = ?
+    `).run(capture.artifactHash, capture.artifactId);
+    item.database.prepare(`
+      UPDATE artifacts SET sensitivity = 'internal' WHERE id = ?
+    `).run(capture.artifactId);
+    projector.project(observation, endpoint.evidenceIds);
+    expect(captureNodeCount()).toBe(0);
+
+    item.database.prepare(`
+      UPDATE artifacts SET sensitivity = 'private' WHERE id = ?
+    `).run(capture.artifactId);
+    const projected = projector.project(observation, endpoint.evidenceIds);
+    expect(projected.status).toBe("materialized");
+    expect(captureNodeCount()).toBe(1);
+    const graph = new ReconDigitalTwinService(item.database)
+      .getGraph(MISSION_ID, RUN_ID);
+    const captureNode = graph.nodes.find(({ nodeType }) =>
+      nodeType === "page_capture_artifact");
+    expect(captureNode).toBeDefined();
+    expect(captureNode).toMatchObject({
+      primaryLabel: "admin · viewport capture",
+      scopeStatus: "allowed",
+      verificationState: "verified",
+      sensitivity: "private",
+      properties: {
+        pageCaptureId: capture.capture.id,
+        url: "http://192.0.2.44:8080/admin",
+        responseStatus: 200,
+        artifactId: capture.artifactId,
+        artifactContentHash: capture.artifactHash,
+        artifactRole: "viewport",
+        redactionState: "pending",
+        previewAvailable: false,
+        rawArtifactBytesPromoted: false,
+      },
+    });
+    expect(new Set(captureNode!.evidence.map(({ evidenceId }) => evidenceId)))
+      .toEqual(new Set([
+        endpoint.evidenceIds[0]!,
+        capture.captureEvidenceId,
+      ]));
+    expect(graph.edges.filter(({ edgeType }) =>
+      edgeType === "has_page_capture_artifact")).toHaveLength(1);
+    expect(item.database.prepare(`
+      SELECT category, value, evidence_id
+      FROM asset_layer_observations
+      WHERE category = 'web.page_capture_artifact'
+    `).get()).toEqual({
+      category: "web.page_capture_artifact",
+      value: "http://192.0.2.44:8080/admin → viewport capture (pending)",
+      evidence_id: capture.captureEvidenceId,
+    });
+    expect(JSON.stringify(captureNode)).not.toContain("storage_uri");
+    expect(JSON.stringify(captureNode)).not.toContain("immutable admin screenshot bytes");
+
+    const stableCounts = {
+      nodes: graph.nodes.length,
+      edges: graph.edges.length,
+      osi: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM asset_layer_observations
+      `).get() as { readonly count: number }).count,
+    };
+    projector.project(observation, endpoint.evidenceIds);
+    expect({
+      nodes: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM topology_nodes
+      `).get() as { readonly count: number }).count,
+      edges: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM topology_edges
+      `).get() as { readonly count: number }).count,
+      osi: (item.database.prepare(`
+        SELECT COUNT(*) AS count FROM asset_layer_observations
+      `).get() as { readonly count: number }).count,
+    }).toEqual(stableCounts);
   });
 
   test("blocks FFUF before adapter dispatch when the Context Pack exactly matches a verified hang hazard", async () => {

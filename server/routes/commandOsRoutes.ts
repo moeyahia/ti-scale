@@ -42,6 +42,9 @@ import {
   type ReadinessCheckProvider,
 } from "../missions";
 import type { ModelConfigurationService } from "../model-config";
+import type {
+  CandidateLinuxTransportReadiness,
+} from "../autonomous-runtime/CandidateLinuxTransportBindingRegistry";
 
 export interface CommandOsRouterDependencies {
   readonly database: SqliteDatabase;
@@ -52,6 +55,9 @@ export interface CommandOsRouterDependencies {
   /** Shared application clock for deterministic freshness and intake tests. */
   readonly clock?: () => Date;
   readonly readRuntimeManifests?: () => RuntimeSourceManifests;
+  /** Installed target-scoped candidate provider readiness for request-specific intake. */
+  readonly readCandidateLinuxTransportReadiness?:
+    () => CandidateLinuxTransportReadiness | undefined;
   /** Scoped model preferences and immutable run/step assignment resolver. */
   readonly modelConfigurations?: ModelConfigurationService;
   /** Optional post-commit projection into configured human-readable stores. */
@@ -347,6 +353,12 @@ export function createCommandOsRouter(
   const mutationAuthority = new RunMutationAuthorityGuard(dependencies.database);
   const intake = new MissionIntakeService({
     readRuntimeManifests: dependencies.readRuntimeManifests ?? emptyRuntimeSourceManifests,
+    ...(dependencies.readCandidateLinuxTransportReadiness
+      ? {
+          readCandidateLinuxTransportReadiness:
+            dependencies.readCandidateLinuxTransportReadiness,
+        }
+      : {}),
     ...(dependencies.modelConfigurations
       ? { modelConfigurations: dependencies.modelConfigurations }
       : {}),

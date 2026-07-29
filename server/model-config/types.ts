@@ -115,6 +115,7 @@ export interface StoredModelConfiguration {
 
 export interface ModelAssignmentPreference {
   readonly id: string;
+  readonly purpose: ModelAssignmentPurpose;
   readonly scopeType: ModelPreferenceScopeType;
   readonly scopeId: string;
   readonly agentId: string | null;
@@ -129,12 +130,18 @@ export interface ModelAssignmentPreference {
 }
 
 export interface ModelPreferenceFilters {
+  readonly purpose?: ModelAssignmentPurpose;
   readonly scopeType?: ModelPreferenceScopeType;
   readonly scopeId?: string;
   readonly agentId?: string;
 }
 
 export interface PutModelPreferenceInput {
+  /**
+   * Older clients omit this field and retain execution semantics. Advisory
+   * surfaces send `planning` explicitly.
+   */
+  readonly purpose?: ModelAssignmentPurpose;
   readonly scopeType: ModelPreferenceScopeType;
   readonly scopeId: string;
   readonly agentId: string | null;
@@ -152,6 +159,7 @@ export interface ModelResolutionContext {
 
 export interface ModelResolution {
   readonly agentId: string;
+  readonly purpose: ModelAssignmentPurpose;
   readonly context: ModelResolutionContext;
   readonly source: {
     readonly scopeType: ModelPreferenceScopeType;
@@ -171,7 +179,7 @@ export interface ModelResolution {
  * authority from an agent preference.
  */
 export interface ModelAssignmentSemantics {
-  readonly purpose: "execution";
+  readonly purpose: ModelAssignmentPurpose;
   readonly preferenceResolutionOrder:
     "global_then_agent_then_mission_then_run_then_step";
   readonly saveEffect: "future_resolutions_only";
@@ -188,6 +196,21 @@ export const MODEL_ASSIGNMENT_SEMANTICS: ModelAssignmentSemantics =
     activeRunPinning: "immutable",
     planningRoute: "autonomous_mission_contract",
   });
+
+export function modelAssignmentSemantics(
+  purpose: ModelAssignmentPurpose,
+): ModelAssignmentSemantics {
+  return purpose === "execution"
+    ? MODEL_ASSIGNMENT_SEMANTICS
+    : Object.freeze({
+        purpose: "planning",
+        preferenceResolutionOrder:
+          "global_then_agent_then_mission_then_run_then_step",
+        saveEffect: "future_resolutions_only",
+        activeRunPinning: "immutable",
+        planningRoute: "autonomous_mission_contract",
+      });
+}
 
 export interface PinModelAssignmentInput {
   readonly agentId: string;

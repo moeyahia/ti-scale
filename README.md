@@ -9,23 +9,29 @@ The product exposes exactly two operator journeys:
 
 ## Current status
 
-Ti-Scale is under active development and is not release-eligible yet.
+Ti-Scale is a standalone product under active development. Capability is
+reported from the reviewed adapters, manifests, and live readiness receipts
+installed for the active Ti-Scale service.
 
 | Capability | Current state |
 | --- | --- |
-| Light-mode application shell and product routes | Implemented; release interaction coverage remains incomplete |
-| Mission intake registries and contract review | Implemented; Autonomous execution remains fail-closed |
+| Light-mode application shell and product routes | Implemented; product-wide interaction validation remains incomplete |
+| Mission intake registries and contract review | Implemented; launch remains readiness-gated to reviewed execution bindings |
 | SQLite mission, event, intelligence, memory, research, and audit records | Implemented through ordered forward-only migrations; the running installation must report the exact current schema before activation |
-| Resumable semantic event stream | Implemented and covered by module tests; release soak remains pending |
+| Resumable semantic event stream | Implemented and covered by module tests; long-duration soak remains pending |
 | Evidence semantics, failure diagnosis, run metrics, and topology records | Implemented as canonical record and review surfaces |
 | Second Brain graph, memory controls, and Context Packs | Implemented; runtime use is valid only when a persisted Context Pack exists |
 | Obsidian-compatible vault connection, projection, import, conflicts, and portable export | Implemented; no vault is bundled or automatically connected |
 | Guided exact-step runtime | Reviewed network, web, Windows/identity, and pinned local ExploitDB operations are available behind represented operator decisions and fresh capability receipts; an unconfigured operation remains fail-closed |
 | Autonomous specialist and tool execution | Optional reviewed local executors are supported; an unconfigured installation remains unavailable and no assessment proof implies a complete engagement |
 | Research Lab | Human-owned policy and isolated synthetic execution are under active validation; no candidate can auto-promote or deploy |
-| Full cross-browser release gate, soak, and human approval | **Pending** |
+| Product-wide cross-browser validation, soak, and human approval | **Pending** |
 
-The default server fails closed when an execution adapter is unavailable. It returns a structured `503` response instead of simulating work or silently changing mission state. Optional OpenRouter readiness and the public NVD connector are narrow planning/read-only boundaries; neither grants Autonomous or generic tool execution.
+Ti-Scale fails closed when the execution binding required by an action is
+absent, stale, or incompatible. It returns a structured `503` response instead
+of simulating work or silently changing mission state. Optional OpenRouter
+readiness and the public NVD connector remain narrow planning/read-only
+boundaries; neither grants Autonomous or generic tool execution.
 
 ## Quick start
 

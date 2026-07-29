@@ -13,10 +13,11 @@ import { ModelConfigurationError } from "./ModelConfigurationError";
 import { ModelConfigurationRepository } from "./ModelConfigurationRepository";
 import { ModelConfigurationService } from "./ModelConfigurationService";
 import {
-  MODEL_ASSIGNMENT_SEMANTICS,
   MODEL_CONFIGURATION_SCHEMA_VERSION,
+  modelAssignmentSemantics,
 } from "./types";
 import {
+  modelAssignmentPurpose,
   modelConfigurationIdentifier,
   optionalResolutionIdentifier,
   parseModelPreferenceFilters,
@@ -224,7 +225,7 @@ export function createModelConfigurationRouter(
           request.body,
         );
         const result = idempotency.execute(
-          `model_preference.put:${input.scopeType}:${input.scopeId}:${input.agentId ?? "global"}`,
+          `model_preference.put:${input.purpose}:${input.scopeType}:${input.scopeId}:${input.agentId ?? "global"}`,
           requiredModelConfigurationIdempotencyKey(
             request.get("Idempotency-Key"),
           ),
@@ -273,31 +274,39 @@ export function createModelConfigurationRouter(
         request.query.stepId,
         "stepId",
       );
+      const purpose = modelAssignmentPurpose(request.query.purpose);
       const resolution = service.resolveOptional({
         agentId,
+        purpose,
         ...(missionId ? { missionId } : {}),
         ...(runId ? { runId } : {}),
         ...(stepId ? { stepId } : {}),
       });
       response.json({
         schemaVersion: MODEL_CONFIGURATION_SCHEMA_VERSION,
-        assignmentSemantics: MODEL_ASSIGNMENT_SEMANTICS,
+        assignmentSemantics: modelAssignmentSemantics(purpose),
         resolution,
         availability: resolution
           ? {
               status: "configured",
               agentId,
               humanMessage:
-                "This agent has a model assignment for the requested scope.",
+                purpose === "planning"
+                  ? "This agent has a separate reasoning-advisor assignment for the requested scope."
+                  : "This agent has an execution-model assignment for the requested scope.",
               remediation: null,
             }
           : {
               status: "unconfigured",
               agentId,
               humanMessage:
-                "This agent does not have a model assignment for the requested scope.",
+                purpose === "planning"
+                  ? "This agent has no optional reasoning advisor for the requested scope; its execution assignment is unchanged."
+                  : "This agent does not have an execution-model assignment for the requested scope.",
               remediation:
-                "Choose a compatible provider and model on the agent profile, or configure a global default.",
+                purpose === "planning"
+                  ? "Optionally connect and attest an advisor-only provider, then choose it on the agent profile."
+                  : "Choose a compatible provider and model on the agent profile, or configure a global default.",
             },
       });
     } catch (error) {

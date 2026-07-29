@@ -15,6 +15,8 @@ import { basename, dirname, join } from "node:path";
 import {
   assertNoBackupPayloadInventoryUnchanged,
   captureNoBackupPayloadInventory,
+  NO_BACKUP_SOURCE_SCHEMA,
+  NO_BACKUP_TARGET_SCHEMA,
   type NoBackupPayloadInventory,
 } from "../../../scripts/release/NoBackupPreviewRelease";
 import {
@@ -109,6 +111,8 @@ type CrashBoundary = BoundaryReceipt["boundary"] | "none";
 
 const SOURCE_SCHEMA = 47;
 const TARGET_SCHEMA = 60;
+const CURRENT_SOURCE_SCHEMA = NO_BACKUP_SOURCE_SCHEMA;
+const CURRENT_TARGET_SCHEMA = NO_BACKUP_TARGET_SCHEMA;
 const STANDALONE_RELEASE_OBSERVER = Object.freeze({
   schemaVersion: "ti-scale.release-observer.v1" as const,
   mode: "standalone" as const,
@@ -502,8 +506,9 @@ function assertCommonTerminalProof(
     forwardRecoveryRequired: false,
     backupPayloadInventoryUnchanged: true,
   });
-  const forwardV2 = configuration.sourceSchema === 60 &&
-    configuration.targetSchema === 60;
+  const forwardV2 =
+    configuration.sourceSchema === NO_BACKUP_SOURCE_SCHEMA &&
+    configuration.targetSchema >= configuration.sourceSchema;
   if (forwardV2) {
     expect(receipt).toMatchObject({
       schemaVersion: "ti-scale.no-backup-forward-release-receipt.v2",
@@ -635,10 +640,10 @@ describe("full no-backup controller process recovery", () => {
     expect(receipt.schemaCommitted).toBe(true);
   }, 30_000);
 
-  test("cleanly deploys an exact schema-60 source to a new schema-60 target", async () => {
-    const fixture = setupFixture("clean-60-to-60", {
-      sourceSchema: 60,
-      targetSchema: 60,
+  test("cleanly deploys exact schema 60 through the canonical current target", async () => {
+    const fixture = setupFixture("clean-60-to-current", {
+      sourceSchema: CURRENT_SOURCE_SCHEMA,
+      targetSchema: CURRENT_TARGET_SCHEMA,
     });
     const deploy = spawnController(
       fixture.configurationPath,
@@ -653,14 +658,14 @@ describe("full no-backup controller process recovery", () => {
     children.delete(deploy);
     if (exitCode !== 0) {
       throw new Error(
-        `Clean same-schema deploy exited ${String(exitCode)}: ${stderr || stdout}`,
+        `Clean current-schema deploy exited ${String(exitCode)}: ${stderr || stdout}`,
       );
     }
     expect(stdout).toBe("");
     expect(stderr).toBe("");
     expect(readJson<FixtureState>(fixture.configuration.statePath))
       .toMatchObject({
-        schema: 60,
+        schema: CURRENT_TARGET_SCHEMA,
         application: "target-application",
         staticRelease: "target-static",
         tiScale: { active: true, runtime: "target" },
@@ -674,6 +679,82 @@ describe("full no-backup controller process recovery", () => {
     );
     expect(receipt.schemaCommitted).toBe(true);
   }, 30_000);
+
+  test("resumes schema 60 to current after SIGKILL at every committed forward schema", async () => {
+    const forwardSchemas = Array.from(
+      { length: CURRENT_TARGET_SCHEMA - CURRENT_SOURCE_SCHEMA },
+      (_, index) => CURRENT_SOURCE_SCHEMA + index + 1,
+    );
+    expect(forwardSchemas).toEqual(
+      DATABASE_MIGRATIONS
+        .filter((migration) =>
+          migration.version > CURRENT_SOURCE_SCHEMA &&
+          migration.version <= CURRENT_TARGET_SCHEMA
+        )
+        .map((migration) => migration.version),
+    );
+
+    for (const intermediateSchema of forwardSchemas) {
+      const fixture = setupFixture(
+        `current-schema-${String(intermediateSchema)}`,
+        {
+          sourceSchema: CURRENT_SOURCE_SCHEMA,
+          targetSchema: CURRENT_TARGET_SCHEMA,
+        },
+      );
+      const crashBoundary =
+        `schema_${String(intermediateSchema)}` as `schema_${number}`;
+      const deploy = spawnController(
+        fixture.configurationPath,
+        "deploy",
+        crashBoundary,
+      );
+      const boundary = await killAtBoundary(
+        fixture.configuration,
+        deploy,
+      );
+      expect(boundary.boundary).toBe(crashBoundary);
+      expect(boundary.state).toMatchObject({
+        schema: intermediateSchema,
+        application: "source-application",
+        staticRelease: "source-static",
+        tiScale: { active: false, runtime: "source" },
+      });
+      expect(sqliteSchema(fixture.configuration.leaseDatabasePath))
+        .toBe(intermediateSchema);
+
+      await recoverInFreshProcess(
+        fixture.configurationPath,
+        boundary.controllerPid,
+        fixture.configuration,
+      );
+
+      expect(readJson<FixtureState>(fixture.configuration.statePath))
+        .toMatchObject({
+          schema: CURRENT_TARGET_SCHEMA,
+          application: "target-application",
+          staticRelease: "target-static",
+          tiScale: { active: true, runtime: "target" },
+        });
+      const receipt = assertCommonTerminalProof(
+        fixture.root,
+        fixture.configuration,
+        fixture.legacySha256,
+        "deployed",
+        "deployed",
+      );
+      expect(receipt.schemaCommitted).toBe(true);
+      expect(functionalReleaseTargetCommitRecord(
+        readFunctionalReleaseTransactionJournal(
+          fixture.configuration.journalDirectory,
+        ),
+      )).toBeDefined();
+
+      rmSync(fixture.root, { recursive: true, force: true });
+      const fixtureIndex = temporaryRoots.indexOf(fixture.root);
+      if (fixtureIndex >= 0) temporaryRoots.splice(fixtureIndex, 1);
+    }
+  }, 60_000);
 
   test("same-schema SIGKILL before target commitment restores source pointers", async () => {
     const fixture = setupFixture("same-schema-target-precommit", {

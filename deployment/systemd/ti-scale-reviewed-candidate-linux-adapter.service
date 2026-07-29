@@ -2,14 +2,18 @@
 Description=Ti-Scale reviewed real-candidate Linux typed adapter
 After=network-online.target
 Wants=network-online.target
+PartOf=ti-scale.service
 Before=ti-scale-reviewed-candidate-linux-broker.service
-ConditionPathExists=/etc/ti-scale/reviewed-real-candidate-linux-adapter.env
+AssertPathExists=/etc/ti-scale/reviewed-real-candidate-linux-adapter.env
+AssertPathExists=/usr/local/libexec/ti-scale/reviewed-real-candidate-linux-adapter
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
 User=ti-scale
 Group=ti-scale
 EnvironmentFile=/etc/ti-scale/reviewed-real-candidate-linux-adapter.env
+ExecStartPre=/usr/bin/install -d -m 0700 /var/lib/ti-scale-candidate-linux-reviewed/procedures
 ExecStart=/usr/local/libexec/ti-scale/reviewed-real-candidate-linux-adapter
 Restart=on-failure
 RestartSec=2s
@@ -31,7 +35,7 @@ ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectSystem=strict
-ReadWritePaths=/run/ti-scale-candidate-linux-reviewed /var/lib/ti-scale-candidate-linux-reviewed
+ReadWritePaths=/run/ti-scale-candidate-linux-reviewed /var/lib/ti-scale-candidate-linux-reviewed /var/lib/ti-scale/data
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes

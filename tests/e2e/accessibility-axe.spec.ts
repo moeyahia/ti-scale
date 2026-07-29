@@ -24,6 +24,7 @@ import {
   createRunInterventionRecoveryFixture,
   type RunInterventionRecoveryFixture,
 } from "./support/runInterventionRecoveryFixture";
+import { createRunMetricsFixture } from "./support/runMetricsFixture";
 import { createSystemFixture } from "./support/systemFixture";
 import { waitForInteractiveApplication } from "./support/applicationReadiness";
 import {
@@ -430,6 +431,93 @@ test.describe("automated WCAG 2.2 AA primary-route and material-state gate", () 
     await expect(page.getByRole("heading", { level: 2, name: "Plan change requests", exact: true })).toBeVisible();
     await waitForLoadedSurface(page);
     await assertWcagAa(page, testInfo, "versioned-plan-workspace");
+  });
+
+  test("Recon digital twin graph and accessible list have no axe A/AA violations", async ({ page }, testInfo) => {
+    const fixture = createRunMetricsFixture(
+      canonicalFixtureNamespace(testInfo, "axe-recon-digital-twin"),
+    );
+    await page.goto(
+      `/missions/${encodeURIComponent(fixture.missionId)}/runs/${encodeURIComponent(fixture.runId)}?tab=plan`,
+      { waitUntil: "domcontentloaded" },
+    );
+    await expect(page.getByRole("heading", {
+      level: 2,
+      name: "Discovered environment",
+      exact: true,
+    })).toBeVisible();
+    await waitForLoadedSurface(page);
+
+    const canvas = page.getByRole("application", {
+      name: "Recon topology with 1 nodes and 0 canonical relationships",
+      exact: true,
+    });
+    await expect(canvas).toBeVisible();
+    const descriptionId = await canvas.getAttribute("aria-describedby");
+    expect(descriptionId).toBeTruthy();
+    await expect(page.locator(`#${descriptionId}`)).toContainText(
+      "Use arrow keys to move between canonical nodes",
+    );
+    await canvas.focus();
+    await canvas.press("ArrowRight");
+    await canvas.press("0");
+    await expect(canvas).toBeFocused();
+    await expect(page.getByRole("status", {
+      name: "Topology viewport status",
+      exact: true,
+    })).toContainText("Topology viewport zoom");
+    await assertWcagAa(page, testInfo, "recon-digital-twin-graph");
+
+    const listButton = page.getByRole("button", { name: "List", exact: true });
+    await listButton.focus();
+    await listButton.press("Enter");
+    await expect(listButton).toHaveAttribute("aria-pressed", "true");
+    await expect(canvas).toHaveCount(0);
+    const table = page.getByRole("table", {
+      name: "Accessible recon topology node list",
+      exact: true,
+    });
+    await expect(table).toBeVisible();
+    await expect(table.locator("thead th")).toHaveText([
+      "Inspect",
+      "Node",
+      "Type",
+      "State",
+      "Scope",
+      "Verification",
+      "Relationships",
+    ]);
+    await expect(table.locator('tbody th[scope="row"]')).toHaveCount(1);
+    const inspect = table.getByRole("button", { name: "Inspect run-metrics-web-01", exact: true });
+    await inspect.focus();
+    await expect(inspect).toBeFocused();
+
+    const viewportWidth = page.viewportSize()?.width ?? 1440;
+    if (viewportWidth <= 768) {
+      const targets = await page
+        .getByRole("group", { name: "Topology view", exact: true })
+        .getByRole("button")
+        .or(inspect)
+        .evaluateAll((elements) => elements.map((element) => {
+          const bounds = element.getBoundingClientRect();
+          return {
+            label: element.getAttribute("aria-label") ?? element.textContent?.trim() ?? element.tagName,
+            height: bounds.height,
+            width: bounds.width,
+          };
+        }));
+      expect(targets.length).toBe(3);
+      for (const target of targets) {
+        expect(target.height, `${target.label} target height`).toBeGreaterThanOrEqual(44);
+        expect(target.width, `${target.label} target width`).toBeGreaterThanOrEqual(44);
+      }
+    }
+    const documentOverflow = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    expect(documentOverflow.scrollWidth).toBeLessThanOrEqual(documentOverflow.clientWidth + 1);
+    await assertWcagAa(page, testInfo, "recon-digital-twin-list");
   });
 
   test("Guided waiting-decision workspace has no axe A/AA violations", async ({ page }, testInfo) => {

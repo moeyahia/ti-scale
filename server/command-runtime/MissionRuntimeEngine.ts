@@ -944,12 +944,18 @@ export interface AutonomousPostReconPlanExpansionPort {
     basePlanId: string;
     completingStepId: string;
     actionId: string;
+    signal: AbortSignal;
   }>): Promise<AutonomousPostReconPlanExpansion | null>;
   bindPersistedPlanStep(input: Readonly<{
     expansion: AutonomousPostReconPlanExpansion;
     planId: string;
     stepId: string;
   }>): string;
+  ensureCandidateProcedureActivation(input: Readonly<{
+    runId: string;
+    stepId: string;
+    signal: AbortSignal;
+  }>): Promise<void>;
 }
 
 export class MissionRuntimeEngine implements ExecutionResultSink {
@@ -4140,6 +4146,50 @@ export class MissionRuntimeEngine implements ExecutionResultSink {
         const decisionId = continuation.kind === "guided_approval_to_dispatch"
           ? this.continuationText(continuation, "decisionId") ?? continuation.sourceId
           : undefined;
+        const candidateActivation = continuation.kind === "plan_ready_to_dispatch"
+          ? this.autonomousPostReconPlanExpansion
+          : undefined;
+        if (candidateActivation) {
+          // This may perform bounded filesystem I/O and a child-process
+          // attestation. It deliberately runs outside SQLite transactions.
+          // The same continuation is reclaimable after process death, and the
+          // activation key/path are deterministic for idempotent replay.
+          try {
+            await candidateActivation.ensureCandidateProcedureActivation({
+              runId: continuation.runId,
+              stepId,
+              signal: this.controller(continuation.runId).signal,
+            });
+          } catch (error) {
+            const candidate = error && typeof error === "object"
+              && "retryable" in error
+              && typeof error.retryable === "boolean"
+              ? error as Error & {
+                  readonly code?: string;
+                  readonly retryable: boolean;
+                }
+              : undefined;
+            if (!candidate) throw error;
+            throw new CommandRuntimeError(
+              candidate.retryable ? 503 : 409,
+              candidate.code
+                ?? "candidate_procedure_activation_failed",
+              candidate.message,
+              {
+                retryable: candidate.retryable,
+                category: candidate.retryable
+                  ? "dependency_unavailable"
+                  : "policy_denied",
+                humanMessage: candidate.retryable
+                  ? "Ti-Scale could not finish the bounded candidate procedure attestation yet. No target action was reserved."
+                  : "Ti-Scale rejected the candidate because its procedure custody no longer matches the represented run step. No target action was reserved.",
+                remediation: candidate.retryable
+                  ? "Ti-Scale will retry the same idempotent activation within the continuation budget."
+                  : "Review the current ScriptArtifact, observer, target, and action binding; create a new represented step after correcting the mismatch.",
+              },
+            );
+          }
+        }
         const existing = this.database.prepare(`
           SELECT id, status FROM actions
           WHERE run_id = ? AND step_id = ?
@@ -4164,6 +4214,47 @@ export class MissionRuntimeEngine implements ExecutionResultSink {
           return;
         }
         const lease = this.continuationLease(continuation.runId);
+        if (candidateActivation) {
+          // Only the Autonomous candidate gate above can wait on filesystem
+          // publication and a child-process attestation. Re-fence that path
+          // immediately before reservation without changing the established
+          // Guided exact-decision lifecycle.
+          const dispatchScope = this.database.prepare(`
+            SELECT r.current_plan_id, r.current_step_id, r.status,
+              step.plan_id, step.status AS step_status
+            FROM runs AS r
+            JOIN plan_steps AS step
+              ON step.id = ? AND step.run_id = r.id
+            WHERE r.id = ?
+          `).get(stepId, continuation.runId) as Readonly<{
+            current_plan_id: string | null;
+            current_step_id: string | null;
+            status: string;
+            plan_id: string;
+            step_status: string;
+          }> | undefined;
+          if (
+            !dispatchScope
+            || dispatchScope.status !== "running"
+            || dispatchScope.current_plan_id !== dispatchScope.plan_id
+            || dispatchScope.current_step_id !== stepId
+            || dispatchScope.step_status !== "ready"
+          ) {
+            throw new CommandRuntimeError(
+              409,
+              "candidate_activation_dispatch_scope_changed",
+              "Run, plan, or step authority changed during candidate procedure activation",
+              {
+                retryable: true,
+                category: "conflict",
+                humanMessage:
+                  "Ti-Scale finished the activation check, but the active plan changed before action reservation. No target action was started.",
+                remediation:
+                  "Reload the current run state; the durable continuation will reconcile against the active plan.",
+              },
+            );
+          }
+        }
         await this.startRepresentedAction(
           this.repository.getStepIntent(stepId),
           lease,
@@ -4425,7 +4516,25 @@ export class MissionRuntimeEngine implements ExecutionResultSink {
           basePlanId: action.plan_id,
           completingStepId: action.step_id,
           actionId,
+          signal: this.controller(continuation.runId).signal,
         })
+      : null;
+    // Evidence-driven expansion is a second planning boundary, not an
+    // exemption from the immutable launch-time model contract. Initial and
+    // recovery plans pass through this same validator/binder before they are
+    // persisted. Bind the dynamically produced exploit/session continuation
+    // here as well so every later action carries the exact run-level
+    // specialist/model receipt required by the execution boundary.
+    const boundPostReconExpansionPlan = postReconExpansion
+      ? this.bindAutonomousPlanModels(
+          action.mission_id,
+          continuation.runId,
+          validateMissionPlanDraft(
+            postReconExpansion.plan,
+            this.maxPlanSteps,
+            "autonomous",
+          ),
+        )
       : null;
     const phaseContextExists = Boolean(this.database.prepare(`
       SELECT 1 FROM memory_context_packs
@@ -4581,7 +4690,7 @@ export class MissionRuntimeEngine implements ExecutionResultSink {
           mission: this.repository.getMission(action.mission_id),
           run: this.repository.getPlanningRun(continuation.runId),
           lease,
-          plan: postReconExpansion.plan,
+          plan: boundPostReconExpansionPlan!,
           now,
           decisionTtlMs: this.decisionTtlMs,
         });
@@ -4592,7 +4701,7 @@ export class MissionRuntimeEngine implements ExecutionResultSink {
             planId: expansionPlan.planId,
             stepId: expansionPlan.firstStepId,
           });
-        const appendedStepCount = postReconExpansion.plan.steps.length;
+        const appendedStepCount = boundPostReconExpansionPlan!.steps.length;
         const appendedStepIds = (this.database.prepare(`
           SELECT id FROM plan_steps
           WHERE plan_id = ? ORDER BY ordinal
@@ -4633,7 +4742,7 @@ export class MissionRuntimeEngine implements ExecutionResultSink {
           }),
           canonicalJson({
             predecessorPlanCompleted: true,
-            newStepDependencies: postReconExpansion.plan.steps.map(
+            newStepDependencies: boundPostReconExpansionPlan!.steps.map(
               (step, ordinal) => ({
                 ordinal,
                 dependencyOrdinals: [...(step.dependencyOrdinals ?? [])],

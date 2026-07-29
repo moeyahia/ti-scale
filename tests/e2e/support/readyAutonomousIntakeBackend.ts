@@ -489,6 +489,12 @@ export async function startReadyAutonomousIntakeBackend(
       resolveExistingVaultPath: (vaultPath) => vaultPathPolicy.resolveExistingVault(vaultPath),
       projectionIntervalMs: 300_000,
     });
+    // Agent-scoped model preferences have a canonical foreign-key boundary:
+    // the live product roster must exist before ModelConfigurationRepository
+    // can accept ReconScout as a stable agent ID. Materialize this immutable
+    // fixture generation explicitly instead of depending on the later
+    // application.start() lifecycle side effect.
+    application.synchronizeRuntimeProjection(projection);
     const expectedCompatibleAgentIds = profile === "full"
       ? PRODUCT_AGENT_REGISTRY.map(({ id }) => id)
       : ["ReconScout"];

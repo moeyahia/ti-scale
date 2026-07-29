@@ -30,6 +30,8 @@ const MATERIAL_STATES = [
   "autonomous-intake-review-blocked",
   "guided-intake-scope",
   "versioned-plan-workspace",
+  "recon-digital-twin-graph",
+  "recon-digital-twin-list",
   "guided-waiting-decision",
   "evidence-review",
   "finding-review",

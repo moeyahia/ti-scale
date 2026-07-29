@@ -1,5 +1,6 @@
 import { isAbsolute } from "node:path";
 import { realpathSync } from "node:fs";
+import { notifySystemdServiceReady } from "../app/SystemdServiceReadiness";
 import { createDatabaseConnection } from "../db";
 import {
   CandidateLinuxTransportBindingRegistry,
@@ -90,13 +91,19 @@ const broker = await startCandidateLinuxTransportBroker({
   authorizer: registry,
   handlers,
 });
-
 let closing = false;
+const startupController = new AbortController();
 async function close(): Promise<void> {
   if (closing) return;
   closing = true;
-  await broker.close();
-  database.close();
+  startupController.abort(
+    new Error("Reviewed candidate Linux broker is stopping"),
+  );
+  try {
+    await broker.close();
+  } finally {
+    database.close();
+  }
 }
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
@@ -113,11 +120,22 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
   });
 }
 
+try {
+  await registry.attest(startupController.signal);
+  notifySystemdServiceReady(
+    "Reviewed candidate Linux broker and adapter attestations are ready",
+  );
+} catch (error) {
+  await close();
+  throw error;
+}
+
 process.stdout.write(`${JSON.stringify({
   status: "ready",
   candidateClass: "reviewed_real_candidate_v1",
   realTargetSupport: true,
   bindingIds: manifest.value.bindings.map(({ bindingId }) => bindingId),
+  targetScopes: manifest.value.bindings.map(({ targetScope }) => targetScope),
   socketPath: broker.socketPath,
   manifestSha256: manifest.receipt.sourceSha256,
 })}\n`);

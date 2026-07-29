@@ -1,9 +1,12 @@
 import {
   loadTrustedCandidateLinuxTransportBindingManifest,
+  loadTrustedReviewedRealCandidateLinuxProfile,
   type CandidateLinuxTransportBindingManifest,
+  type ReviewedRealCandidateLinuxProfile,
   AUTONOMOUS_DNS_SAFE_RECON_ADAPTER_ID,
   AUTONOMOUS_DNS_SAFE_RECON_TOOL_ID,
 } from "../autonomous-runtime";
+import { isAbsolute, resolve } from "node:path";
 import {
   loadPinnedLocalAuthoritativeCveCandidateCatalog,
   type LoadedPinnedLocalCveCandidateCatalog,
@@ -47,6 +50,8 @@ export const AUTONOMOUS_DNS_PRODUCTION_ENVIRONMENT = Object.freeze({
     "TI_SCALE_AUTONOMOUS_LINUX_TRANSPORT_MANIFEST_PATH",
   candidateLinuxTransportManifestSha256:
     "TI_SCALE_AUTONOMOUS_LINUX_TRANSPORT_MANIFEST_SHA256",
+  candidateLinuxProcedureTrustRoot:
+    "TI_SCALE_AUTONOMOUS_LINUX_PROCEDURE_TRUST_ROOT",
 } as const);
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -63,6 +68,11 @@ export interface LoadedAutonomousDnsProductionConfiguration {
   /** Candidate-specific typed session/privilege bindings; never a generic command transport. */
   readonly candidateLinuxTransportManifest?:
     LoadedTrustedJson<CandidateLinuxTransportBindingManifest>;
+  /** Reviewed source profile used to derive run-scoped typed candidate specs. */
+  readonly candidateLinuxReviewedProfile?:
+    LoadedTrustedJson<ReviewedRealCandidateLinuxProfile>;
+  /** Owner-controlled executable namespace populated only after plan binding. */
+  readonly candidateLinuxProcedureTrustRoot?: string;
 }
 
 export interface UnconfiguredAutonomousDnsProductionConfiguration {
@@ -85,6 +95,7 @@ function references(environment: Environment): Readonly<{
   cveCandidateCatalog?: TrustedJsonFileReference;
   exploitSandboxManifest?: TrustedJsonFileReference;
   candidateLinuxTransportManifest?: TrustedJsonFileReference;
+  candidateLinuxProcedureTrustRoot?: string;
 }> | undefined {
   const required = [
     AUTONOMOUS_DNS_PRODUCTION_ENVIRONMENT.trustRoot,
@@ -115,6 +126,7 @@ function references(environment: Environment): Readonly<{
     ...cveCatalog,
     ...exploitSandbox,
     ...candidateLinuxTransport,
+    AUTONOMOUS_DNS_PRODUCTION_ENVIRONMENT.candidateLinuxProcedureTrustRoot,
   ];
   const configured = names.filter((name) => value(environment, name)).length;
   if (configured === 0) return undefined;
@@ -216,6 +228,15 @@ function references(environment: Environment): Readonly<{
         allowedOwnerUids: [0],
         maximumBytes: 64 * 1024,
       },
+    } : {}),
+    ...(value(
+      environment,
+      AUTONOMOUS_DNS_PRODUCTION_ENVIRONMENT.candidateLinuxProcedureTrustRoot,
+    ) ? {
+      candidateLinuxProcedureTrustRoot: resolve(value(
+        environment,
+        AUTONOMOUS_DNS_PRODUCTION_ENVIRONMENT.candidateLinuxProcedureTrustRoot,
+      )!),
     } : {}),
   });
 }
@@ -319,6 +340,63 @@ export function loadProductionAutonomousDnsConfiguration(
           configured.candidateLinuxTransportManifest,
         )
       : undefined;
+  const reviewedBindings = candidateLinuxTransportManifest?.value.bindings
+    .filter(({ candidateClass }) =>
+      candidateClass === "reviewed_real_candidate_v1") ?? [];
+  if (reviewedBindings.length > 1) {
+    throw new Error(
+      "Autonomous Linux transport may expose only one reviewed real-candidate source profile",
+    );
+  }
+  if (
+    reviewedBindings.length === 1
+    && !configured.candidateLinuxProcedureTrustRoot
+  ) {
+    throw new Error(
+      "Reviewed real-candidate Linux transport requires a run-scoped procedure trust root",
+    );
+  }
+  if (
+    configured.candidateLinuxProcedureTrustRoot
+    && (
+      !isAbsolute(configured.candidateLinuxProcedureTrustRoot)
+      || configured.candidateLinuxProcedureTrustRoot === resolve("/")
+    )
+  ) {
+    throw new Error(
+      "Autonomous Linux procedure trust root must be one non-root absolute path",
+    );
+  }
+  const reviewedBinding = reviewedBindings[0];
+  const candidateLinuxReviewedProfile = reviewedBinding
+    && candidateLinuxTransportManifest
+    ? loadTrustedReviewedRealCandidateLinuxProfile({
+        path: reviewedBinding.handlerProfilePath,
+        trustRoot: candidateLinuxTransportManifest.receipt.trustRoot,
+        expectedSha256: reviewedBinding.handlerProfileSha256,
+        allowedOwnerUids:
+          candidateLinuxTransportManifest.receipt.ownerUid === 0
+            ? [0]
+            : [0, candidateLinuxTransportManifest.receipt.ownerUid],
+        maximumBytes: 64 * 1_024,
+      })
+    : undefined;
+  if (
+    reviewedBinding
+    && (
+      !candidateLinuxReviewedProfile
+      || candidateLinuxReviewedProfile.value.bindingId
+        !== reviewedBinding.bindingId
+      || candidateLinuxReviewedProfile.value.postExploitSpec.id
+        !== reviewedBinding.postExploitSpecId
+      || candidateLinuxReviewedProfile.value.postExploitSpec.expectedSha256
+        !== reviewedBinding.postExploitSpecSha256
+    )
+  ) {
+    throw new Error(
+      "Reviewed real-candidate source profile differs from its transport manifest binding",
+    );
+  }
   return Object.freeze({
     status: "loaded",
     runtime,
@@ -327,6 +405,15 @@ export function loadProductionAutonomousDnsConfiguration(
     ...(exploitSandboxManifest ? { exploitSandboxManifest } : {}),
     ...(candidateLinuxTransportManifest
       ? { candidateLinuxTransportManifest }
+      : {}),
+    ...(candidateLinuxReviewedProfile
+      ? { candidateLinuxReviewedProfile }
+      : {}),
+    ...(configured.candidateLinuxProcedureTrustRoot
+      ? {
+          candidateLinuxProcedureTrustRoot:
+            configured.candidateLinuxProcedureTrustRoot,
+        }
       : {}),
   });
 }

@@ -156,6 +156,20 @@
       "fixture": "plan change"
     },
     {
+      "id": "recon-digital-twin-graph",
+      "route": "/missions/:missionId/runs/:runId?tab=plan",
+      "surface": "Recon digital twin graph",
+      "kind": "material",
+      "fixture": "canonical run-scoped topology"
+    },
+    {
+      "id": "recon-digital-twin-list",
+      "route": "/missions/:missionId/runs/:runId?tab=plan",
+      "surface": "Recon digital twin accessible list",
+      "kind": "material",
+      "fixture": "canonical run-scoped topology"
+    },
+    {
       "id": "guided-waiting-decision",
       "route": "/guided/:missionId",
       "surface": "Guided waiting decision",

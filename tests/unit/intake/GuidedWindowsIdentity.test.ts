@@ -152,7 +152,7 @@ describe("Guided Windows and identity intake", () => {
     })).toThrow("does not support credential_reference");
   });
 
-  test("enables credential-reference modes only when the credential-only runtime binding is ready", () => {
+  test("enables private-reference options only when the credential-resolver runtime binding is ready", () => {
     const registry = service([
       "kali:smbclient-share-list",
       "kali:nxc-smb-summary",
@@ -164,7 +164,7 @@ describe("Guided Windows and identity intake", () => {
     expect(registry.modes.find(({ id }) => id === "smb_identity_summary"))
       .toMatchObject({
         readiness: "ready",
-        readyAuthenticationModes: ["credential_reference"],
+        readyAuthenticationModes: ["anonymous", "credential_reference"],
       });
   });
 });

@@ -55,6 +55,17 @@ export {
   type CandidateLinuxTransportReadiness,
 } from "./CandidateLinuxTransportBindingRegistry";
 export {
+  CANDIDATE_LINUX_TARGET_SCOPE_SCHEMA_VERSION,
+  allAuthorizedIpCandidateLinuxTargetScope,
+  candidateLinuxTargetScopeLabel,
+  candidateLinuxTargetScopeMatches,
+  candidateLinuxTargetScopesCover,
+  candidateLinuxTargetScopesEqual,
+  exactCandidateLinuxTargetScope,
+  parseCandidateLinuxTargetScope,
+  type CandidateLinuxTargetScope,
+} from "./CandidateLinuxTargetScope";
+export {
   startCandidateLinuxTransportBroker,
   type CandidateLinuxTransportBindingHandler,
   type CandidateLinuxTransportBrokerHandle,
@@ -69,6 +80,7 @@ export {
 export {
   REVIEWED_REAL_CANDIDATE_LINUX_ADAPTER_ATTESTATION_SCHEMA_VERSION,
   REVIEWED_REAL_CANDIDATE_LINUX_ADAPTER_PROTOCOL_VERSION,
+  REVIEWED_REAL_CANDIDATE_LINUX_PROCEDURE_PROTOCOL_VERSION,
   REVIEWED_REAL_CANDIDATE_LINUX_PROFILE_SCHEMA_VERSION,
   ReviewedRealCandidateLinuxTransportHandler,
   loadTrustedReviewedRealCandidateLinuxProfile,
@@ -81,6 +93,32 @@ export {
   type ReviewedRealCandidateLinuxAdapterImplementation,
   type ReviewedRealCandidateLinuxProfile,
 } from "./ReviewedRealCandidateLinuxTransport";
+export {
+  REVIEWED_REAL_CANDIDATE_LINUX_PROCEDURE_ATTESTATION_SCHEMA_VERSION,
+  REVIEWED_REAL_CANDIDATE_LINUX_PROCEDURE_CONFORMANCE_SCHEMA_VERSION,
+  HashPinnedStdioReviewedRealCandidateLinuxProcedureProvider,
+  ProcedureBackedReviewedRealCandidateLinuxAdapterImplementation,
+  type ReviewedRealCandidateLinuxProcedureAttestation,
+  type ReviewedRealCandidateLinuxProcedureConformance,
+  type ReviewedRealCandidateLinuxProcedureProvider,
+} from "./ReviewedRealCandidateLinuxProcedureAdapter";
+export {
+  RUN_SCOPED_REVIEWED_CANDIDATE_LINUX_BRIDGE_READINESS_SCHEMA_VERSION,
+  RUN_SCOPED_REVIEWED_CANDIDATE_LINUX_PROCEDURE_ACTIVATION_SCHEMA_VERSION,
+  RUN_SCOPED_REVIEWED_CANDIDATE_LINUX_PROCEDURE_ATTESTATION_SCHEMA_VERSION,
+  RUN_SCOPED_REVIEWED_CANDIDATE_LINUX_PROCEDURE_ADMISSION_SCHEMA_VERSION,
+  RunScopedReviewedCandidateLinuxProcedureActivationBridge,
+  RunScopedReviewedCandidateLinuxProcedureActivationError,
+  RunScopedReviewedCandidateLinuxProcedureAdmission,
+  RunScopedReviewedCandidateLinuxProcedurePublisher,
+  RunScopedReviewedCandidateLinuxSpecRegistrar,
+  type RunScopedReviewedCandidateLinuxBridgeReadiness,
+  type RunScopedReviewedCandidateLinuxExecutionReadiness,
+  type RunScopedReviewedCandidateLinuxProcedureActivation,
+  type RunScopedReviewedCandidateLinuxProcedureActivationInput,
+  type RunScopedReviewedCandidateLinuxProcedureActivationResult,
+  type RunScopedReviewedCandidateLinuxProcedureAdmissionRecord,
+} from "./RunScopedReviewedCandidateLinuxProcedureActivation";
 export {
   DISPOSABLE_CANDIDATE_LINUX_PROOF_SEED,
   seedDisposableCandidateLinuxProof,
@@ -128,6 +166,11 @@ export {
   type AutonomousDnsRecordType,
   type AutonomousDnsSafeReconConfiguration,
 } from "./AutonomousDnsSafeRecon";
+export {
+  AUTONOMOUS_RECON_TOPOLOGY_PROJECTOR_SCHEMA_VERSION,
+  AutonomousReconTopologyProjector,
+  type AutonomousReconTopologyProjection,
+} from "./AutonomousReconTopologyProjector";
 export {
   AUTONOMOUS_DNS_EVIDENCE_VERIFIER_SCHEMA_VERSION,
   AutonomousDnsEvidenceVerifier,
@@ -323,6 +366,8 @@ export {
   type AutonomousPostReconPlanExpansion,
   type AutonomousPostReconPlanExpansionPort,
   type AutonomousPostReconPlanExpansionRequest,
+  type AutonomousPostReconCandidateProcedureAdmissionPort,
+  type AutonomousPostReconCandidateProcedureActivationPort,
   type AutonomousPostExploitPlanExtension,
   type AutonomousPostExploitPlanExtensionPort,
   type AutonomousPostExploitSpecRegistrarPort,

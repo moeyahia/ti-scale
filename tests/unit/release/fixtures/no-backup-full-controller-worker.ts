@@ -13,6 +13,7 @@ import {
 import {
   assertNoBackupPayloadInventoryUnchanged,
   captureNoBackupPayloadInventory,
+  NO_BACKUP_SOURCE_SCHEMA,
   type NoBackupPayloadInventory,
 } from "../../../../scripts/release/NoBackupPreviewRelease";
 import {
@@ -155,7 +156,8 @@ const STANDALONE_RELEASE_OBSERVER = Object.freeze({
   scope: "ti_scale_only" as const,
   externalServiceDependency: "none" as const,
 });
-const FORWARD_V2 = SOURCE_SCHEMA === 60 && TARGET_SCHEMA === 60;
+const FORWARD_V2 = SOURCE_SCHEMA === NO_BACKUP_SOURCE_SCHEMA &&
+  TARGET_SCHEMA >= SOURCE_SCHEMA;
 if (
   !Number.isSafeInteger(SOURCE_SCHEMA) ||
   !Number.isSafeInteger(TARGET_SCHEMA) ||

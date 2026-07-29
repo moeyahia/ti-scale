@@ -65,7 +65,6 @@ same command locally when deeper diagnosis is required.
 
 Because the current operator policy forbids retained copies and archives, these
 workflows are execution gates rather than durable evidence archives. Passing
-either workflow is not release approval. Production eligibility remains closed
-until the complete release gate, soak period, evidence-retention policy, and
-explicit human sign-off described in [Release gates](release-gates.md) are
-satisfied.
+either workflow proves only the gates executed in that run. The soak period,
+evidence-retention policy, and explicit human review described in
+[Release gates](release-gates.md) remain separate validation work.

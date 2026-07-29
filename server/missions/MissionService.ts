@@ -49,6 +49,7 @@ type AutonomousModelConfigurationBoundary = Pick<
   ModelConfigurationService,
   "validateAutonomousPlanningSelection"
   | "pinExactAutonomousPlanningSelection"
+  | "pinSelectedSpecialistAdvisoryAssignments"
 >>;
 
 function missionIntakeQuery(request: MissionCreateRequest): string {
@@ -1000,6 +1001,15 @@ export class MissionService {
                   },
                 );
                 if (planningPin) pinned.push(planningPin);
+              }
+              const pinSpecialistAdvisors =
+                this.modelConfigurations!
+                  .pinSelectedSpecialistAdvisoryAssignments;
+              if (pinSpecialistAdvisors) {
+                pinned.push(...pinSpecialistAdvisors.call(
+                  this.modelConfigurations,
+                  { specialistAgentIds, missionId, runId },
+                ));
               }
               return pinned.map(({ id }) => id);
             } catch (error) {

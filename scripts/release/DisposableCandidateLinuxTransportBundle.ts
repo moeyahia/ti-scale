@@ -11,6 +11,9 @@ import {
   type CandidateLinuxTransportBindingManifest,
   type DisposableLocalCandidateLinuxProfile,
 } from "../../server/autonomous-runtime";
+import {
+  exactCandidateLinuxTargetScope,
+} from "../../server/autonomous-runtime/CandidateLinuxTargetScope";
 
 const OPERATIONS = Object.freeze([
   "open",
@@ -141,6 +144,7 @@ export function createDisposableCandidateLinuxTransportBundle(
       handlerProfilePath: input.handlerProfilePath,
       handlerProfileSha256: profileSha256,
       realTargetSupport: false,
+      targetScope: exactCandidateLinuxTargetScope(input.exactTarget),
       operations: OPERATIONS,
     }],
   });

@@ -208,7 +208,7 @@ describe("runtime-derived registries", () => {
     );
   });
 
-  test("keeps unsupported evidence inspectable but removes it from runtime recommendations", () => {
+  test("filters Autonomous evidence by runtime while retaining Guided manual-capture requirements", () => {
     const manifests = completeRuntimeManifests();
     const supportedEvidenceTypeIds = [
       "asset_discovery_proof",
@@ -226,16 +226,37 @@ describe("runtime-derived registries", () => {
       })),
     });
     const evidence = buildEvidenceTypeRegistry(projection);
-    const template = buildMissionTemplateRegistry(projection).templates.safe_recon;
+    const autonomousTemplate = buildMissionTemplateRegistry(
+      projection,
+      "autonomous",
+    ).templates.safe_recon;
+    const guidedTemplate = buildMissionTemplateRegistry(
+      projection,
+      "guided",
+    ).templates.safe_recon;
+    const safeReconDefinition = MISSION_TEMPLATES.find(
+      ({ id }) => id === "safe_recon",
+    );
+    if (!safeReconDefinition) {
+      throw new Error("Canonical Safe Recon template is missing");
+    }
 
-    expect(template.recommendedEvidenceTypeIds).toEqual(supportedEvidenceTypeIds);
-    expect(template.unavailableEvidenceTypeIds).toEqual([
+    expect(autonomousTemplate.recommendedEvidenceTypeIds).toEqual(
+      supportedEvidenceTypeIds,
+    );
+    expect(guidedTemplate.recommendedEvidenceTypeIds).toEqual(
+      safeReconDefinition.recommendedEvidenceTypeIds,
+    );
+    expect(autonomousTemplate.unavailableEvidenceTypeIds).toEqual([
       "service_version_fingerprint",
       "http_exchange",
       "endpoint_discovery_result",
       "os_platform_fingerprint",
       "dns_certificate_record",
     ]);
+    expect(guidedTemplate.unavailableEvidenceTypeIds).toEqual(
+      autonomousTemplate.unavailableEvidenceTypeIds,
+    );
     expect(Object.keys(evidence.types)).toHaveLength(EVIDENCE_TYPE_IDS.length);
     expect(evidence.types.os_platform_fingerprint.capability.availability).toBe("unsupported");
     expect(evidence.types.os_platform_fingerprint.immutableHashRequired).toBe(true);
@@ -448,7 +469,7 @@ describe("action policy registry", () => {
 describe("versioned mission templates", () => {
   test("derive readiness from runtime capabilities and never supply target scope", () => {
     const projection = buildRuntimeCapabilityProjection(completeRuntimeManifests());
-    const registry = buildMissionTemplateRegistry(projection);
+    const registry = buildMissionTemplateRegistry(projection, "guided");
     const template = registry.templates.external_web_assessment;
     const suppliedTargets = [
       { id: "target-1", type: "url" as const, value: "https://approved.example.test" },

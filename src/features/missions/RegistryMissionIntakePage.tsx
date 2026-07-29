@@ -240,9 +240,17 @@ function selectedOrDefault(explicit: readonly string[] | undefined, defaults: re
   return explicit ?? defaults;
 }
 
-function evidenceAvailabilityExplanation(item: IntakeEvidenceType): string {
+function evidenceAvailabilityExplanation(
+  item: IntakeEvidenceType,
+  journey: Journey,
+): string {
   if (item.capability.availability === "supported") {
     return "Supported now by the connected runtime and eligible for recommended defaults.";
+  }
+  if (journey === "guided") {
+    return item.capability.availability === "unavailable"
+      ? "A producer is registered but is not ready now. Guided keeps the proof requirement visible and selected so the operator can capture or upload the result."
+      : "No connected runtime producer declares this type. Guided keeps the proof requirement selected so a manual result can still be captured and attributed.";
   }
   if (item.capability.availability === "unavailable") {
     return "A producer is registered but is not ready now. Recommended defaults leave this unchecked until readiness returns.";
@@ -1401,7 +1409,7 @@ export function RegistryMissionIntakePage({ journey }: { readonly journey: Journ
               />
             ))}</div></details>
             <details className="os-advanced-section"><summary>Final deliverables · {deliverableIds.length} selected</summary><div className="os-registry-checklist">{Object.values(registry.data.deliverables.deliverables).map((item) => <label className="os-check-field" key={item.id}><input type="checkbox" checked={deliverableIds.includes(item.id)} onChange={(event) => set("deliverableIds", listToggle(deliverableIds, item.id, event.target.checked))} /><span><strong>{item.label}</strong><small>{item.purpose}</small><small>{item.capability.availability} · {item.formats.join(", ")}</small></span></label>)}</div></details>
-            <details className="os-advanced-section"><summary>Evidence requirements · {evidenceTypeIds.length} selected</summary><div className="os-registry-checklist"><p className="os-policy-note">Recommended defaults select only evidence the connected runtime can produce now. Unsupported types remain visible, and mission preferences never weaken the immutable evidence required to verify a finding.</p>{Object.values(registry.data.evidenceTypes.types).map((item) => <label className="os-check-field" key={item.id}><input type="checkbox" checked={evidenceTypeIds.includes(item.id)} onChange={(event) => set("evidenceTypeIds", listToggle(evidenceTypeIds, item.id, event.target.checked))} /><span><strong>{item.label}</strong><small>{item.proves}</small><small>{evidenceAvailabilityExplanation(item)}</small><small>Integrity: hash {item.immutableHashRequired ? "required" : "optional"} · chain of custody {item.chainOfCustodyRequired ? "required" : "optional"}</small></span></label>)}</div></details>
+            <details className="os-advanced-section"><summary>Evidence requirements · {evidenceTypeIds.length} selected</summary><div className="os-registry-checklist"><p className="os-policy-note">{isAutonomous ? "Recommended defaults select only evidence the connected runtime can produce now. Unsupported types remain visible" : "Recommended defaults preserve the attributable proof this Guided assessment should capture, including results the operator may run or upload manually. Runtime availability remains visible"}, and mission preferences never weaken the immutable evidence required to verify a finding.</p>{Object.values(registry.data.evidenceTypes.types).map((item) => <label className="os-check-field" key={item.id}><input type="checkbox" checked={evidenceTypeIds.includes(item.id)} onChange={(event) => set("evidenceTypeIds", listToggle(evidenceTypeIds, item.id, event.target.checked))} /><span><strong>{item.label}</strong><small>{item.proves}</small><small>{evidenceAvailabilityExplanation(item, journey)}</small><small>Integrity: hash {item.immutableHashRequired ? "required" : "optional"} · chain of custody {item.chainOfCustodyRequired ? "required" : "optional"}</small></span></label>)}</div></details>
             <details className="os-advanced-section"><summary>Safe-stop behavior · {optionalSafeStopIds.length} mission stops</summary><div className="os-registry-checklist"><p className="os-policy-note">A safe stop preserves the checkpoint and explains why the mission cannot continue safely. Mandatory platform stops cannot be removed.</p>{registry.data.safeStops.optional.map((item) => <label className="os-check-field" key={item.id}><input type="checkbox" checked={optionalSafeStopIds.includes(item.id)} onChange={(event) => set("optionalSafeStopIds", listToggle(optionalSafeStopIds, item.id, event.target.checked))} /><span><strong>{item.label}</strong><small>{item.explanation}</small></span></label>)}<h3>Always enforced</h3>{registry.data.safeStops.mandatory.map((item) => <div className="os-mandatory-stop" key={item.id}><StatusPill status="enforced" /><span><strong>{item.label}</strong><small>{item.explanation}</small></span></div>)}</div></details>
           </fieldset>}
 
